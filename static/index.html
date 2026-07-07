@@ -1,0 +1,2493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DeepSeeGo — Earth observation explorer</title>
+<meta name="description" content="DeepSeeGo by Vinamravigyan Technologies Private Limited — explore settlement growth, water, land cover, buildings and terrain across India." />
+
+
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+
+<style>
+:root{
+  --paper:#F7F8F5;        /* app background */
+  --panel:#FFFFFF;        /* cards / sidebar */
+  --ink:#14211C;          /* primary text — green-black */
+  --deep:#0B5A49;         /* DeepSee teal (brand) */
+  --signal:#E4572E;       /* built-up orange (actions / accents) */
+  --line:#DCE2DC;         /* hairlines */
+  --dim:#5C6B63;          /* secondary text */
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none !important}
+html,body{height:100%}
+body{
+  font-family:var(--sans);color:var(--ink);background:var(--paper);
+  display:flex;flex-direction:column;overflow:hidden;
+}
+
+/* ---------- header / branding ---------- */
+header{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:10px 16px;background:var(--panel);border-bottom:2px solid var(--ink);
+  z-index:1200;
+}
+.brand{display:flex;flex-direction:column;line-height:1.05}
+.brand .wordmark{
+  font-weight:700;font-size:26px;letter-spacing:-0.5px;
+}
+.wordmark .see{color:var(--deep)}
+.wordmark .goa{color:var(--signal)}
+.brand .byline{
+  font-family:var(--mono);font-size:11px;color:#000;font-weight:700;
+  text-transform:uppercase;letter-spacing:.06em;margin-top:3px;
+}
+.byline .bb{font-style:italic;font-weight:500;text-transform:lowercase}
+#brandLogo{height:44px;width:44px;object-fit:contain;flex-shrink:0}
+.wordmark .tagline{
+  font-size:13px;font-weight:500;font-style:italic;color:var(--dim);
+  margin-left:10px;letter-spacing:0;
+}
+
+/* ---------- layout ---------- */
+#shell{flex:1;display:flex;min-height:0;position:relative}
+aside{
+  width:420px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--line);
+  overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:16px;
+}
+#map{flex:1;min-width:0;background:#E8ECE7}
+
+section h2{
+  font-size:12px;font-family:var(--mono);font-weight:700;color:var(--ink);
+  text-transform:uppercase;letter-spacing:.12em;margin-bottom:8px;
+  border-bottom:1px solid var(--line);padding-bottom:4px;
+}
+label.fld{display:block;font-size:12px;color:var(--dim);margin:8px 0 3px}
+select,input[type=number],input[type=text]{
+  width:100%;padding:7px 8px;font-family:var(--mono);font-size:12px;
+  border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);
+}
+select:focus,input:focus{outline:2px solid var(--deep);outline-offset:1px}
+input[type=range]{width:100%;accent-color:var(--deep)}
+
+button{
+  font-family:var(--sans);font-weight:500;font-size:13px;cursor:pointer;
+  border:1px solid var(--ink);border-radius:6px;padding:8px 12px;
+  background:var(--panel);color:var(--ink);
+}
+button:hover{background:var(--paper)}
+button:focus-visible{outline:2px solid var(--deep);outline-offset:2px}
+button.primary{
+  background:var(--signal);border-color:var(--signal);color:#fff;font-weight:700;width:100%;
+}
+button.primary:hover{background:#c94a26}
+button.primary:disabled{background:var(--line);border-color:var(--line);color:var(--dim);cursor:not-allowed}
+button.ghost{border-color:var(--line);color:var(--dim);font-size:12px;padding:5px 9px}
+button.ghost.active{border-color:var(--deep);color:var(--deep);font-weight:700}
+
+/* region mode tabs */
+.modes{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
+.modepane{display:none}
+.modepane.show{display:block}
+.hint{font-size:11px;color:var(--dim);margin:6px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+
+/* circle rows */
+.circleRow{
+  display:grid;grid-template-columns:1fr 1fr 62px 26px 26px;gap:4px;
+  align-items:center;margin-bottom:5px;
+}
+.circleRow button{padding:5px 0;font-size:12px}
+
+/* legend */
+#legend .bar{height:10px;border-radius:5px;border:1px solid var(--line)}
+#legend .lbls{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:2px}
+#legend .chips{display:flex;flex-direction:column;gap:3px;max-height:130px;overflow-y:auto;padding-right:4px}
+#legend .chip{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink)}
+#legend .chip i{width:12px;height:12px;border-radius:3px;border:1px solid var(--line);flex-shrink:0}
+
+/* status line */
+#regionStatus{
+  font-family:var(--mono);font-size:11px;color:var(--deep);
+  background:var(--paper);border:1px dashed var(--line);border-radius:6px;
+  padding:6px 8px;margin-top:8px;min-height:30px;
+}
+
+/* dataset info window */
+#dsInfo{
+  background:var(--paper);border:1px solid var(--line);border-radius:8px;
+  padding:10px;font-size:12px;line-height:1.45;
+}
+#dsInfo .product{font-weight:700;font-size:13px;margin-bottom:4px}
+#dsInfo .res{
+  display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;
+  background:var(--deep);color:#fff;border-radius:4px;padding:2px 6px;margin-bottom:6px;
+}
+#dsInfo .desc{color:var(--dim)}
+
+/* ---------- analysis right pane ---------- */
+#drawer{
+  position:absolute;right:0;top:0;bottom:0;z-index:1100;
+  width:min(620px,96vw);
+  background:#101B16;color:#E7EDE8;border-left:2px solid var(--signal);
+  transform:translateX(100%);transition:transform .28s ease;
+  display:flex;flex-direction:column;
+}
+@media (prefers-reduced-motion:reduce){#drawer{transition:none}}
+#drawer.open{transform:translateX(0)}
+#drawerHead{
+  display:flex;align-items:center;gap:12px;padding:8px 14px;
+  border-bottom:1px solid #2A3A33;
+}
+#drawer button.ghost{border-color:#3A4A43;color:#C9D3CC;background:transparent}
+#drawer button.ghost:hover{background:#1B2A24}
+#drawerTitle{font-weight:700;font-size:14px}
+#drawerTitle .mono{font-family:var(--mono);font-weight:500;color:#9FB0A8;font-size:11px}
+#drawerClose{margin-left:auto}
+#drawerBody{
+  display:flex;flex-direction:column;gap:14px;padding:12px 14px;
+  overflow-y:auto;min-height:0;flex:1;
+}
+#drawerActions{display:flex;flex-direction:column;gap:6px;padding:10px 14px 0}
+#chartWrap{flex:0 0 auto;height:230px;display:flex;flex-direction:column}
+#chartWrap canvas{flex:1;min-height:0}
+#chartTable{max-height:300px}
+#stripWrap{flex:0 0 auto;display:flex;flex-direction:column}
+.chartHead{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.chartHead .paneLabel{margin-bottom:0}
+#chartType{
+  width:auto;background:#1B2A24;color:#E7EDE8;border:1px solid #3A4A43;
+  font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:5px;
+}
+.paneLabel{
+  font-family:var(--mono);font-size:12px;color:#9FB0A8;
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;
+}
+#strip{
+  display:flex;flex-direction:column;gap:12px;padding-bottom:6px;
+}
+.frame{width:100%;display:flex;flex-direction:column;gap:4px}
+.frame .imgbox{
+  flex:1;min-height:160px;background:
+    repeating-conic-gradient(#16241E 0% 25%, #1D2D26 0% 50%) 0 / 14px 14px;
+  border:1px solid #2E3E37;border-radius:6px;overflow:hidden;
+  display:flex;align-items:center;justify-content:center;
+}
+.frame img{max-width:100%;max-height:100%;display:block}
+.frame .imgbox{position:relative;cursor:pointer}
+.frame .imgbox:has(img)::after{
+  content:'\2913';position:absolute;top:3px;right:5px;font-size:12px;
+  color:#E7EDE8;background:rgba(0,0,0,.45);border-radius:4px;padding:0 5px;
+  pointer-events:none;
+}
+.frame .yr{font-family:var(--mono);font-size:12px;font-weight:700;text-align:center;color:#E7EDE8}
+.frame .val{font-family:var(--mono);font-size:10px;color:#9FB0A8;text-align:center}
+
+/* footer */
+footer{
+  padding:5px 16px;background:var(--ink);color:#E9EEE9;
+  font-family:var(--mono);font-size:10px;letter-spacing:.05em;
+}
+footer b{color:#fff}
+
+/* site brief pane */
+#siteWrap{display:flex;flex-direction:column;gap:16px;font-size:13px}
+.siteSec .paneLabel{margin-bottom:5px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip2{
+  font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:10px;
+  border:1px solid #3A4A43;color:#E7EDE8;
+}
+.chip2 b{font-size:13px}
+.chartBox{position:relative;height:150px}
+.pieBox{position:relative;height:180px}
+.chartBox canvas{position:absolute;inset:0}
+.lulcBar{display:flex;height:12px;border-radius:6px;overflow:hidden;border:1px solid #2E3E37}
+.lulcRow{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;color:#C9D3CC;padding:3px 0}
+.lulcRow i{width:10px;height:10px;border-radius:3px;flex-shrink:0}
+.dirRow{display:grid;grid-template-columns:repeat(12,1fr);gap:2px;margin-top:4px}
+.dirCell{text-align:center;font-family:var(--mono);font-size:8px;color:#9FB0A8}
+.dirCell i{display:block;font-style:normal;font-size:13px;color:#7FD0BC;line-height:1}
+.dirCell b{display:block;font-size:8px;color:#C9D3CC;font-weight:600}
+.aqTable{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px;color:#E7EDE8}
+.aqTable td,.aqTable th{padding:3px 4px;border-bottom:1px solid #22322B;text-align:left}
+.aqTable td:nth-child(2){text-align:right;white-space:nowrap}
+.aqTable .per{color:#7C8B84;font-size:11px}
+.bLow{color:#84CC16}.bModerate{color:#E9C46A}.bElevated,.bHigh{color:#E4572E}
+.srcNote{font-size:11.5px;color:#8B9A93;line-height:1.5}
+
+/* drawing crosshair + live coordinates */
+#map.drawing, #map.drawing .leaflet-interactive, #map.drawing .leaflet-grab{cursor:crosshair !important}
+#cursorTip{
+  position:fixed;z-index:1400;pointer-events:none;display:none;
+  background:var(--ink);color:#fff;font-family:var(--mono);font-size:10px;
+  padding:2px 7px;border-radius:4px;transform:translate(14px,16px);
+  white-space:nowrap;
+}
+
+/* map meta chip (scale sits bottom-left via Leaflet) */
+.mapmeta{
+  display:flex;align-items:center;gap:8px;background:var(--panel);
+  border:1px solid var(--line);border-radius:6px;padding:4px 8px;
+  font-family:var(--mono);font-size:9px;color:var(--ink);line-height:1.3;
+}
+.mapmeta .north{font-size:11px;font-weight:700;text-align:center;color:var(--deep)}
+
+#searchInput{margin-bottom:14px}
+
+/* sidebar tabs + advanced tab */
+.sbTabs{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-bottom:6px;background:var(--wash,#EEF2EE);border:1px solid var(--line);border-radius:10px;padding:4px}
+.subTabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
+.subTabs button{border:1px solid var(--line);border-radius:7px;background:none;font-weight:600;font-size:11px;color:var(--dim);padding:5px 10px;cursor:pointer}
+.subTabs button:hover{color:var(--ink)}
+.subTabs button.active{color:#fff;background:var(--signal,#E4572E);border-color:var(--signal,#E4572E)}
+.sbTabs button{
+  border:none;border-radius:7px;background:none;font-weight:700;
+  font-size:12px;color:var(--dim);padding:7px 4px;transition:background .12s;
+}
+.sbTabs button:hover{color:var(--ink)}
+.sbTabs button.active{color:#fff;background:var(--deep,#0B5A49);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+#tab-explore,#tab-adv,#tab-site,#tab-bhuvan,#tab-aq{display:flex;flex-direction:column;gap:16px}
+.step{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.step + .step{margin-top:8px}
+.step.locked{opacity:.4;pointer-events:none}
+.stepH{
+  font-family:var(--mono);font-size:10px;font-weight:700;color:var(--deep);
+  text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;
+}
+.advList input[type=radio]{width:auto}
+.advList{
+  max-height:150px;overflow-y:auto;border:1px solid var(--line);
+  border-radius:6px;padding:6px;background:var(--paper);
+}
+.advList label{
+  display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 2px;cursor:pointer;
+}
+.advList i{font-style:normal;font-family:var(--mono);color:var(--deep);width:16px;text-align:center}
+#zoneHead{display:flex;align-items:center;gap:8px;font-size:13px}
+#zoneSwatch{width:14px;height:14px;border-radius:4px;border:1px solid var(--line);font-style:normal}
+#advExtraList{margin-top:6px}
+#advExtraList .xrow{
+  display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;
+  border-bottom:1px dashed var(--line);padding:3px 1px;
+}
+#advExtraList .xrow button{margin-left:auto;padding:1px 7px;font-size:11px}
+label.chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);margin-top:10px;cursor:pointer}
+label.chk input{width:auto}
+
+/* toast */
+#toast{
+  position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:1300;
+  background:var(--ink);color:#fff;font-family:var(--mono);font-size:12px;
+  padding:8px 14px;border-radius:6px;display:none;max-width:80%;
+}
+
+/* mobile */
+#panelToggle{display:none}
+@media (max-width:860px){
+  #panelToggle{display:block;margin-left:auto}
+  aside{
+    position:absolute;z-index:1150;top:0;bottom:0;left:0;width:min(88vw,380px);
+    transform:translateX(-100%);transition:transform .25s ease;box-shadow:4px 0 18px rgba(0,0,0,.12);
+  }
+  @media (prefers-reduced-motion:reduce){aside{transition:none}}
+  aside.open{transform:translateX(0)}
+  #drawer{width:92vw}
+  #chartWrap{height:190px}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <img id="brandLogo" src="data:image/png;base64,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" alt="Vinamra Vigyan logo" />
+  <div class="brand">
+    <div class="wordmark"><span class="see">DeepSee</span><span class="goa">Go</span><span class="tagline">&mdash; map the big picture</span></div>
+    <div class="byline"><i class="bb">built by</i> Vinamravigyan Technologies Private Limited</div>
+  </div>
+  <button id="panelToggle" class="ghost" style="margin-left:auto" aria-label="Toggle controls">☰ Controls</button>
+</header>
+
+<div id="shell">
+  <aside id="panel">
+    <div class="sbTabs" id="basketBar">
+      <button class="active" data-basket="sat">Satellite</button>
+      <button data-basket="urban">Urban Planning</button>
+      <button data-basket="climate">Climate</button>
+    </div>
+    <div class="subTabs" id="subBar">
+      <button class="active" data-tab="explore">Explore</button>
+      <button data-tab="adv">Advanced Analysis</button>
+    </div>
+    <div id="tab-explore">
+    <section>
+      <h2>Layer</h2>
+      <label class="fld" for="datasetSel">Dataset</label>
+      <select id="datasetSel"></select>
+      <label class="fld" for="yearSel">Year</label>
+      <select id="yearSel"></select>
+      <label class="fld" for="opacity">Opacity</label>
+      <input id="opacity" type="range" min="0" max="100" value="80" />
+      <div id="legend" style="margin-top:8px"></div>
+    </section>
+
+    <section>
+      <h2>Region of Interest</h2>
+      <label class="fld" for="searchInput">Find a place (pans the map)</label>
+      <input id="searchInput" type="text" placeholder="Search a place… (Enter)" aria-label="Search a place" />
+      <div class="modes">
+        <button class="ghost active" data-mode="draw">Draw</button>
+        <button class="ghost" data-mode="corners">Corners</button>
+        <button class="ghost" data-mode="circles">Circles</button>
+        <button class="ghost" data-mode="admin">Boundary</button>
+        <button class="ghost" data-mode="shape">Shapefile</button>
+      </div>
+
+      <div class="modepane show" id="pane-draw">
+        <p class="hint">Tap the map at one corner, then at the opposite corner, to draw a rectangle.</p>
+        <button id="drawStart" style="width:100%">Start drawing rectangle</button>
+      </div>
+
+      <div class="modepane" id="pane-corners">
+        <p class="hint">Rectangle from lat/lon bounds.</p>
+        <div class="grid2">
+          <div><label class="fld">North lat</label><input type="number" id="cN" step="any" placeholder="13.05"></div>
+          <div><label class="fld">South lat</label><input type="number" id="cS" step="any" placeholder="12.75"></div>
+          <div><label class="fld">West lon</label><input type="number" id="cW" step="any" placeholder="74.70"></div>
+          <div><label class="fld">East lon</label><input type="number" id="cE" step="any" placeholder="75.00"></div>
+        </div>
+        <button id="cornersApply" style="width:100%;margin-top:8px">Apply rectangle</button>
+      </div>
+
+      <div class="modepane" id="pane-circles">
+        <p class="hint">One or more circles — lat, lon, radius (km). ◎ fills a row from a map tap.</p>
+        <div id="circleRows"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="circleAdd" class="ghost">+ Add circle</button>
+          <button id="circlesApply" style="flex:1">Apply circles</button>
+        </div>
+      </div>
+
+      <div class="modepane" id="pane-admin">
+        <p class="hint">State &amp; district boundaries (FAO GAUL, served from Earth Engine).</p>
+        <label class="fld" for="stateSel">State</label>
+        <select id="stateSel"><option value="">Loading states…</option></select>
+        <label class="fld" for="districtSel">District</label>
+        <select id="districtSel"><option value="">Entire state</option></select>
+        <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
+      </div>
+
+      <div class="modepane" id="pane-shape">
+        <label class="fld" for="shapeSel">Saved shapes</label>
+        <select id="shapeSel"><option value="">Loading&hellip;</option></select>
+        <button id="shapeLoad" style="width:100%;margin-top:6px">Load shape</button>
+      </div>
+
+      <div id="regionStatus">No region selected yet.</div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button id="regionClear" class="ghost">Clear</button>
+        <button id="runAnalysis" class="primary" disabled>Analyse Temporal Change</button>
+      </div>
+      <pre id="bhuvanOut" hidden style="margin-top:8px;max-height:220px;overflow:auto;background:#101B16;color:#C9E8DA;font-family:var(--mono);font-size:10px;padding:8px;border-radius:8px;white-space:pre-wrap;word-break:break-word"></pre>
+    </section>
+
+    <section>
+      <h2>Dataset Info</h2>
+      <div id="dsInfo">Loading…</div>
+    </section>
+    </div><!-- /tab-explore -->
+
+    <div id="tab-adv" hidden>
+    <section>
+      <h2>Build Zone</h2>
+
+      <div class="step" id="step1">
+        <div class="stepH">1 &middot; Network layers (lines)</div>
+        <div id="advLineList" class="advList">Loading&hellip;</div>
+      </div>
+
+      <div class="step locked" id="step2">
+        <div class="stepH">2 &middot; Buffer &mdash; km, both sides</div>
+        <input type="number" id="advBuffer" value="5" step="any" min="0.1">
+        <button id="advBufferApply" style="width:100%;margin-top:6px">Apply buffer</button>
+      </div>
+
+      <div class="step locked" id="step3">
+        <div class="stepH">3 &middot; Boundary layer within reach</div>
+        <div id="advPolyList" class="advList">&mdash;</div>
+        <button id="advBndSkip" class="ghost" style="width:100%;margin-top:6px">Skip boundary &rarr;</button>
+      </div>
+
+      <div class="step locked" id="step4">
+        <div class="stepH">4 &middot; Extra shapes (add any number)</div>
+        <div style="display:flex;gap:6px">
+          <button id="advRect" class="ghost" style="flex:1">&#9645; Rectangle</button>
+          <button id="advCircleBtn" class="ghost" style="flex:1">&#9711; Circle</button>
+          <button id="advExtraDone" class="ghost" style="flex:1">Done &rarr;</button>
+        </div>
+        <div id="advCircleRow" hidden style="margin-top:6px">
+          <label class="fld">Circle radius (km)</label>
+          <input type="number" id="advCircleRad" value="3" step="any" min="0.1">
+        </div>
+        <div id="advExtraList"></div>
+        <p class="hint" id="advDrawHint"></p>
+      </div>
+
+      <div class="step locked" id="step5">
+        <div class="stepH">5 &middot; Fragments</div>
+        <button id="advFragment" style="width:100%">Create fragments</button>
+        <p class="hint">All shapes are intersected into atomic pieces. Everything else leaves the map.</p>
+      </div>
+
+      <div class="step locked" id="step6">
+        <div class="stepH">6 &middot; Zones</div>
+        <div id="zoneHead"><i id="zoneSwatch"></i><b id="zoneName">Zone 1</b>
+          <span id="zoneLeft" style="margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--dim)"></span></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="advAdd" class="ghost active" style="flex:1">+ Add to zone</button>
+          <button id="advRemove" class="ghost" style="flex:1">&minus; Remove</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="advZoneConfirm" style="flex:1" disabled>Confirm zone</button>
+          <button id="advZoneNew" class="ghost" style="flex:1" disabled>+ Add zone</button>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="advZonesPreview" style="flex:1.4" disabled>Preview all zones</button>
+          <button id="advZonesReset" class="ghost" style="flex:1">Reset</button>
+        </div>
+        <button id="advZonesConfirm" class="primary" style="margin-top:6px" hidden>&#10003; Confirm zones</button>
+      </div>
+    </section>
+
+    <section id="advCalcSec"    </section>
+
+    <section id="advCalcSec" hidden>
+      <h2>Calculate</h2>
+      <label class="fld" for="advStat">Statistic</label>
+      <select id="advStat">
+        <option value="sum">Sum</option><option value="mean">Average (mean)</option>
+        <option value="min">Min</option><option value="max">Max</option>
+        <option value="median">Median</option><option value="mode">Mode</option>
+        <option value="count">Count (pixels)</option>
+      </select>
+      <p class="hint">Analyses the dataset and year currently selected in Explore &rsaquo; Layer; pick the statistic here and run from the analysis pane.</p>
+    </section>
+    </div><!-- /tab-adv -->
+
+    <div id="tab-site" hidden>
+    <section>
+      <h2>Site Brief</h2>
+      <p class="hint">Pick a site and context radius. The brief leads with land-cover use in the region, then climate, humidity, rainfall, wind, solar and mean radiant temperature. (Air quality now lives in the Climate basket.)</p>
+      <button id="sitePick" style="width:100%">Pick site on map</button>
+      <label class="fld" for="siteRadius">Context radius</label>
+      <select id="siteRadius">
+        <option value="10">10 m</option>
+        <option value="50">50 m</option>
+        <option value="100">100 m</option>
+        <option value="250">250 m</option>
+        <option value="500" selected>500 m</option>
+        <option value="1000">1 km</option>
+      </select>
+      <div id="siteStatus" class="hint" style="min-height:24px">No site selected yet.</div>
+      <button id="siteRun" class="primary" disabled>Generate site brief</button>
+    </section>
+    </div><!-- /tab-site -->
+
+    <div id="tab-bhuvan" hidden>
+    </section>
+
+    <section>
+      <h2>Bhuvan &middot; ISRO overlays</h2>
+      <p class="hint">Official 1:50,000 thematic maps served live by NRSC as WMS. View-only overlays &mdash; they render on the map but are not Earth Engine rasters, so zonal analysis and PDF reports do not apply to them.</p>
+      <label class="fld" for="bhuvanTheme">Theme</label>
+      <select id="bhuvanTheme">
+        <option value="lulc:{ST}_LULC50K_1516">Land Use / Land Cover 1:50k (2015&ndash;16)</option>
+        <option value="wasteland:{ST}_WL50K_1516">Wasteland 1:50k (2015&ndash;16)</option>
+        <option value="soil:{ST}_SO_50K">Soil 1:50k</option>
+      </select>
+      <label class="fld" for="bhuvanState">State</label>
+      <select id="bhuvanState"></select>
+      <label class="fld" for="bhuvanOpacity">Overlay opacity</label>
+      <input type="range" id="bhuvanOpacity" min="10" max="100" value="80">
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button id="bhuvanAdd" class="primary" style="flex:1.4">Add overlay</button>
+        <button id="bhuvanClear" class="ghost" style="flex:1">Remove</button>
+      </div>
+      <p class="hint">NRSC servers can be slow at first load. If tiles stay blank, the state code may differ on Bhuvan or the service is briefly down.</p>
+      <label class="fld" for="customWmsLayer">Custom Bhuvan WMS layer (e.g. flood, water bodies)</label>
+      <input type="text" id="customWmsUrl" placeholder="WMS URL (default: bhuvan-vec1 …/bhuvan/wms)">
+      <input type="text" id="customWmsLayer" placeholder="workspace:LayerName from GetCapabilities" style="margin-top:6px">
+      <button id="customWmsAdd" class="ghost" style="width:100%;margin-top:6px">Add custom WMS layer</button>
+    </section>
+
+    <section>
+      <h2>Bhuvan APIs <span style="font-weight:400;font-size:11px;color:var(--dim)">(daily token)</span></h2>
+      <p class="hint">Paste your access token from bhuvan-app1.nrsc.gov.in/api (expires daily). Pick an API; {lat}/{lon} auto-fill from the Site-Brief point or map centre, {lat1}…{lon2} from the two route taps. Paths follow the portal docs &mdash; edit them if your doc page shows a different path.</p>
+      <label class="fld" for="bhuvanToken">Access token</label>
+      <input type="text" id="bhuvanToken" placeholder="paste today's token" autocomplete="off">
+      <label class="fld" for="bhuvanPreset">API</label>
+      <select id="bhuvanPreset"></select>
+      <label class="fld" for="bhuvanPath">Path</label>
+      <input type="text" id="bhuvanPath">
+      <label class="fld" for="bhuvanParams">Parameters</label>
+      <input type="text" id="bhuvanParams">
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <button id="bhuvanRoutePick" class="ghost" style="flex:1">&#9678; Route taps</button>
+        <button id="bhuvanRun" class="primary" style="flex:1.4">Call API</button>
+      </div>
+    </div><!-- /tab-bhuvan -->
+
+    <div id="tab-aq" hidden>
+    <section>
+      <h2>Live Air Quality</h2>
+      <p class="hint">Real-time air quality at a point, from multiple providers. Open-Meteo works with no key. Others activate when their API key is set as a Cloud Run environment variable &mdash; the badge shows which are ready.</p>
+      <label class="fld" for="aqSearchInput">Search a location</label>
+      <input type="text" id="aqSearchInput" placeholder="Type a place & press Enter, then Pick">
+      <button id="aqPick" style="width:100%;margin-top:6px">Pick point on map</button>
+      <div id="aqStatus" class="hint" style="min-height:20px">No point selected.</div>
+      <label class="fld">Providers</label>
+      <div id="aqProviders"></div>
+      <button id="aqRun" class="primary" style="margin-top:8px" disabled>Get live air quality</button>
+      <label class="fld" for="aqScanRadius" style="margin-top:8px">Source scan radius</label>
+      <select id="aqScanRadius">
+        <option value="1000">1 km</option>
+        <option value="2000" selected>2 km</option>
+        <option value="3000">3 km</option>
+        <option value="5000">5 km</option>
+      </select>
+      <button id="aqApportion" style="margin-top:6px" disabled>Pollutant source-proximity model</button>
+    </section>
+    </div><!-- /tab-aq -->
+  </aside>
+
+  <div id="map" role="application" aria-label="Map"></div>
+  <div id="toast" role="status"></div>
+  <div id="cursorTip" aria-hidden="true"></div>
+
+  <div id="drawer" aria-label="Analysis results">
+    <div id="drawerHead">
+      <div id="drawerTitle">Analysis <span class="mono" id="drawerSub"></span></div>
+      <button id="csvBtn" class="ghost" hidden>&#10515; CSV</button>
+      <button id="drawerClose" class="ghost" aria-label="Close analysis panel">✕ Close</button>
+    </div>
+    <div id="drawerActions" hidden>
+      <button id="advCalcOne" class="primary">Calculate</button>
+      <button id="zwyBtn" class="primary" disabled>Zone-wise year-wise analysis</button>
+      <button id="pdfBtn" class="ghost" hidden>&#10515; PDF report</button>
+    </div>
+    <div id="drawerBody">
+      <div id="chartWrap">
+        <div class="chartHead"><span class="paneLabel" id="chartLabel">Value per epoch</span><select id="chartType" aria-label="Chart type"></select></div>
+        <canvas id="chart" aria-label="Time series chart"></canvas>
+      </div>
+      <div id="siteWrap" hidden></div>
+      <div id="stripWrap">
+        <div class="paneLabel">Maps per epoch · clipped to region</div>
+        <div id="strip"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer><span style="opacity:.55">deepseego-v42</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+/* ============================================================
+   DeepSeeGo frontend
+   ============================================================ */
+// Same-origin: the frontend is served by the Cloud Run backend itself,
+// so API calls go to the same host. To point at a remote backend during
+// local testing, set this to the full https URL instead of "".
+const BACKEND_URL = "";
+const DSG_VERSION = "deepseego-v42";
+console.log("DeepSeeGo frontend", DSG_VERSION);
+
+const $ = id => document.getElementById(id);
+const fmtIN = new Intl.NumberFormat('en-IN', {maximumFractionDigits: 0});
+const fmtCompact = new Intl.NumberFormat('en-IN', {notation: 'compact', maximumFractionDigits: 1});
+function fmtVal(v){
+  if(v == null || Number.isNaN(v)) return '—';
+  if(Math.abs(v) < 10 && !Number.isInteger(v)) return v.toFixed(3);
+  return fmtCompact.format(v);
+}
+
+function toast(msg, ms = 3500){
+  const t = $('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms);
+}
+async function api(path, opts){
+  const r = await fetch(BACKEND_URL + path, opts);
+  if(!r.ok){
+    let d = ''; try{ d = (await r.json()).detail || ''; }catch(e){}
+    throw new Error(d || ('Request failed: ' + r.status));
+  }
+  return r.json();
+}
+
+/* ---------- map ---------- */
+const WORLD_BOUNDS = [[-85, -180], [85, 180]];
+const map = L.map('map', {
+  zoomControl: true, minZoom: 2, worldCopyJump: false,
+  maxBounds: WORLD_BOUNDS, maxBoundsViscosity: 1.0,
+}).setView([15.38, 74.05], 9); // Goa
+const satBase = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  {attribution: 'Tiles &copy; Esri &mdash; Esri, Maxar, Earthstar Geographics',
+   maxZoom: 19, noWrap: true, bounds: WORLD_BOUNDS}).addTo(map);
+const lightBase = L.tileLayer(
+  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+  {attribution: '&copy; OpenStreetMap &copy; CARTO',
+   maxZoom: 19, noWrap: true, bounds: WORLD_BOUNDS});
+L.control.layers({'Satellite (high-res)': satBase, 'Light map': lightBase},
+                 null, {position: 'topleft'}).addTo(map);
+
+L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
+const MapMeta = L.Control.extend({
+  onAdd: () => {
+    const el = L.DomUtil.create('div', 'mapmeta');
+    el.innerHTML = '<span class="north">\u25b2<br>N</span>' +
+                   '<span>CRS EPSG:3857<br>Web Mercator \u00b7 WGS 84</span>';
+    return el;
+  }, onRemove: () => {}
+});
+new MapMeta({position:'bottomleft'}).addTo(map);
+
+let ghslLayer = null;
+const DS = {};              // key -> full dataset meta from /datasets
+let currentDs = null;
+
+/* ---------- legend + info window ---------- */
+function updateLegend(d){
+  const box = $('legend');
+  if(d.classes && d.classes.length){
+    box.innerHTML = '<div class="chips">' + d.classes.map(c =>
+      `<span class="chip"><i style="background:${c.color}"></i>${c.label}</span>`).join('') + '</div>';
+  }else if(d.vis){
+    const colors = d.vis.palette.map(c => c.startsWith('#') ? c : '#' + c);
+    box.innerHTML =
+      `<div class="bar" style="background:linear-gradient(to right,${colors.join(',')})"></div>` +
+      `<div class="lbls"><span>${fmtIN.format(d.vis.min)}</span><span>${fmtIN.format(d.vis.max)}</span></div>`;
+  }else{
+    box.innerHTML = '';
+  }
+}
+
+function updateInfo(d){
+  $('dsInfo').innerHTML =
+    `<div class="product">${d.info.product}</div>` +
+    `<span class="res">${d.info.resolution}</span>` +
+    `<div class="desc">${d.info.description}</div>`;
+}
+
+/* ---------- layer handling ---------- */
+function populateYears(d){
+  const prev = parseInt($('yearSel').value);
+  const pick = d.years.includes(prev) ? prev
+             : d.years.reduce((a,b) => Math.abs(b-2020) < Math.abs(a-2020) ? b : a);
+  $('yearSel').innerHTML = d.years.map(y =>
+    `<option value="${y}" ${y===pick?'selected':''}>${y}</option>`).join('');
+}
+
+async function refreshTiles(){
+  const ds = $('datasetSel').value, yr = $('yearSel').value;
+  if(!ds || !yr) return;
+  try{
+    const j = regionSpec
+      ? await api('/tiles_clipped', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({dataset: ds, year: +yr, region: regionSpec})})
+      : await api(`/tiles?dataset=${encodeURIComponent(ds)}&year=${yr}`);
+    if(ghslLayer) map.removeLayer(ghslLayer);
+    ghslLayer = L.tileLayer(j.tile_url, {opacity: $('opacity').value / 100, maxZoom: 19,
+                            noWrap: true, bounds: WORLD_BOUNDS}).addTo(map);
+  }catch(e){ toast('Tile layer: ' + e.message); }
+}
+
+function onDatasetChange(){
+  const key = $('datasetSel').value;
+  currentDs = key ? DS[key] : null;
+  if(!currentDs){                      // nothing loads until a layer is chosen
+    if(ghslLayer){ map.removeLayer(ghslLayer); ghslLayer = null; }
+    $('yearSel').innerHTML = '<option value="">\u2014</option>';
+    $('legend').innerHTML = '';
+    $('dsInfo').innerHTML = 'Select a dataset in the Layer panel to load it on the map.';
+    if(typeof updateCalcYearLabel === 'function') updateCalcYearLabel();
+    return;
+  }
+  populateYears(currentDs);
+  updateLegend(currentDs);
+  updateInfo(currentDs);
+  if(currentDs.kind === 'vector'){
+    toast(currentDs.label + ' renders slowly at wide views — zoom in for detail.');
+  }
+  refreshTiles();
+}
+$('datasetSel').addEventListener('change', onDatasetChange);
+$('yearSel').addEventListener('change', refreshTiles);
+$('opacity').addEventListener('input', () => { if(ghslLayer) ghslLayer.setOpacity($('opacity').value / 100); });
+
+async function loadDatasets(){
+  let j;
+  try{
+    j = await api('/datasets');
+  }catch(e){
+    toast('Could not reach backend: ' + e.message, 6000);
+    $('dsInfo').textContent = 'Backend unreachable.';
+    return;
+  }
+  if(!j.datasets || !j.datasets.length || !Array.isArray(j.datasets[0].years)){
+    const msg = 'Backend is running an older version — deploy the new main.py to Cloud Run, then reload.';
+    toast(msg, 9000);
+    $('dsInfo').textContent = msg;
+    return;
+  }
+  j.datasets.forEach(d => DS[d.key] = d);
+  $('datasetSel').innerHTML =
+    '<option value="" selected>\u2014 Select a dataset \u2014</option>' +
+    j.datasets.map(d => `<option value="${d.key}">${d.label}</option>`).join('');
+  onDatasetChange();
+  populateAdvSelectors();
+}
+loadDatasets();
+
+/* ---------- place search (Nominatim): drops a pin at building zoom ------ */
+let searchPin = null;
+$('searchInput').addEventListener('keydown', async ev => {
+  if(ev.key !== 'Enter') return;
+  const q = ev.target.value.trim(); if(!q) return;
+  try{
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const j = await r.json();
+    if(j.length){
+      const lat = +j[0].lat, lon = +j[0].lon;
+      if(searchPin) map.removeLayer(searchPin);
+      searchPin = L.marker([lat, lon]).addTo(map)
+        .bindPopup(j[0].display_name.split(',').slice(0, 3).join(','));
+      map.setView([lat, lon], 18);       // close enough to pick out a building
+      searchPin.openPopup();
+    }
+    else toast('Place not found');
+  }catch(e){ toast('Search failed'); }
+});
+
+/* ---------- region selection ---------- */
+let regionSpec = null;
+let regionDesc = '';
+const regionLayers = L.featureGroup().addTo(map);
+const advLayers = L.featureGroup().addTo(map);   // dashed derived-region outline
+let mapClickMode = null;       // null | 'rect1' | 'rect2' | {circleRow: el}
+let rectFirstCorner = null, rectPreviewMarker = null;
+
+let baseRoiSpec = null;      // last non-advanced ROI (for the Advanced tab)
+function setRegion(spec, desc, fit){
+  if(spec && spec.type !== 'advanced') baseRoiSpec = spec;
+  regionSpec = spec; regionDesc = desc;
+  $('regionStatus').textContent = desc;
+  $('runAnalysis').disabled = !spec;
+  if(fit && regionLayers.getLayers().length){
+    map.fitBounds(regionLayers.getBounds().pad(0.15));
+  }
+  refreshTiles();   // clip the data layer to the ROI (or restore full view)
+}
+function clearRegion(){
+  advLayers.clearLayers();
+  if(typeof advLineLayer !== 'undefined'){
+    advLineLayer.clearLayers(); advBndLayer.clearLayers();
+    advDrawLayer.clearLayers(); advBufLayer.clearLayers();
+  }
+  baseRoiSpec = null;
+  regionLayers.clearLayers();
+  rectFirstCorner = null; mapClickMode = null;
+  if(rectPreviewMarker){ map.removeLayer(rectPreviewMarker); rectPreviewMarker = null; }
+  setRegion(null, 'No region selected yet.');
+}
+$('regionClear').addEventListener('click', clearRegion);
+
+/* mode tabs */
+document.querySelectorAll('.modes button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.modes button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    document.querySelectorAll('.modepane').forEach(p => p.classList.remove('show'));
+    $('pane-' + b.dataset.mode).classList.add('show');
+    mapClickMode = null;
+    if(b.dataset.mode === 'admin') loadStatesOnce();
+    if(b.dataset.mode === 'shape') loadShapesOnce();
+  });
+});
+
+/* mode 1: two-tap rectangle */
+$('drawStart').addEventListener('click', () => {
+  clearRegion();
+  mapClickMode = 'rect1';
+  $('regionStatus').textContent = 'Tap the map: first corner…';
+});
+
+/* mode 2: corner coordinates */
+$('cornersApply').addEventListener('click', () => {
+  const N = parseFloat($('cN').value), S = parseFloat($('cS').value);
+  const W = parseFloat($('cW').value), E = parseFloat($('cE').value);
+  if([N,S,W,E].some(isNaN)) return toast('Fill all four bounds');
+  if(N <= S) return toast('North lat must be greater than South lat');
+  if(E <= W) return toast('East lon must be greater than West lon');
+  regionLayers.clearLayers();
+  const rect = L.rectangle([[S,W],[N,E]], {color:'#0B5A49', weight:2, fillOpacity:0.05}).addTo(regionLayers);
+  setRegion({type:'geojson', geometry: rect.toGeoJSON().geometry},
+            `Rectangle  N ${N}  S ${S}  W ${W}  E ${E}`, true);
+});
+
+/* mode 3: circles */
+function addCircleRow(lat = '', lon = '', rad = 5){
+  const row = document.createElement('div');
+  row.className = 'circleRow';
+  row.innerHTML = `
+    <input type="number" step="any" placeholder="lat" class="cLat" value="${lat}" aria-label="Latitude">
+    <input type="number" step="any" placeholder="lon" class="cLon" value="${lon}" aria-label="Longitude">
+    <input type="number" step="any" placeholder="km" class="cRad" value="${rad}" aria-label="Radius km">
+    <button class="ghost cPick" title="Pick centre on map">◎</button>
+    <button class="ghost cDel" title="Remove circle">✕</button>`;
+  row.querySelector('.cPick').addEventListener('click', () => {
+    mapClickMode = {circleRow: row};
+    $('regionStatus').textContent = 'Tap the map to set this circle centre…';
+  });
+  row.querySelector('.cDel').addEventListener('click', () => row.remove());
+  $('circleRows').appendChild(row);
+}
+$('circleAdd').addEventListener('click', () => addCircleRow());
+addCircleRow();
+
+$('circlesApply').addEventListener('click', () => {
+  const rows = [...document.querySelectorAll('.circleRow')];
+  const circles = [];
+  for(const r of rows){
+    const lat = parseFloat(r.querySelector('.cLat').value);
+    const lon = parseFloat(r.querySelector('.cLon').value);
+    const rad = parseFloat(r.querySelector('.cRad').value);
+    if([lat,lon,rad].some(isNaN) || rad <= 0) continue;
+    circles.push({lat, lon, radius_km: rad});
+  }
+  if(!circles.length) return toast('Add at least one complete circle (lat, lon, radius)');
+  regionLayers.clearLayers();
+  circles.forEach(c => L.circle([c.lat, c.lon], {radius: c.radius_km * 1000,
+    color:'#0B5A49', weight:2, fillOpacity:0.05}).addTo(regionLayers));
+  setRegion({type:'circles', circles},
+            `${circles.length} circle${circles.length>1?'s':''} · ` +
+            circles.map(c => `${c.radius_km} km @ ${c.lat.toFixed(3)},${c.lon.toFixed(3)}`).join(' · '), true);
+});
+
+/* mode 4: admin boundary dropdown */
+let statesLoaded = false;
+async function loadStatesOnce(){
+  if(statesLoaded) return; statesLoaded = true;
+  try{
+    const j = await api('/regions/states');
+    $('stateSel').innerHTML = '<option value="">Select a state…</option>' +
+      j.states.map(s => `<option>${s}</option>`).join('');
+  }catch(e){ toast('States list: ' + e.message); statesLoaded = false; }
+}
+$('stateSel').addEventListener('change', async () => {
+  const st = $('stateSel').value;
+  $('districtSel').innerHTML = '<option value="">Entire state</option>';
+  if(!st) return;
+  try{
+    const j = await api('/regions/districts?state=' + encodeURIComponent(st));
+    $('districtSel').innerHTML = '<option value="">Entire state</option>' +
+      j.districts.map(d => `<option>${d}</option>`).join('');
+  }catch(e){ toast('Districts: ' + e.message); }
+});
+$('adminLoad').addEventListener('click', async () => {
+  const st = $('stateSel').value; if(!st) return toast('Choose a state first');
+  const di = $('districtSel').value || null;
+  $('adminLoad').textContent = 'Loading…'; $('adminLoad').disabled = true;
+  try{
+    const j = await api('/regions/geometry?state=' + encodeURIComponent(st) +
+                        (di ? '&district=' + encodeURIComponent(di) : ''));
+    regionLayers.clearLayers();
+    L.geoJSON(j.geometry, {style:{color:'#0B5A49', weight:2, fillOpacity:0.05}}).addTo(regionLayers);
+    setRegion({type:'admin', state: st, district: di},
+              'Boundary · ' + (di ? di + ', ' : '') + st, true);
+  }catch(e){ toast('Boundary: ' + e.message); }
+  $('adminLoad').textContent = 'Load boundary'; $('adminLoad').disabled = false;
+});
+
+/* mode 5: saved / uploaded shapefiles */
+let shapesLoaded = false, allShapes = [];
+async function loadShapesOnce(force){
+  if(shapesLoaded && !force) return; shapesLoaded = true;
+  try{
+    const j = await api('/shapes');
+    if(j.shapes.length && typeof j.shapes[0] === 'string'){
+      toast('The backend is running an older version \u2014 deploy the latest main.py for the Advanced tab.', 9000);
+      allShapes = j.shapes.map(n => ({name: n, gtype: 'polygon', bbox: null}));
+    } else {
+      allShapes = j.shapes;                     // [{name, gtype, bbox}]
+    }
+    const polys = allShapes.filter(s => s.gtype === 'polygon');
+    $('shapeSel').innerHTML = polys.length
+      ? '<option value="">Select a shape\u2026</option>' + polys.map(s => `<option>${s.name}</option>`).join('')
+      : '<option value="">No polygon shapes saved yet</option>';
+    buildAdvShapeLists();
+  }catch(e){ toast('Shapes: ' + e.message, 7000); shapesLoaded = false; }
+}
+
+let shapeFeatureLayers = [];
+const SHAPE_STYLE = {color:'#0B5A49', weight:2, fillOpacity:0.06};
+const SHAPE_STYLE_SEL = {color:'#E4572E', weight:3, fillOpacity:0.12};
+function showShapeFC(name, features){
+  regionLayers.clearLayers();
+  shapeFeatureLayers = [];
+  features.forEach((f, i) => {
+    const lyr = L.geoJSON(f.geometry, {style: SHAPE_STYLE}).addTo(regionLayers);
+    lyr.bindTooltip(f.label, {sticky: true});
+    lyr.on('click', ev => {
+      L.DomEvent.stopPropagation(ev);              // keep draw-mode clicks out
+      shapeFeatureLayers.forEach(l => l.setStyle(SHAPE_STYLE));
+      lyr.setStyle(SHAPE_STYLE_SEL);
+      setRegion({type:'shape', name, feature: i},
+                'Shapefile \u00b7 ' + name + ' \u00b7 ' + f.label, false);
+      map.fitBounds(lyr.getBounds().pad(0.15));
+    });
+    shapeFeatureLayers.push(lyr);
+  });
+  const extra = features.length > 1
+    ? ' \u00b7 all ' + features.length + ' features (tap one to isolate it)'
+    : '';
+  setRegion({type:'shape', name}, 'Shapefile \u00b7 ' + name + extra, true);
+}
+$('shapeLoad').addEventListener('click', async () => {
+  const name = $('shapeSel').value; if(!name) return toast('Choose a saved shape first');
+  $('shapeLoad').disabled = true; $('shapeLoad').textContent = 'Loading\u2026';
+  try{
+    const j = await api('/shapes/geometry?name=' + encodeURIComponent(name));
+    showShapeFC(j.name, j.features);
+    if(j.note) toast(j.note, 7000);
+  }catch(e){ toast('Shape: ' + e.message, 7000); }
+  $('shapeLoad').disabled = false; $('shapeLoad').textContent = 'Load shape';
+});
+/* crosshair cursor + live lat/lon while any draw mode is armed */
+function drawingActive(){
+  return mapClickMode === 'rect1' || mapClickMode === 'rect2' ||
+         mapClickMode === 'advRect1' || mapClickMode === 'advRect2' ||
+         mapClickMode === 'advCircle' || mapClickMode === 'sitePick' ||
+         mapClickMode === 'routeA' || mapClickMode === 'routeB' ||
+         mapClickMode === 'aqPick' || mapClickMode === 'siteRoiR1' ||
+         mapClickMode === 'siteRoiR2' || mapClickMode === 'siteRoiC' ||
+         !!(mapClickMode && mapClickMode.circleRow);
+}
+map.on('mousemove', ev => {
+  const tip = $('cursorTip');
+  const on = drawingActive();
+  map.getContainer().classList.toggle('drawing', on);
+  if(!on){ tip.style.display = 'none'; return; }
+  tip.textContent = ev.latlng.lat.toFixed(5) + ', ' + ev.latlng.lng.toFixed(5);
+  tip.style.left = ev.originalEvent.clientX + 'px';
+  tip.style.top  = ev.originalEvent.clientY + 'px';
+  tip.style.display = 'block';
+});
+map.on('mouseout', () => { $('cursorTip').style.display = 'none'; });
+
+/* map clicks feed whichever mode is armed */
+map.on('click', ev => {
+  if(!mapClickMode) return;
+  const {lat, lng} = ev.latlng;
+
+  if(mapClickMode === 'rect1'){
+    rectFirstCorner = ev.latlng;
+    rectPreviewMarker = L.circleMarker(ev.latlng, {radius:5, color:'#E4572E'}).addTo(map);
+    mapClickMode = 'rect2';
+    $('regionStatus').textContent = 'Now tap the opposite corner…';
+    return;
+  }
+  if(mapClickMode === 'rect2'){
+    const rect = L.rectangle(L.latLngBounds(rectFirstCorner, ev.latlng),
+      {color:'#0B5A49', weight:2, fillOpacity:0.05}).addTo(regionLayers);
+    if(rectPreviewMarker){ map.removeLayer(rectPreviewMarker); rectPreviewMarker = null; }
+    mapClickMode = null; rectFirstCorner = null;
+    const b = rect.getBounds();
+    setRegion({type:'geojson', geometry: rect.toGeoJSON().geometry},
+      `Rectangle  N ${b.getNorth().toFixed(4)}  S ${b.getSouth().toFixed(4)}  W ${b.getWest().toFixed(4)}  E ${b.getEast().toFixed(4)}`);
+    return;
+  }
+  if(mapClickMode === 'aqPick'){
+    mapClickMode = null;
+    aqState.lat = lat; aqState.lon = lng;
+    aqLayer.clearLayers();
+    L.circleMarker([lat, lng], {radius: 6, color: '#00B4D8',
+      fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer);
+    $('aqRun').disabled = false;
+    $('aqApportion').disabled = false;
+    $('aqStatus').textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
+    return;
+  }
+  if(mapClickMode === 'routeA'){
+    bhuvanRoute.a = ev.latlng;
+    L.circleMarker(ev.latlng, {radius: 6, color: '#2A9D8F', fillOpacity: 0.9})
+      .addTo(bhuvanRouteLayer).bindTooltip('Start');
+    mapClickMode = 'routeB';
+    toast('Now tap the route END\u2026');
+    return;
+  }
+  if(mapClickMode === 'routeB'){
+    bhuvanRoute.b = ev.latlng;
+    L.circleMarker(ev.latlng, {radius: 6, color: '#E4572E', fillOpacity: 0.9})
+      .addTo(bhuvanRouteLayer).bindTooltip('End');
+    mapClickMode = null;
+    toast('Route points set \u2014 run the Shortest Path API.');
+    return;
+  }
+  if(_hasRoiUI && mapClickMode === 'siteRoiR1'){
+    siteRoiRectFirst = ev.latlng;
+    mapClickMode = 'siteRoiR2';
+    $('siteRoiHint').textContent = 'Tap the opposite corner\u2026';
+    return;
+  }
+  if(_hasRoiUI && mapClickMode === 'siteRoiR2'){
+    const rect = L.rectangle(L.latLngBounds(siteRoiRectFirst, ev.latlng),
+      {color: '#2A9D8F', weight: 2, fillOpacity: 0.06});
+    siteRoiLayer.clearLayers(); rect.addTo(siteRoiLayer);
+    siteRoiState = {type: 'geojson', geometry: rect.toGeoJSON().geometry};
+    mapClickMode = null; siteRoiRectFirst = null;
+    clearSiteRegions('roi');
+    $('siteRoiHint').textContent = 'Rectangle ROI set \u2014 point cleared.';
+    $('siteStatus').textContent = 'Using drawn rectangle ROI.';
+    enableSiteRun();
+    return;
+  }
+  if(_hasRoiUI && mapClickMode === 'siteRoiC'){
+    const rad = parseFloat($('siteRoiRad').value) || 1;
+    siteRoiLayer.clearLayers();
+    L.circle([lat, lng], {radius: rad * 1000, color: '#2A9D8F', weight: 2,
+      fillOpacity: 0.06}).addTo(siteRoiLayer);
+    siteRoiState = {type: 'circles', circles: [{lat, lon: lng, radius_km: rad}]};
+    mapClickMode = null;
+    clearSiteRegions('roi');
+    $('siteRoiHint').textContent = rad + ' km circle ROI set \u2014 point cleared.';
+    $('siteStatus').textContent = 'Using drawn circle ROI.';
+    enableSiteRun();
+    return;
+  }
+  if(mapClickMode === 'sitePick'){
+    mapClickMode = null;
+    siteState.lat = lat; siteState.lon = lng;
+    clearSiteRegions('point');
+    drawSite();
+    enableSiteRun();
+    $('siteStatus').textContent = lat.toFixed(5) + ', ' + lng.toFixed(5) +
+      ' \u00b7 ' + $('siteRadius').value + ' m context';
+    return;
+  }
+  if(mapClickMode === 'advRect1'){
+    advRectFirst = ev.latlng;
+    advRectMarker = L.circleMarker(ev.latlng, {radius: 5, color: '#E4572E'}).addTo(map);
+    mapClickMode = 'advRect2';
+    $('advDrawHint').textContent = 'Now tap the opposite corner\u2026';
+    return;
+  }
+  if(mapClickMode === 'advRect2'){
+    const rect = L.rectangle(L.latLngBounds(advRectFirst, ev.latlng),
+      {color: '#E4572E', weight: 2, fillOpacity: 0.06}).addTo(advDrawLayer);
+    if(advRectMarker){ map.removeLayer(advRectMarker); advRectMarker = null; }
+    mapClickMode = null; advRectFirst = null;
+    wiz.extras.push({spec: {type: 'geojson', geometry: rect.toGeoJSON().geometry},
+                     layer: rect, label: 'Rectangle'});
+    renderExtraList();
+    $('advDrawHint').textContent = 'Rectangle added \u2014 add more, or Done \u2192';
+    return;
+  }
+  if(mapClickMode === 'advCircle'){
+    const rad = parseFloat($('advCircleRad').value) || 3;
+    const circ = L.circle([lat, lng], {radius: rad * 1000, color: '#E4572E',
+                          weight: 2, fillOpacity: 0.06}).addTo(advDrawLayer);
+    mapClickMode = null;
+    wiz.extras.push({spec: {type: 'circles', circles: [{lat, lon: lng, radius_km: rad}]},
+                     layer: circ, label: rad + ' km circle'});
+    renderExtraList();
+    $('advDrawHint').textContent = 'Circle added \u2014 add more, or Done \u2192';
+    return;
+  }
+  if(mapClickMode.circleRow){
+    mapClickMode.circleRow.querySelector('.cLat').value = lat.toFixed(5);
+    mapClickMode.circleRow.querySelector('.cLon').value = lng.toFixed(5);
+    mapClickMode = null;
+    $('regionStatus').textContent = 'Centre set. Press "Apply circles" when ready.';
+  }
+});
+
+/* ---------- analysis: chart + filmstrip ---------- */
+let chart = null;
+
+$('drawerClose').addEventListener('click', () => $('drawer').classList.remove('open'));
+
+/* If the primary CDN failed to load Chart.js, pull it from jsDelivr instead. */
+function ensureChart(){
+  if(window.Chart) return Promise.resolve();
+  if(!ensureChart._p){
+    ensureChart._p = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js';
+      s.onload = () => window.Chart ? resolve() : reject(new Error('Chart.js failed to initialise'));
+      s.onerror = () => { ensureChart._p = null; reject(new Error('Chart.js could not be loaded')); };
+      document.head.appendChild(s);
+    });
+  }
+  return ensureChart._p;
+}
+
+let lastSeries = null, lastMeta = null, lastAnalysis = null, lastRuns = null;
+
+$('csvBtn').addEventListener('click', () => {
+  if(!lastRuns) return;
+  const years = lastRuns.zones[0].series.map(p => p.year);
+  const head = ['Year', ...lastRuns.zones.map(z => z.label)].join(',');
+  const rows = years.map((y, i) =>
+    [y, ...lastRuns.zones.map(z => {
+      const v = z.series[i] ? z.series[i].value : null;
+      return v == null ? '' : v;
+    })].join(','));
+  const csv = '# DeepSeeGo \u00b7 ' + lastRuns.title + '\n' + head + '\n' + rows.join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
+  a.download = 'DeepSeeGo_' + lastRuns.file + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+});
+
+function chartTypeOptions(meta){
+  if(meta._zones) return [['line', 'Line'], ['bar', 'Bar (grouped)'],
+                          ['table', 'Table (zones \u00d7 years)']];
+  return meta.class_map
+    ? [['cbars', 'Class bars'], ['csteps', 'Class timeline']]
+    : [['line', 'Line'], ['bar', 'Bar'], ['step', 'Stepped']];
+}
+function buildChartHead(meta, series){
+  $('chartLabel').textContent = meta.class_map ? 'Dominant class per epoch' : meta.value_label;
+  const sel = $('chartType');
+  sel.innerHTML = chartTypeOptions(meta).map(o => `<option value="${o[0]}">${o[1]}</option>`).join('');
+  sel.value = meta._zones ? (series && series.length <= 1 ? 'bar' : 'line')
+            : meta.class_map ? 'cbars'
+            : (series && series.length <= 3 ? 'bar' : 'line');
+}
+$('chartWrap').addEventListener('change', ev => {
+  if(ev.target.id === 'chartType' && lastSeries) drawChart(lastSeries, lastMeta);
+});
+
+function classLabel(meta, v){
+  const cm = meta && meta.class_map;
+  if(!cm || v == null) return null;
+  const e = cm[String(Math.round(v))];
+  return e ? e.label : String(v);
+}
+
+$('runAnalysis').addEventListener('click', async () => {
+  if(!regionSpec) return;
+  if(!currentDs) return toast('Select a dataset in the Layer panel first');
+  const ds = currentDs.key;
+  const btn = $('runAnalysis');
+  btn.disabled = true; btn.textContent = 'Analysing…';
+  $('drawer').classList.add('open');
+  paneMode('analysis');
+  $('drawerSub').textContent = currentDs.label + ' · ' + regionDesc;
+  lastAnalysis = {dataset: ds, region: regionSpec};
+
+  // filmstrip placeholders from this dataset's analysis epochs
+  const ay = currentDs.analysis_years || currentDs.years;
+  const strip = $('strip');
+  strip.innerHTML =
+    `<div class="frame" data-year="ctx">
+       <div class="imgbox"><span style="font-family:var(--mono);font-size:10px;color:#9FB0A8">\u2026</span></div>
+       <div class="yr">Satellite \u00b7 region</div><div class="val"></div>
+     </div>` +
+    ay.map(y =>
+    `<div class="frame" data-year="${y}">
+       <div class="imgbox"><span style="font-family:var(--mono);font-size:10px;color:var(--dim)">…</span></div>
+       <div class="yr">${y}</div><div class="val"></div>
+     </div>`).join('');
+
+  const body = JSON.stringify({dataset: ds, region: regionSpec});
+  const opts = {method:'POST', headers:{'Content-Type':'application/json'}, body};
+
+  try{
+    // 1) time series -> chart + per-frame values
+    const ts = await api('/timeseries', opts);
+    lastSeries = ts.series; lastMeta = currentDs;
+    lastRuns = {title: currentDs.label, file: ds,
+                zones: [{label: currentDs.label, color: '#E4572E', series: ts.series}]};
+    $('csvBtn').hidden = false;
+    buildChartHead(currentDs, ts.series);
+    try{
+      await ensureChart();
+      drawChart(ts.series, currentDs);
+    }catch(chartErr){
+      $('chartWrap').innerHTML =
+        `<div class="paneLabel" id="chartLabel">${currentDs.value_label}</div>` +
+        '<div style="font-family:var(--mono);font-size:11px;overflow-y:auto;color:#E7EDE8">' +
+        ts.series.map(p => `<div style="display:flex;justify-content:space-between;` +
+          `border-bottom:1px solid #2A3A33;padding:3px 0"><b>${p.year}</b>` +
+          `<span>${classLabel(currentDs, p.value) ?? fmtVal(p.value)}</span></div>`).join('') +
+        '</div>';
+      toast('Chart library unavailable — showing values as a table');
+    }
+    ts.series.forEach(p => {
+      const f = strip.querySelector(`.frame[data-year="${p.year}"] .val`);
+      if(f) f.textContent = classLabel(currentDs, p.value) ?? fmtVal(p.value);
+    });
+
+    // 2) clipped thumbnails -> filmstrip
+    const th = await api('/thumbnails', opts);
+    if(th.context){
+      const cb = strip.querySelector('.frame[data-year="ctx"] .imgbox');
+      if(cb) cb.innerHTML = `<img src="${th.context.url}" alt="Satellite view of region" title="Click to download high-res" loading="lazy">`;
+    }
+    th.thumbnails.forEach(t => {
+      const box = strip.querySelector(`.frame[data-year="${t.year}"] .imgbox`);
+      if(box) box.innerHTML = `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
+    });
+  }catch(e){
+    toast('Analysis: ' + e.message, 6000);
+  }
+  btn.disabled = false; btn.textContent = 'Analyse Temporal Change';
+});
+
+function ensureScaffold(meta, series){
+  if(!$('chartLabel')){        // fallback path wiped the whole chart area
+    $('chartWrap').innerHTML =
+      '<div class="chartHead"><span class="paneLabel" id="chartLabel"></span>' +
+      '<select id="chartType" aria-label="Chart type"></select></div>';
+    buildChartHead(meta, series);
+  }
+  const t = $('chartTable'); if(t) t.remove();
+  return $('chart');
+}
+
+function drawChart(series, meta){
+  let canvas = ensureScaffold(meta, series);
+  const typeSel = ($('chartType') && $('chartType').value) ||
+                  (meta._zones ? 'line' : meta.class_map ? 'cbars' : 'line');
+
+  if(meta._zones && typeSel === 'table'){
+    if(chart){ chart.destroy(); chart = null; }
+    if(canvas) canvas.remove();
+    const years = meta._zones[0].series.map(p => p.year);
+    const tbl = document.createElement('div');
+    tbl.id = 'chartTable';
+    tbl.style.cssText = 'overflow:auto;flex:1;font-family:var(--mono);font-size:11px';
+    tbl.innerHTML = '<table style="border-collapse:collapse;width:100%">' +
+      '<tr><th style="text-align:left;padding:3px 6px;border-bottom:1px solid #3A4A43">Year</th>' +
+      meta._zones.map(z => `<th style="text-align:right;padding:3px 6px;` +
+        `border-bottom:2px solid ${z.color};color:${z.color}">${z.label}</th>`).join('') + '</tr>' +
+      years.map((y, i) => '<tr><td style="padding:3px 6px;border-bottom:1px solid #22322B">' + y + '</td>' +
+        meta._zones.map(z => `<td style="text-align:right;padding:3px 6px;` +
+          `border-bottom:1px solid #22322B">${fmtVal(z.series[i] ? z.series[i].value : null)}</td>`).join('') +
+        '</tr>').join('') + '</table>';
+    $('chartWrap').appendChild(tbl);
+    return;
+  }
+
+  if(!canvas){
+    canvas = document.createElement('canvas');
+    canvas.id = 'chart'; canvas.setAttribute('aria-label', 'Time series chart');
+    $('chartWrap').appendChild(canvas);
+  }
+  const ctx = canvas.getContext('2d');
+  if(chart) chart.destroy();
+
+  const type = typeSel;
+  const labels = series.map(p => p.year);
+  const tickStyle = {font: {family: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", size: 10}, color: '#C9D3CC'};
+  const gridStyle = {color: 'rgba(255,255,255,0.07)'};
+  const base = {responsive: true, maintainAspectRatio: false,
+                plugins: {legend: {display: false}}};
+
+  if(meta._zones){
+    const oneYear = meta._zones[0].series.length === 1;
+    if(oneYear){
+      chart = new Chart(ctx, {
+        type: 'bar',
+        data: {labels: meta._zones.map(z => z.label),
+               datasets: [{data: meta._zones.map(z => z.series[0].value),
+                           backgroundColor: meta._zones.map(z => z.color),
+                           borderWidth: 0, categoryPercentage: 0.7, barPercentage: 0.8}]},
+        options: {...base,
+          plugins: {legend: {display: false},
+                    tooltip: {callbacks: {label: c => ' ' + fmtVal(c.parsed.y)}}},
+          scales: {x: {ticks: tickStyle, grid: {display: false}},
+                   y: {ticks: {...tickStyle, callback: v => fmtVal(v)}, grid: gridStyle}}}
+      });
+      return;
+    }
+    const asBars = type === 'bar';
+    chart = new Chart(ctx, {
+      type: asBars ? 'bar' : 'line',
+      data: {labels: meta._zones[0].series.map(p => p.year),
+        datasets: meta._zones.map(z => ({
+          label: z.label,
+          data: z.series.map(p => p.value),
+          borderColor: z.color,
+          backgroundColor: asBars ? z.color : z.color + '26',
+          pointBackgroundColor: z.color, pointRadius: 3,
+          fill: false, tension: 0.25, spanGaps: true,
+        }))},
+      options: {...base,
+        plugins: {legend: {display: true, labels: {color: '#C9D3CC',
+                    font: {family: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", size: 10}, boxWidth: 12}},
+                  tooltip: {callbacks: {label: c => ' ' + c.dataset.label + ': ' + fmtVal(c.parsed.y)}}},
+        scales: {x: {ticks: tickStyle, grid: gridStyle},
+                 y: {ticks: {...tickStyle, callback: v => fmtVal(v)}, grid: gridStyle}}}
+    });
+    return;
+  }
+
+  if(meta.class_map){
+    const cm = meta.class_map;
+    const codes = Object.keys(cm).map(Number).sort((a, b) => a - b);
+    const tip = {callbacks: {label: c => ' ' + (classLabel(meta, series[c.dataIndex].value) ?? '\u2014')}};
+
+    if(type === 'csteps'){
+      // class timeline: y = ordered class, stepped line shows transitions
+      const idx = {}; codes.forEach((c, i) => idx[c] = i);
+      chart = new Chart(ctx, {type: 'line',
+        data: {labels, datasets: [{
+          data: series.map(p => p.value == null ? null : (idx[Math.round(p.value)] ?? null)),
+          borderColor: '#9FB0A8', stepped: 'middle', tension: 0, fill: false,
+          pointRadius: 5,
+          pointBackgroundColor: series.map(p => {
+            const e = p.value != null && cm[String(Math.round(p.value))];
+            return e ? e.color : '#5C6B63';
+          }),
+        }]},
+        options: {...base, plugins: {...base.plugins, tooltip: tip},
+          scales: {x: {ticks: tickStyle, grid: gridStyle},
+                   y: {min: -0.4, max: codes.length - 0.6,
+                       ticks: {...tickStyle, stepSize: 1, font: {family: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", size: 8},
+                               callback: i => {
+                                 const e = cm[String(codes[i])];
+                                 return e ? (e.label.length > 15 ? e.label.slice(0, 14) + '\u2026' : e.label) : '';
+                               }},
+                       grid: gridStyle}}}});
+      return;
+    }
+    // class bars: equal height, coloured by the dominant class
+    const colors = series.map(p => {
+      const e = p.value != null && cm[String(Math.round(p.value))];
+      return e ? e.color : '#5C6B63';
+    });
+    chart = new Chart(ctx, {type: 'bar',
+      data: {labels, datasets: [{data: series.map(p => p.value == null ? null : 1),
+                                 backgroundColor: colors, borderWidth: 0,
+                                 categoryPercentage: 0.95, barPercentage: 0.95}]},
+      options: {...base, plugins: {...base.plugins, tooltip: tip},
+                scales: {x: {ticks: tickStyle, grid: {display: false}},
+                         y: {display: false, max: 1.15}}}});
+    return;
+  }
+
+  // continuous values: line / bar / stepped, user's choice
+  const asBars = type === 'bar';
+  chart = new Chart(ctx, {
+    type: asBars ? 'bar' : 'line',
+    data: {labels, datasets: [{
+      label: meta.value_label,
+      data: series.map(p => p.value),
+      borderColor: '#E4572E',
+      backgroundColor: asBars ? '#E4572E' : 'rgba(228,87,46,0.10)',
+      pointBackgroundColor: '#7FD0BC',
+      pointRadius: series.length === 1 ? 6 : 3,
+      fill: type === 'line',
+      stepped: type === 'step' ? 'middle' : false,
+      tension: type === 'step' ? 0 : 0.25,
+      spanGaps: true,
+      categoryPercentage: 0.6, barPercentage: 0.8,
+    }]},
+    options: {...base,
+      plugins: {...base.plugins,
+                tooltip: {callbacks: {label: c => ' ' + fmtVal(c.parsed.y)}}},
+      scales: {x: {ticks: tickStyle, grid: gridStyle},
+               y: {ticks: {...tickStyle, callback: v => fmtVal(v)}, grid: gridStyle}}}
+  });
+}
+
+/* PDF report: Zonal Multi-Year Analysis */
+$('pdfBtn').addEventListener('click', async () => {
+  if(!lastRuns || !lastRuns.dsKey || !lastRuns.zones[0].spec) return;
+  const btn = $('pdfBtn');
+  btn.disabled = true; btn.textContent = 'Building report\u2026';
+  toast('Building the PDF \u2014 each year is rendered at high resolution; this can take a minute\u2026', 20000);
+  try{
+    const r = await fetch(BACKEND_URL + '/report', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dataset: lastRuns.dsKey, stat: lastRuns.stat,
+        region: lastRuns.regionSpec,
+        zones: lastRuns.zones.map(z => ({label: z.label, color: z.color,
+                                         spec: z.spec, series: z.series}))})});
+    if(!r.ok){
+      let d = ''; try{ d = (await r.json()).detail || ''; }catch(e){}
+      throw new Error(d || ('HTTP ' + r.status));
+    }
+    const b = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'DeepSeeGo_Zonal_Report.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('Report downloaded');
+  }catch(e){ toast('Report: ' + e.message + ' \u2014 rebuilding usually succeeds (transient Earth Engine load).', 10000); }
+  btn.disabled = false; btn.textContent = '\u2913 PDF report';
+});
+
+/* filmstrip click -> 2048 px download of that epoch, clipped to the ROI */
+$('strip').addEventListener('click', async ev => {
+  const frame = ev.target.closest('.frame');
+  if(!frame || !lastAnalysis || !frame.querySelector('img')) return;
+  const year = frame.dataset.year === 'ctx' ? null : +frame.dataset.year;
+  toast('Preparing high-resolution image\u2026', 8000);
+  try{
+    const j = await api('/hires', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dataset: lastAnalysis.dataset, year,
+                            region: lastAnalysis.region})});
+    try{
+      const r = await fetch(j.url);
+      const b = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = `DeepSeeGo_${lastAnalysis.dataset}_${year == null ? 'satellite' : year}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      toast('High-resolution image downloaded');
+    }catch(x){ window.open(j.url, '_blank'); }
+  }catch(e){ toast('High-res: ' + e.message, 7000); }
+});
+
+/* ---------- Advanced Analysis: guided zone wizard ---------- */
+const BASKETS = {
+  sat: {sub: ['explore', 'adv'], default: 'explore'},
+  urban: {sub: ['site'], default: 'site'},
+  climate: {sub: ['aq'], default: 'aq'},
+};
+const ALL_TABS = ['explore', 'adv', 'site', 'aq'];
+function showTab(tab){
+  ALL_TABS.forEach(t => { const el = $('tab-' + t); if(el) el.hidden = t !== tab; });
+  document.querySelectorAll('#subBar button').forEach(x =>
+    x.classList.toggle('active', x.dataset.tab === tab));
+  if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
+  if(tab === 'aq') aqInit();
+  if(tab === 'site') siteInit();
+}
+function setBasket(name){
+  document.querySelectorAll('#basketBar button').forEach(x =>
+    x.classList.toggle('active', x.dataset.basket === name));
+  const b = BASKETS[name];
+  // sub-tab bar only shows when a basket has more than one sub-tab
+  const sub = $('subBar');
+  sub.style.display = b.sub.length > 1 ? 'flex' : 'none';
+  sub.querySelectorAll('button').forEach(btn =>
+    btn.style.display = b.sub.includes(btn.dataset.tab) ? '' : 'none');
+  showTab(b.default);
+}
+$('basketBar').querySelectorAll('button').forEach(b =>
+  b.addEventListener('click', () => setBasket(b.dataset.basket)));
+$('subBar').querySelectorAll('button').forEach(b =>
+  b.addEventListener('click', () => showTab(b.dataset.tab)));
+setBasket('sat');
+
+function populateAdvSelectors(){ updateCalcYearLabel(); }
+function nearestYear(dsKey){
+  const d = DS[dsKey]; if(!d) return null;
+  const ys = d.analysis_years || d.years;
+  const want = +$('yearSel').value || ys[ys.length - 1];
+  return ys.reduce((a, b) => Math.abs(b - want) < Math.abs(a - want) ? b : a);
+}
+function updateCalcYearLabel(){
+  const d = DS[$('datasetSel').value];
+  const y = nearestYear($('datasetSel').value);
+  if(d) $('advCalcOne').textContent =
+    (d.kind === 'raster' && y) ? `Calculate ${y} \u00b7 ${d.label}`
+                               : 'Calculate (pick a raster layer)';
+}
+$('datasetSel').addEventListener('change', updateCalcYearLabel);
+$('yearSel').addEventListener('change', updateCalcYearLabel);
+
+/* wizard state + map layers */
+const advLineLayer = L.featureGroup().addTo(map);
+const advBndLayer  = L.featureGroup().addTo(map);
+const advDrawLayer = L.featureGroup().addTo(map);
+const advBufLayer  = L.featureGroup().addTo(map);   // dashed buffered-lines preview
+const wiz = {lines: [], buffer: 0, reach: null, boundary: null, extras: [],
+             fragments: null, fragLayers: null, assign: null, zones: null,
+             current: 0, mode: 'add', zoneRuns: null};
+let advRectFirst = null, advRectMarker = null;
+
+function relockFrom(n){
+  for(let i = n; i <= 6; i++) $('step' + i).classList.add('locked');
+  if(n <= 3){ $('advPolyList').innerHTML = '&mdash;'; wiz.boundary = null;
+              advBndLayer.clearLayers(); advBufLayer.clearLayers(); }
+  if(n <= 4){ wiz.extras = []; advDrawLayer.clearLayers();
+              renderExtraList();
+              $('advDrawHint').textContent = ''; $('advCircleRow').hidden = true; }
+  if(n <= 6) resetFragments();
+  $('advCalcSec').hidden = true;
+  advLayers.clearLayers();
+  mapClickMode = null;
+}
+function unlock(n){ $('step' + n).classList.remove('locked'); }
+
+function buildAdvShapeLists(){
+  const box = $('advLineList'); if(!box) return;
+  const lines = allShapes.filter(s => s.gtype === 'line');
+  box.innerHTML = lines.length
+    ? lines.map(s => `<label><input type="checkbox" value="${s.name}">` +
+                     `<i>\u3030</i>${s.name}</label>`).join('')
+    : 'No line layers (KML roads / metro / rail) in the bucket yet.';
+  box.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
+    wiz.lines = [...box.querySelectorAll('input:checked')].map(i => i.value);
+    relockFrom(3);
+    advLineLayer.clearLayers();
+    if(wiz.lines.length) unlock(2); else $('step2').classList.add('locked');
+  }));
+}
+
+$('advBufferApply').addEventListener('click', async () => {
+  const buf = parseFloat($('advBuffer').value);
+  if(!(buf > 0)) return toast('Buffer must be greater than 0 km');
+  if(!wiz.lines.length) return toast('Tick at least one line layer');
+  const btn = $('advBufferApply');
+  btn.disabled = true; btn.textContent = 'Loading lines\u2026';
+  relockFrom(3);                       // reset downstream BEFORE rebuilding
+  try{
+    advLineLayer.clearLayers();
+    let bounds = null;
+    for(const name of wiz.lines){
+      try{
+        const j = await api('/shapes/geometry?name=' + encodeURIComponent(name));
+        j.features.forEach(f => {
+          const lyr = L.geoJSON(f.geometry, {style: {color: '#0B5A49', weight: 3}})
+                       .addTo(advLineLayer);
+          bounds = bounds ? bounds.extend(lyr.getBounds()) : lyr.getBounds();
+        });
+        if(j.note) toast(j.note, 6000);
+      }catch(lineErr){
+        toast('\u201c' + name + '\u201d could not load: ' + lineErr.message, 8000);
+      }
+    }
+    if(!bounds) throw new Error('none of the selected line layers loaded');
+    wiz.buffer = buf;
+    const dLat = buf / 110.6;
+    const dLon = buf / (111.3 * Math.cos(bounds.getCenter().lat * Math.PI / 180));
+    wiz.reach = [bounds.getWest() - dLon, bounds.getSouth() - dLat,
+                 bounds.getEast() + dLon, bounds.getNorth() + dLat];
+    map.fitBounds(bounds.pad(0.2));
+
+    // immediate visual: the buffered corridor itself (dashed teal)
+    try{
+      const bp = await api('/region_preview', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({region: {type: 'advanced',
+          shapes: wiz.lines.map(nm => ({name: nm})), buffer_km: buf}})});
+      advBufLayer.clearLayers();
+      const bl = L.geoJSON(bp.geometry, {style: {color: '#0B5A49', weight: 2,
+                           dashArray: '4 4', fillOpacity: 0.05}}).addTo(advBufLayer);
+      map.fitBounds(bl.getBounds().pad(0.1));
+    }catch(bpErr){ toast('Buffer preview: ' + bpErr.message, 6000); }
+
+    // boundaries whose bbox can intersect the buffered reach
+    const [w, s, e, n] = wiz.reach || [-180, -90, 180, 90];
+    const polys = allShapes.filter(sh => sh.gtype === 'polygon');
+    let usable = polys.filter(sh => !sh.bbox ||
+      !(sh.bbox[2] < w || sh.bbox[0] > e || sh.bbox[3] < s || sh.bbox[1] > n));
+    let noteRow = '';
+    if(!usable.length && polys.length){          // never dead-end the wizard
+      usable = polys;
+      noteRow = '<p class="hint">(none verified within reach \u2014 showing all)</p>';
+    }
+    $('advPolyList').innerHTML = usable.length
+      ? noteRow + usable.map(sh => `<label><input type="radio" name="advBnd" value="${sh.name}">` +
+          `<i>\u25a6</i>${sh.name}${sh.bbox ? '' : ' <span style="color:var(--dim)">?</span>'}</label>`).join('')
+      : 'No polygon boundary layers in the bucket yet.';
+    $('advPolyList').querySelectorAll('input').forEach(r =>
+      r.addEventListener('change', async () => {
+        relockFrom(4);
+        wiz.boundary = r.value;
+        advBndLayer.clearLayers();
+        try{
+          const j = await api('/shapes/geometry?name=' + encodeURIComponent(r.value));
+          j.features.forEach(f => L.geoJSON(f.geometry,
+            {style: {color: '#5C6B63', weight: 2, fillOpacity: 0.03}}).addTo(advBndLayer));
+          unlock(4);
+        }catch(err){ toast('Boundary: ' + err.message, 7000); }
+      }));
+    unlock(3);
+  }catch(e2){ toast('Lines: ' + e2.message, 7000); }
+  btn.disabled = false; btn.textContent = 'Apply buffer';
+});
+
+/* step 4: drawn extra shapes (any number) */
+function renderExtraList(){
+  const box = $('advExtraList'); if(!box) return;
+  box.innerHTML = wiz.extras.map((e, i) =>
+    `<div class="xrow"><span>${i + 1} \u00b7 ${e.label}</span>` +
+    `<button class="ghost" data-x="${i}">\u2715</button></div>`).join('');
+  box.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.x;
+    advDrawLayer.removeLayer(wiz.extras[i].layer);
+    wiz.extras.splice(i, 1);
+    relockFrom(5);
+    renderExtraList();
+  }));
+}
+$('advRect').addEventListener('click', () => {
+  $('advCircleRow').hidden = true;
+  mapClickMode = 'advRect1';
+  $('advDrawHint').textContent = 'Tap the map: first corner\u2026';
+});
+$('advCircleBtn').addEventListener('click', () => {
+  $('advCircleRow').hidden = false;
+  mapClickMode = 'advCircle';
+  $('advDrawHint').textContent = 'Tap the map to place the circle centre\u2026';
+});
+$('advExtraDone').addEventListener('click', () => { mapClickMode = null; unlock(5); });
+$('advBndSkip').addEventListener('click', () => {
+  relockFrom(4);
+  wiz.boundary = null;
+  $('advPolyList').querySelectorAll('input').forEach(r => r.checked = false);
+  unlock(4);
+});
+
+/* steps 5+6: fragments and zone allocation */
+const fragLayerG = L.featureGroup().addTo(map);
+const ZONE_COLORS = ['#E4572E', '#2A9D8F', '#E9C46A', '#9B5DE5',
+                     '#00B4D8', '#F15BB5', '#84CC16', '#FF8FA3'];
+const FRAG_STYLE = {color: '#9FB0A8', weight: 1.5, dashArray: '3 3',
+                    fillColor: '#9FB0A8', fillOpacity: 0.18};
+const zStyle = (i, done) => ({color: ZONE_COLORS[i % 8], weight: done ? 2.5 : 2,
+                              fillColor: ZONE_COLORS[i % 8], fillOpacity: 0.3,
+                              dashArray: null});
+
+function resetFragments(){
+  fragLayerG.clearLayers();
+  wiz.fragments = null; wiz.fragLayers = null; wiz.assign = null;
+  wiz.zones = null; wiz.current = 0; wiz.mode = 'add'; wiz.zoneRuns = null;
+  const zc = $('advZonesConfirm');
+  if(zc){
+    zc.hidden = true;
+    $('drawerActions').hidden = true;
+    $('zwyBtn').disabled = true;
+    $('pdfBtn').hidden = true;
+    $('advZoneConfirm').disabled = true; $('advZoneNew').disabled = true;
+    $('advZonesPreview').disabled = true;
+    $('zoneName').textContent = 'Zone 1'; $('zoneLeft').textContent = '';
+    $('zoneSwatch').style.background = ZONE_COLORS[0];
+    $('advAdd').classList.add('active'); $('advRemove').classList.remove('active');
+  }
+}
+
+function updateZoneUI(){
+  if(!wiz.fragments) return;
+  const cur = wiz.current, z = wiz.zones[cur];
+  const inCur = Object.values(wiz.assign).filter(v => v === cur).length;
+  const unassigned = wiz.fragments.length - Object.keys(wiz.assign).length;
+  $('zoneSwatch').style.background = ZONE_COLORS[cur % 8];
+  $('zoneName').textContent = 'Zone ' + (cur + 1) + (z.confirmed ? ' \u2713' : '');
+  $('zoneLeft').textContent = unassigned + ' unallocated';
+  $('advZoneConfirm').disabled = z.confirmed || inCur === 0;
+  $('advZoneNew').disabled = !z.confirmed || unassigned === 0;
+  // at least one confirmed zone is enough; unallocated fragments will
+  // simply be excluded from the analysis
+  $('advZonesPreview').disabled = !wiz.zones.some(zz => zz.confirmed);
+}
+
+$('advFragment').addEventListener('click', async () => {
+  if(!wiz.lines.length || !(wiz.buffer > 0))
+    return toast('Complete steps 1\u20132 first');
+  const btn = $('advFragment');
+  btn.disabled = true; btn.textContent = 'Fragmenting\u2026';
+  try{
+    const j = await api('/fragments', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({shapes: wiz.lines.map(n => ({name: n})),
+                            buffer_km: wiz.buffer,
+                            boundary: wiz.boundary ? {name: wiz.boundary} : null,
+                            extras: wiz.extras.map(e => e.spec)})});
+    // only the fragments remain on screen
+    advLineLayer.clearLayers(); advBufLayer.clearLayers();
+    advBndLayer.clearLayers(); advDrawLayer.clearLayers();
+    advLayers.clearLayers(); regionLayers.clearLayers();
+    if(ghslLayer){ map.removeLayer(ghslLayer); ghslLayer = null; }
+    $('drawer').classList.remove('open');
+
+    resetFragments();
+    wiz.fragments = j.fragments; wiz.assign = {}; wiz.fragLayers = {};
+    wiz.zones = [{confirmed: false}]; wiz.current = 0; wiz.mode = 'add';
+    j.fragments.forEach(f => {
+      const lyr = L.geoJSON(f.geometry, {style: FRAG_STYLE}).addTo(fragLayerG);
+      lyr.bindTooltip('#' + (f.id + 1) + ' \u00b7 ' + f.area_km2 + ' km\u00b2',
+                      {sticky: true});
+      lyr.on('click', ev => {
+        L.DomEvent.stopPropagation(ev);
+        if($('step6').classList.contains('locked')) return;
+        const cur = wiz.current, owner = wiz.assign[f.id];
+        if(wiz.mode === 'add'){
+          if(owner !== undefined && owner !== cur)
+            return toast('Fragment is in Zone ' + (owner + 1) +
+                         (wiz.zones[owner].confirmed ? ' (confirmed \u2014 use Reset)' : ''));
+          if(wiz.zones[cur].confirmed) return toast('This zone is confirmed');
+          wiz.assign[f.id] = cur;
+          lyr.setStyle(zStyle(cur, false));
+        }else{
+          if(owner === undefined) return;
+          if(wiz.zones[owner].confirmed)
+            return toast('Zone ' + (owner + 1) + ' is confirmed \u2014 use Reset');
+          if(owner !== cur) return toast('Fragment belongs to Zone ' + (owner + 1));
+          delete wiz.assign[f.id];
+          lyr.setStyle(FRAG_STYLE);
+        }
+        updateZoneUI();
+      });
+      wiz.fragLayers[f.id] = lyr;
+    });
+    map.fitBounds(fragLayerG.getBounds().pad(0.1));
+    unlock(6);
+    updateZoneUI();
+    toast(j.fragments.length + ' fragments \u2014 tap to allocate into Zone 1');
+  }catch(e){ toast('Fragments: ' + e.message, 8000); }
+  btn.disabled = false; btn.textContent = 'Create fragments';
+});
+
+$('advAdd').addEventListener('click', () => { wiz.mode = 'add';
+  $('advAdd').classList.add('active'); $('advRemove').classList.remove('active'); });
+$('advRemove').addEventListener('click', () => { wiz.mode = 'remove';
+  $('advRemove').classList.add('active'); $('advAdd').classList.remove('active'); });
+
+$('advZoneConfirm').addEventListener('click', () => {
+  const cur = wiz.current;
+  wiz.zones[cur].confirmed = true;
+  Object.entries(wiz.assign).forEach(([id, zi]) => {
+    if(zi === cur) wiz.fragLayers[id].setStyle(zStyle(cur, true));
+  });
+  updateZoneUI();
+});
+$('advZoneNew').addEventListener('click', () => {
+  wiz.zones.push({confirmed: false});
+  wiz.current = wiz.zones.length - 1;
+  wiz.mode = 'add';
+  $('advAdd').classList.add('active'); $('advRemove').classList.remove('active');
+  updateZoneUI();
+});
+$('advZonesReset').addEventListener('click', () => {
+  if(!wiz.fragments) return;
+  wiz.assign = {}; wiz.zones = [{confirmed: false}];
+  wiz.current = 0; wiz.mode = 'add'; wiz.zoneRuns = null;
+  Object.values(wiz.fragLayers).forEach(l => l.setStyle(FRAG_STYLE));
+  $('advZonesConfirm').hidden = true; $('advCalcSec').hidden = true;
+  $('advAdd').classList.add('active'); $('advRemove').classList.remove('active');
+  updateZoneUI();
+});
+$('advZonesPreview').addEventListener('click', () => {
+  map.fitBounds(fragLayerG.getBounds().pad(0.1));
+  const k = wiz.zones.filter((z, i) =>
+    Object.values(wiz.assign).some(v => v === i)).length;
+  const un = wiz.fragments.length - Object.keys(wiz.assign).length;
+  toast(k + ' zone' + (k > 1 ? 's' : '') +
+        (un ? ' \u00b7 ' + un + ' fragment' + (un > 1 ? 's' : '') +
+              ' unallocated (excluded from analysis)' : '') +
+        ' \u2014 confirm to continue');
+  $('advZonesConfirm').hidden = false;
+});
+$('advZonesConfirm').addEventListener('click', () => {
+  const zoneRuns = [];
+  wiz.zones.forEach((z, i) => {
+    const coords = [];
+    wiz.fragments.forEach(f => {
+      if(wiz.assign[f.id] === i) coords.push(f.geometry.coordinates);
+    });
+    if(coords.length)
+      zoneRuns.push({label: 'Zone ' + (i + 1), color: ZONE_COLORS[i % 8],
+                     spec: {type: 'geojson',
+                            geometry: {type: 'MultiPolygon', coordinates: coords}}});
+  });
+  if(!zoneRuns.length) return toast('No zones with fragments');
+  wiz.zoneRuns = zoneRuns;
+  // unallocated fragments: dim them and leave them out of the region
+  wiz.fragments.forEach(f => {
+    if(wiz.assign[f.id] === undefined)
+      wiz.fragLayers[f.id].setStyle({fillOpacity: 0.04, color: '#5C6B63'});
+  });
+  const allCoords = wiz.fragments
+    .filter(f => wiz.assign[f.id] !== undefined)
+    .map(f => f.geometry.coordinates);
+  Object.values(wiz.fragLayers).forEach(l => l.setStyle({fillOpacity: 0.12}));
+  setRegion({type: 'geojson',
+             geometry: {type: 'MultiPolygon', coordinates: allCoords}},
+            'Zones \u00b7 ' + zoneRuns.length + ' zone' +
+            (zoneRuns.length > 1 ? 's' : '') + ' \u00b7 ' +
+            wiz.fragments.length + ' fragments', false);
+  populateAdvSelectors();
+  updateCalcYearLabel();
+  $('advCalcSec').hidden = false;
+  $('advCalcSec').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  $('drawerActions').hidden = false;
+  $('zwyBtn').disabled = true;             // unlocks after the year calculation
+  $('drawer').classList.add('open');
+  toast('Zones confirmed \u2014 run \u201c' + $('advCalcOne').textContent +
+        '\u201d in the analysis pane.');
+});
+
+async function runAdvanced(allYears, tableOnly){
+  if(!wiz.zoneRuns || !wiz.zoneRuns.length)
+    return toast('Confirm the zones first');
+  const runs = wiz.zoneRuns;
+  const ds = $('datasetSel').value, stat = $('advStat').value;
+  const meta = DS[ds];
+  if(!meta || meta.kind !== 'raster')
+    return toast('Select a raster dataset in Explore \u203a Layer \u2014 vector layers (roads, building polygons) have fixed analyses.');
+  const yr = nearestYear(ds);
+  const b1 = $('advCalcOne'), b2 = $('zwyBtn');
+  b1.disabled = b2.disabled = true;
+  $('drawer').classList.add('open');
+  paneMode('analysis');
+  $('drawerSub').textContent = meta.label + ' \u00b7 ' + stat.toUpperCase() +
+    (allYears ? '' : ' \u00b7 ' + yr) +
+    ' \u00b7 ' + runs.length + ' zone' + (runs.length > 1 ? 's' : '');
+  lastAnalysis = {dataset: ds, region: regionSpec};
+  const body = z => JSON.stringify({dataset: ds, region: z.spec, stat,
+                                    year: allYears ? null : yr, all_years: allYears});
+  try{
+    const results = await Promise.all(runs.map(z =>
+      api('/calc', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: body(z)})));
+    const single = runs.length === 1;
+    lastRuns = {title: meta.label + ' \u00b7 ' + stat.toUpperCase(),
+                file: ds + '_' + stat + '_zones',
+                dsKey: ds, stat: stat, regionSpec: regionSpec,
+                zones: runs.map((z, i) => ({label: z.label, color: z.color,
+                                            spec: z.spec,
+                                            series: results[i].series}))};
+    $('csvBtn').hidden = false;
+    const metaClone = {...meta,
+      value_label: stat.toUpperCase() + ' \u00b7 ' + meta.label,
+      class_map: (single && !tableOnly && stat === 'mode') ? meta.class_map : null,
+      _zones: (single && !tableOnly) ? null : lastRuns.zones};
+    const series = results[0].series;
+    lastSeries = series; lastMeta = metaClone;
+    buildChartHead(metaClone, series);
+    if(tableOnly && $('chartType')) $('chartType').value = 'table';
+    const strip = $('strip');
+    strip.innerHTML =
+      `<div class="frame" data-year="ctx">
+         <div class="imgbox"><span style="font-family:var(--mono);font-size:10px;color:#9FB0A8">\u2026</span></div>
+         <div class="yr">Satellite \u00b7 zones</div><div class="val"></div>
+       </div>` +
+      series.map(p =>
+      `<div class="frame" data-year="${p.year}">
+         <div class="imgbox"><span style="font-family:var(--mono);font-size:10px;color:#9FB0A8">\u2026</span></div>
+         <div class="yr">${p.year}</div><div class="val"></div>
+       </div>`).join('');
+    try{
+      await ensureChart();
+      drawChart(series, metaClone);
+    }catch(chartErr){
+      $('chartWrap').innerHTML =
+        `<div class="chartHead"><span class="paneLabel" id="chartLabel">${metaClone.value_label}</span></div>` +
+        '<div style="font-family:var(--mono);font-size:11px;overflow-y:auto;color:#E7EDE8">' +
+        runs.map((z, zi) => `<b style="color:${z.color}">${z.label}</b>` +
+          results[zi].series.map(p => `<div style="display:flex;justify-content:space-between;` +
+            `border-bottom:1px solid #2A3A33;padding:3px 0"><b>${p.year}</b>` +
+            `<span>${classLabel(metaClone, p.value) ?? fmtVal(p.value)}</span></div>`).join('')
+        ).join('') + '</div>';
+    }
+    if(single){
+      series.forEach(p => {
+        const f = strip.querySelector(`.frame[data-year="${p.year}"] .val`);
+        if(f) f.textContent = classLabel(metaClone, p.value) ?? fmtVal(p.value);
+      });
+    }
+    const th = await api('/thumbnails', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dataset: ds, region: regionSpec,
+                            years: series.map(p => p.year)})});
+    if(th.context){
+      const cb = strip.querySelector('.frame[data-year="ctx"] .imgbox');
+      if(cb) cb.innerHTML = `<img src="${th.context.url}" alt="Satellite view of zones" title="Click to download high-res" loading="lazy">`;
+    }
+    th.thumbnails.forEach(t => {
+      const box = strip.querySelector(`.frame[data-year="${t.year}"] .imgbox`);
+      if(box) box.innerHTML = `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
+    });
+    if(!allYears) $('zwyBtn').disabled = false;   // year calc done -> unlock
+    if(allYears) $('pdfBtn').hidden = false;      // report ready to build
+  }catch(e){ toast('Advanced analysis: ' + e.message, 8000); }
+  b1.disabled = false; b2.disabled = $('zwyBtn').disabled;
+}
+$('advCalcOne').addEventListener('click', () => runAdvanced(false));$('advCalcOne').addEventListener('click', () => runAdvanced(false, false));
+$('zwyBtn').addEventListener('click', () => runAdvanced(true, true));
+
+/* ---------- Bhuvan (ISRO/NRSC) WMS overlays ---------- */
+const BHUVAN_WMS = 'https://bhuvan-vec1.nrsc.gov.in/bhuvan/wms';
+const BHUVAN_STATES = [['AN','Andaman & Nicobar'],['AP','Andhra Pradesh'],
+  ['AR','Arunachal Pradesh'],['AS','Assam'],['BR','Bihar'],['CH','Chandigarh'],
+  ['CG','Chhattisgarh'],['DL','Delhi'],['GA','Goa'],['GJ','Gujarat'],
+  ['HP','Himachal Pradesh'],['HR','Haryana'],['JH','Jharkhand'],
+  ['JK','Jammu & Kashmir'],['KA','Karnataka'],['KL','Kerala'],
+  ['LD','Lakshadweep'],['MH','Maharashtra'],['ML','Meghalaya'],
+  ['MN','Manipur'],['MP','Madhya Pradesh'],['MZ','Mizoram'],
+  ['NL','Nagaland'],['OR','Odisha'],['PB','Punjab'],['PY','Puducherry'],
+  ['RJ','Rajasthan'],['SK','Sikkim'],['TG','Telangana'],['TN','Tamil Nadu'],
+  ['TR','Tripura'],['UK','Uttarakhand'],['UP','Uttar Pradesh'],
+  ['WB','West Bengal']];
+let bhuvanLayer = null;
+
+$('bhuvanState').innerHTML = BHUVAN_STATES.map(([c, n]) =>
+  `<option value="${c}" ${c === 'KA' ? 'selected' : ''}>${n}</option>`).join('');
+
+$('bhuvanAdd').addEventListener('click', () => {
+  const layerName = $('bhuvanTheme').value.replace('{ST}', $('bhuvanState').value);
+  if(bhuvanLayer) map.removeLayer(bhuvanLayer);
+  bhuvanLayer = L.tileLayer.wms(BHUVAN_WMS, {
+    layers: layerName, format: 'image/png', transparent: true,
+    version: '1.1.1', opacity: $('bhuvanOpacity').value / 100,
+    attribution: '&copy; ISRO/NRSC Bhuvan',
+  }).addTo(map);
+  toast('Bhuvan overlay: ' + layerName + ' \u2014 tiles load from NRSC, give it a moment.');
+});
+$('bhuvanClear').addEventListener('click', () => {
+  if(bhuvanLayer){ map.removeLayer(bhuvanLayer); bhuvanLayer = null; }
+});
+$('bhuvanOpacity').addEventListener('input', () => {
+  if(bhuvanLayer) bhuvanLayer.setOpacity($('bhuvanOpacity').value / 100);
+});
+
+/* ---------- Live Air Quality (multi-provider) ---------- */
+const AQ_PROVIDERS = [
+  ['open-meteo', 'Open-Meteo (CAMS)', 'keyless'],
+  ['openweather', 'OpenWeather', 'OPENWEATHER_KEY'],
+  ['openaq', 'OpenAQ', 'OPENAQ_KEY (optional)'],
+];
+const aqLayer = L.featureGroup().addTo(map);
+const stationMarkers = L.featureGroup().addTo(map);
+function drawStationMarkers(goodProviders){
+  stationMarkers.clearLayers();
+  goodProviders.forEach(([id, r]) => {
+    if(r.station_lat != null && r.station_lon != null){
+      L.marker([r.station_lat, r.station_lon]).addTo(stationMarkers)
+        .bindPopup('<b>' + (r.station || 'Station') + '</b><br>' +
+          (AQ_PROVIDERS.find(p => p[0] === id) || [id, id])[1] +
+          (r.distance_km != null ? '<br>' + r.distance_km + ' km from your point' : ''));
+    }
+  });
+}
+const aqState = {lat: null, lon: null};
+let aqStatus = null, aqInited = false;
+
+async function aqInit(){
+  if(aqInited) return; aqInited = true;
+  try{ aqStatus = await api('/air_quality_status'); }catch(e){ aqStatus = {}; }
+  $('aqProviders').innerHTML = AQ_PROVIDERS.map(([id, name, key]) => {
+    const ready = id === 'open-meteo' || (aqStatus && aqStatus[id]);
+    const badge = ready
+      ? '<span style="color:#84CC16">ready</span>'
+      : `<span style="color:#E4572E" title="set ${key} on Cloud Run">needs ${key}</span>`;
+    return `<label style="display:flex;align-items:center;gap:7px;font-size:12px;padding:2px 0">` +
+      `<input type="checkbox" value="${id}" ${id === 'open-meteo' ? 'checked' : ''} ` +
+      `${ready ? '' : 'disabled'}> ${name} \u2014 ${badge}</label>`;
+  }).join('');
+}
+async function aqGeocode(){
+  const q = $('aqSearchInput').value.trim(); if(!q) return;
+  try{
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const j = await r.json();
+    if(!j.length) return toast('Place not found');
+    const lat = +j[0].lat, lon = +j[0].lon;
+    map.setView([lat, lon], 16);
+    aqState.lat = lat; aqState.lon = lon;
+    aqLayer.clearLayers();
+    L.circleMarker([lat, lon], {radius: 6, color: '#00B4D8',
+      fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer)
+      .bindPopup(j[0].display_name.split(',').slice(0, 3).join(',')).openPopup();
+    $('aqRun').disabled = false;
+    $('aqApportion').disabled = false;
+    $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
+      ' \u2014 or tap the map to adjust';
+  }catch(e){ toast('Search failed'); }
+}
+$('aqSearchInput').addEventListener('keydown', ev => {
+  if(ev.key === 'Enter'){ ev.preventDefault(); aqGeocode(); }
+});
+$('aqPick').addEventListener('click', () => {
+  mapClickMode = 'aqPick';
+  $('aqStatus').textContent = 'Tap a location on the map\u2026';
+});
+$('aqRun').addEventListener('click', async () => {
+  if(aqState.lat == null) return;
+  const provs = [...$('aqProviders').querySelectorAll('input:checked')].map(i => i.value);
+  if(!provs.length) return toast('Select at least one provider');
+  const btn = $('aqRun');
+  btn.disabled = true; btn.textContent = 'Fetching\u2026';
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'Live Air Quality \u00b7 ' +
+    aqState.lat.toFixed(4) + ', ' + aqState.lon.toFixed(4);
+  $('siteWrap').hidden = false;
+  $('siteWrap').innerHTML = '<p class="hint">Querying providers\u2026</p>';
+  try{
+    const j = await api('/air_quality_live', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon, providers: provs})});
+    const entries = Object.entries(j.providers);
+    const good = entries.filter(([id, r]) => !r.error);
+    const bad = entries.filter(([id, r]) => r.error);
+    const pname = id => (AQ_PROVIDERS.find(p => p[0] === id) || [id, id])[1];
+
+    // header row of provider chips (AQI / station / distance summary)
+    const summary = good.map(([id, r]) => {
+      const bits = [];
+      if(r.aqi_us != null) bits.push('AQI ' + r.aqi_us + (r.category ? ' (' + r.category + ')' : ''));
+      if(r.aqi_owm_1to5 != null) bits.push('OWM ' + r.aqi_owm_1to5 + '/5');
+      if(r.station) bits.push(r.station + (r.distance_km != null ? ' \u00b7 ' + r.distance_km + ' km' : ''));
+      const col = r.color || '#7FD0BC';
+      return `<div class="siteSec" style="border-left:3px solid ${col};padding-left:8px">` +
+        `<b style="color:${col}">${pname(id)}</b>` +
+        `<div class="srcNote">${r.source || ''}${r.units ? ' \u00b7 ' + r.units : ''}</div>` +
+        (bits.length ? `<div class="srcNote">${bits.join(' \u00b7 ')}</div>` : '') + `</div>`;
+    }).join('');
+
+    // PIVOT: pollutants as rows, providers as columns
+    const POLL_ORDER = ['PM2.5', 'PM10', 'NO2', 'SO2', 'O3', 'CO', 'NH3'];
+    const allPolls = new Set();
+    good.forEach(([id, r]) => Object.keys(r.pollutants || {}).forEach(k => allPolls.add(k)));
+    const rows = [...allPolls].sort((a, b) => {
+      const ia = POLL_ORDER.indexOf(a), ib = POLL_ORDER.indexOf(b);
+      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    let pivotTable = '';
+    if(good.length && rows.length){
+      pivotTable = '<table class="aqTable"><tr><th>Pollutant</th>' +
+        good.map(([id, r]) => `<th style="text-align:right">${pname(id).split(' ')[0]}</th>`).join('') +
+        '</tr>' +
+        rows.map(pol => '<tr><td>' + pol + '</td>' +
+          good.map(([id, r]) => {
+            const v = (r.pollutants || {})[pol];
+            return `<td style="text-align:right">${v == null ? '\u2014' : (+v).toFixed(1)}</td>`;
+          }).join('') + '</tr>').join('') +
+        '</table>' +
+        '<p class="srcNote">Rows: pollutants \u00b7 columns: sources. Units differ by provider (see each source above) \u2014 model estimates (Open-Meteo) and station readings (OpenAQ) are not directly comparable; read the pattern.</p>';
+    }
+    const errs = bad.map(([id, r]) =>
+      `<p class="srcNote" style="color:#E4572E">${pname(id)}: ${r.error}</p>`).join('');
+
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Sources</div>${summary || '<p class="srcNote">No sources returned data.</p>'}</div>` +
+      (pivotTable ? `<div class="siteSec"><div class="paneLabel">Pollutant comparison (\u00b5g/m\u00b3 where applicable)</div>${pivotTable}</div>` : '') +
+      (errs ? `<div class="siteSec">${errs}</div>` : '');
+
+    // drop station markers for any provider that reported a station location
+    drawStationMarkers(good);
+  }catch(e){ toast('Air quality: ' + e.message, 9000); }
+  btn.disabled = false; btn.textContent = 'Get live air quality';
+});
+
+const sourceMarkers = L.featureGroup().addTo(map);
+let apportionChart = null;
+const SRC_ICON = cat => L.divIcon({className: 'srcPin',
+  html: `<div style="width:12px;height:12px;border-radius:50%;border:2px solid #fff;` +
+        `background:${cat};box-shadow:0 0 4px rgba(0,0,0,.5)"></div>`,
+  iconSize: [12, 12], iconAnchor: [6, 6]});
+function drawSourceMarkers(sources, clat, clon, scanM){
+  sourceMarkers.clearLayers();
+  // scan-radius ring
+  L.circle([clat, clon], {radius: scanM, color: '#00B4D8', weight: 1.5,
+    fill: false, dashArray: '6 5'}).addTo(sourceMarkers);
+  (sources || []).forEach(s => {
+    if(s.src_lat == null) return;
+    L.marker([s.src_lat, s.src_lon], {icon: SRC_ICON(s.color || '#E4572E')})
+      .addTo(sourceMarkers)
+      .bindPopup(`<b>${s.label}</b><br>${s.kind || ''}` +
+        (s.dist_m != null ? `<br>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(1)+' km' : s.dist_m+' m'} away` : ''));
+  });
+}
+$('aqApportion').addEventListener('click', async () => {
+  if(aqState.lat == null) return;
+  const btn = $('aqApportion');
+  btn.disabled = true; btn.textContent = 'Analysing sources\u2026';
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'Pollutant source-proximity model \u00b7 ' +
+    aqState.lat.toFixed(4) + ', ' + aqState.lon.toFixed(4);
+  $('siteWrap').hidden = false;
+  sourceMarkers.clearLayers();
+  $('siteWrap').innerHTML = '<p class="hint">Scanning nearby pollutant sources (OpenStreetMap) and weighting by distance and prevailing wind\u2026</p>';
+  try{
+    const j = await api('/source_apportion', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon,
+        radius_m: +$('aqScanRadius').value})});
+    const km = ((j.scan_radius_m || 2500) / 1000).toFixed(1);
+    if(j.osm_ok === false){
+      $('siteWrap').innerHTML = '<div class="siteSec"><div class="paneLabel">Pollutant source-proximity model</div>' +
+        `<p class="srcNote" style="color:#E9C46A">${j.method}</p></div>`;
+    } else if(!j.contributions || !j.contributions.length){
+      $('siteWrap').innerHTML = '<div class="siteSec"><div class="paneLabel">Pollutant source-proximity model</div>' +
+        `<p class="srcNote">No mapped pollutant sources found within ${km} km (${j.sources_found} features). ` +
+        'This suggests a low-source area, or sparse OpenStreetMap coverage here.</p></div>';
+    } else {
+      const wind = j.prevailing_wind_from
+        ? `Prevailing wind from ${j.prevailing_wind_from} (${j.prevailing_wind_from_deg}\u00b0); upwind sources weighted higher.`
+        : 'Wind data unavailable; distance-only weighting.';
+      $('siteWrap').innerHTML = `
+        <div class="siteSec">
+          <div class="paneLabel">Estimated relative source influence <span class="per">\u00b7 ${km} km scan</span></div>
+          <div class="pieBox">${siteCanvas('cApportionPie').replace('chartBox','x')}</div>
+          <table class="aqTable" style="margin-top:8px">
+            <tr><th>Source</th><th>Share</th><th>Nearest</th><th>Count</th></tr>
+            ${j.contributions.map(c => `<tr>` +
+              `<td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c.color};margin-right:5px"></i>${c.label}</td>` +
+              `<td style="text-align:right">${c.pct}%</td>` +
+              `<td style="text-align:right">${c.nearest_m != null ? (c.nearest_m >= 1000 ? (c.nearest_m/1000).toFixed(1)+' km' : c.nearest_m+' m') : '\u2014'}</td>` +
+              `<td style="text-align:right">${c.count}</td></tr>`).join('')}
+          </table>
+          <p class="srcNote" style="margin-top:6px">${wind}</p>
+          <p class="srcNote">${j.method}</p>
+        </div>`;
+      drawSourceMarkers(j.sources_list, aqState.lat, aqState.lon, j.scan_radius_m || 2500);
+      if(apportionChart){ apportionChart.destroy(); apportionChart = null; }
+      apportionChart = new Chart($('cApportionPie').getContext('2d'), {
+        type: 'doughnut',
+        data: {labels: j.contributions.map(c => c.label),
+               datasets: [{data: j.contributions.map(c => c.pct),
+                 backgroundColor: j.contributions.map(c => c.color),
+                 borderColor: '#101B16', borderWidth: 1.5}]},
+        options: {responsive: true, maintainAspectRatio: false,
+          plugins: {legend: {position: 'right',
+            labels: {color: '#C9D3CC', font: {size: 11}, boxWidth: 12, padding: 6}},
+            tooltip: {callbacks: {label: x => ' ' + x.label + ': ' + x.parsed.toFixed(1) + '%'}}}}});
+    }
+  }catch(e){ toast('Source-proximity model: ' + e.message, 9000); }
+  btn.disabled = false; btn.textContent = 'Pollutant source-proximity model';
+});
+
+/* ---------- Bhuvan token APIs (via backend proxy) ---------- */
+const BHUVAN_PRESETS = [
+  ['Village Geocoding', 'geocode/villagegeocode.php', 'village=Ullal&token={token}'],
+  ['Village Reverse Geocoding', 'geocode/rgeo.php', 'lat={lat}&lon={lon}&token={token}'],
+  ['Postal & Hospital Details', 'proximity/postalhospital.php', 'lat={lat}&lon={lon}&token={token}'],
+  ['LULC 50K Statistics', 'lulc/lulc50k.php', 'state=KA&token={token}'],
+  ['LULC 50K AOI Wise Statistics', 'lulc/lulc50k_aoi.php', 'polygon=&token={token}'],
+  ['LULC 250K Statistics', 'lulc/lulc250k.php', 'state=KA&token={token}'],
+  ['LULC 250K AOI Wise Statistics', 'lulc/lulc250k_aoi.php', 'polygon=&token={token}'],
+  ['Shortest Path', 'routing/routing.php', 'lat1={lat1}&lon1={lon1}&lat2={lat2}&lon2={lon2}&token={token}'],
+  ['Ellipsoid to Geoid', 'geoid/geoid.php', 'lat={lat}&lon={lon}&ellhgt=50&token={token}'],
+];
+const bhuvanRouteLayer = L.featureGroup().addTo(map);
+const bhuvanRoute = {a: null, b: null};
+
+$('bhuvanPreset').innerHTML = BHUVAN_PRESETS.map((p, i) =>
+  `<option value="${i}">${p[0]}</option>`).join('');
+function bhuvanFill(){
+  const p = BHUVAN_PRESETS[+$('bhuvanPreset').value];
+  $('bhuvanPath').value = p[1];
+  $('bhuvanParams').value = p[2];
+}
+$('bhuvanPreset').addEventListener('change', bhuvanFill);
+bhuvanFill();
+
+$('bhuvanRoutePick').addEventListener('click', () => {
+  bhuvanRouteLayer.clearLayers();
+  bhuvanRoute.a = bhuvanRoute.b = null;
+  mapClickMode = 'routeA';
+  toast('Tap the route START on the map\u2026');
+});
+
+$('bhuvanRun').addEventListener('click', async () => {
+  const tok = $('bhuvanToken').value.trim();
+  if(!tok) return toast('Paste your daily Bhuvan access token first');
+  const pt = siteState.lat != null ? siteState : {lat: map.getCenter().lat, lon: map.getCenter().lng};
+  let params = $('bhuvanParams').value
+    .replaceAll('{token}', encodeURIComponent(tok))
+    .replaceAll('{lat}', pt.lat.toFixed(6)).replaceAll('{lon}', pt.lon.toFixed(6));
+  if(params.includes('{lat1}')){
+    if(!bhuvanRoute.a || !bhuvanRoute.b)
+      return toast('Use \u25ce Route taps to set the start and end points first');
+    params = params.replaceAll('{lat1}', bhuvanRoute.a.lat.toFixed(6))
+                   .replaceAll('{lon1}', bhuvanRoute.a.lng.toFixed(6))
+                   .replaceAll('{lat2}', bhuvanRoute.b.lat.toFixed(6))
+                   .replaceAll('{lon2}', bhuvanRoute.b.lng.toFixed(6));
+  }
+  const btn = $('bhuvanRun');
+  btn.disabled = true; btn.textContent = 'Calling\u2026';
+  const out = $('bhuvanOut');
+  out.hidden = false; out.textContent = 'Waiting for Bhuvan\u2026';
+  try{
+    const j = await api('/bhuvan_api', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: $('bhuvanPath').value.trim(), query: params})});
+    let body = j.body;
+    try{ body = JSON.stringify(JSON.parse(j.body), null, 2); }catch(e){}
+    out.textContent = body || '(empty response)';
+    if(/invalid|expired|unauth/i.test(body))
+      toast('Bhuvan says the token is invalid/expired \u2014 tokens last one day.', 8000);
+  }catch(e){
+    out.textContent = 'Error: ' + e.message;
+  }
+  btn.disabled = false; btn.textContent = 'Call API';
+});
+
+/* ---------- custom Bhuvan WMS ---------- */
+let customWms = null;
+$('customWmsAdd').addEventListener('click', () => {
+  const layer = $('customWmsLayer').value.trim();
+  if(!layer) return toast('Enter a workspace:LayerName from GetCapabilities');
+  const url = $('customWmsUrl').value.trim() || BHUVAN_WMS;
+  if(customWms) map.removeLayer(customWms);
+  customWms = L.tileLayer.wms(url, {layers: layer, format: 'image/png',
+    transparent: true, version: '1.1.1', opacity: $('bhuvanOpacity').value / 100,
+    attribution: '&copy; ISRO/NRSC Bhuvan'}).addTo(map);
+  toast('Custom WMS added: ' + layer);
+});
+
+/* ---------- Site Brief ---------- */
+function siteInit(){ /* region tools live in Explore; nothing to preload */ }
+const siteLayer = L.featureGroup().addTo(map);
+const siteState = {lat: null, lon: null};
+let siteCharts = [];
+
+function drawSite(){
+  siteLayer.clearLayers();
+  if(siteState.lat == null) return;
+  L.circleMarker([siteState.lat, siteState.lon],
+    {radius: 6, color: '#E4572E', fillColor: '#E4572E', fillOpacity: 0.9}).addTo(siteLayer);
+  L.circle([siteState.lat, siteState.lon],
+    {radius: +$('siteRadius').value, color: '#E4572E', weight: 2,
+     dashArray: '4 4', fillOpacity: 0.04}).addTo(siteLayer);
+}
+$('sitePick').addEventListener('click', () => {
+  mapClickMode = 'sitePick';
+  $('siteStatus').textContent = 'Tap the building or plot on the map\u2026';
+});
+$('siteRadius').addEventListener('change', () => {
+  drawSite();
+  if(siteState.lat != null)
+    $('siteStatus').textContent = siteState.lat.toFixed(5) + ', ' +
+      siteState.lon.toFixed(5) + ' \u00b7 ' + $('siteRadius').value + ' m context';
+});
+
+function paneMode(mode){
+  const site = mode === 'site';
+  $('siteWrap').hidden = !site;
+  $('chartWrap').hidden = site;
+  $('stripWrap').hidden = site;
+  $('csvBtn').hidden = site ? true : !lastRuns;
+  $('drawerActions').hidden = site ? true
+    : !(typeof wiz !== 'undefined' && wiz.zoneRuns && wiz.zoneRuns.length);
+}
+
+function siteChip(label, value, color){
+  return `<span class="chip2" style="border-color:${color}">` +
+         `${label} <b style="color:${color}">${value}</b></span>`;
+}
+function siteCanvas(id){ return `<div class="chartBox"><canvas id="${id}"></canvas></div>`; }
+function statLine(mo, key, unit, dp, sum){
+  const ok = mo.map((m, i) => [m[key], i]).filter(x => x[0] != null);
+  if(!ok.length) return '';
+  const f = v => (+v).toFixed(dp);
+  const hi = ok.reduce((a, x) => x[0] > a[0] ? x : a);
+  const lo = ok.reduce((a, x) => x[0] < a[0] ? x : a);
+  const agg = ok.reduce((a, x) => a + x[0], 0);
+  const head = sum ? `Annual total ${f(agg)}${unit}` : `Mean ${f(agg / ok.length)}${unit}`;
+  return `<p class="srcNote">${head} \u00b7 peak ${mo[hi[1]].month} ${f(hi[0])}${unit} \u00b7 low ${mo[lo[1]].month} ${f(lo[0])}${unit}</p>`;
+}
+function siteChart(id, labels, data, color){
+  const c = new Chart($(id).getContext('2d'), {
+    type: 'bar',
+    data: {labels, datasets: [{data, borderColor: color,
+      backgroundColor: color, borderRadius: 3,
+      categoryPercentage: 0.8, barPercentage: 0.9}]},
+    options: {responsive: true, maintainAspectRatio: false,
+      plugins: {legend: {display: false},
+                tooltip: {callbacks: {label: x => ' ' + fmtVal(x.parsed.y)}}},
+      scales: {x: {ticks: {font: {family: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", size: 8},
+                           color: '#C9D3CC'}, grid: {display: false}},
+               y: {ticks: {font: {family: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", size: 8},
+                           color: '#C9D3CC'},
+                   grid: {color: 'rgba(255,255,255,0.07)'}}}}});
+  siteCharts.push(c);
+}
+function sitePieChart(id, items){
+  const c = new Chart($(id).getContext('2d'), {
+    type: 'doughnut',
+    data: {labels: items.map(x => x.label),
+           datasets: [{data: items.map(x => x.pct),
+                       backgroundColor: items.map(x => x.color),
+                       borderColor: '#101B16', borderWidth: 1.5}]},
+    options: {responsive: true, maintainAspectRatio: false,
+      plugins: {legend: {position: 'right',
+                  labels: {color: '#C9D3CC', font: {size: 11}, boxWidth: 12,
+                           padding: 6}},
+                tooltip: {callbacks: {label: x => ' ' + x.label + ': ' +
+                          x.parsed.toFixed(1) + '%'}}}}});
+  siteCharts.push(c);
+}
+function prevailing(monthly, idxs){
+  let u = 0, v = 0, n = 0;
+  idxs.forEach(i => {
+    const m = monthly[i];
+    if(m.wind_ms != null && m.wind_from_deg != null){
+      const r = m.wind_from_deg * Math.PI / 180;
+      u += -m.wind_ms * Math.sin(r); v += -m.wind_ms * Math.cos(r); n++;
+    }
+  });
+  if(!n) return '\u2014';
+  const deg = (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360;
+  const C = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+  return C[Math.floor(((deg + 11.25) % 360) / 22.5)];
+}
+function dirStrip(mo){
+  return '<div class="dirRow">' + mo.map(m => {
+    if(m.wind_from_deg == null)
+      return `<span class="dirCell">${m.month[0]}</span>`;
+    const rot = (m.wind_from_deg + 180) % 360;   // arrow points downwind
+    return `<span class="dirCell" title="from ${m.wind_from} (${m.wind_from_deg}\u00b0)">` +
+           `<i style="display:inline-block;transform:rotate(${rot}deg)">\u2191</i>` +
+           `<b>${m.wind_from}</b>${m.month[0]}</span>`;
+  }).join('') + '</div>';
+}
+const bandCls = b => b ? ' class="b' + b.replace('-', '') + '"' : '';
+function noiseRow(name, dist, band, note){
+  const d = dist == null ? (note || 'none found nearby') :
+            dist >= 1000 ? (dist / 1000).toFixed(1) + ' km' : dist + ' m';
+  return `<tr><td>${name}</td><td>${d}</td><td${bandCls(band)}>${band || '\u2014'}</td></tr>`;
+}
+
+const siteRoiLayer = L.featureGroup().addTo(map);
+let siteRoiState = null, siteRoiRectFirst = null;
+function enableSiteRun(){
+  $('siteRun').disabled = (siteState.lat == null && siteRoiState == null);
+}
+const _hasRoiUI = !!$('siteRoiRect');
+function clearSiteRegions(kind){
+  if(kind === 'roi'){ siteLayer.clearLayers(); siteState.lat = null; siteState.lon = null; }
+  if(kind === 'point'){
+    siteRoiLayer.clearLayers(); siteRoiState = null;
+    if($('siteRoiHint')) $('siteRoiHint').textContent = '';
+    if($('siteRoiCircRow')) $('siteRoiCircRow').hidden = true;
+  }
+}
+if(_hasRoiUI) $('siteRoiRect').addEventListener('click', () => {
+  $('siteRoiCircRow').hidden = true;
+  mapClickMode = 'siteRoiR1';
+  $('siteRoiHint').textContent = 'Tap first corner\u2026';
+});
+if(_hasRoiUI) $('siteRoiCircle').addEventListener('click', () => {
+  $('siteRoiCircRow').hidden = false;
+  mapClickMode = 'siteRoiC';
+  $('siteRoiHint').textContent = 'Tap the circle centre\u2026';
+});
+if(_hasRoiUI) $('siteRoiClear').addEventListener('click', () => {
+  siteRoiLayer.clearLayers(); siteRoiState = null;
+  $('siteRoiHint').textContent = 'ROI cleared.';
+  $('siteRoiCircRow').hidden = true;
+  enableSiteRun();
+});
+
+$('siteRun').addEventListener('click', async () => {
+  if(siteState.lat == null && siteRoiState == null) return;
+  // ROI-only: derive a representative lat/lon for the climate cell
+  let plat = siteState.lat, plon = siteState.lon;
+  if(plat == null && siteRoiState){
+    const b = siteRoiLayer.getBounds();
+    plat = b.getCenter().lat; plon = b.getCenter().lng;
+  }
+  const btn = $('siteRun');
+  btn.disabled = true; btn.textContent = 'Generating\u2026';
+  $('drawer').classList.add('open');
+  paneMode('site');
+  $('drawerSub').textContent = 'Site Brief \u00b7 ' +
+    plat.toFixed(4) + ', ' + plon.toFixed(4);
+  siteCharts.forEach(c => c.destroy()); siteCharts = [];
+  $('siteWrap').innerHTML = '<p class="hint">Gathering climate, air quality, land cover, roads and noise sources\u2026</p>';
+  const opts = {method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({lat: plat, lon: plon,
+                                      radius_m: +$('siteRadius').value,
+                                      region: siteRoiState})};
+  try{
+    const j = await api('/site_brief', opts);
+    if(!j.air || !j.periods || !j.noise)
+      throw new Error('older backend version \u2014 deploy the latest main.py ' +
+        '(the health endpoint should report deepseego-v11 or later)');
+    const mo = j.monthly, L = mo.map(m => m.month), P = j.periods;
+    const chips = [];
+    if(j.green_pct != null) chips.push(siteChip('Green cover', j.green_pct + '%',
+      j.green_pct >= 40 ? '#84CC16' : j.green_pct >= 15 ? '#E9C46A' : '#E4572E'));
+    const built = (j.lulc.find(x => x.class === 50) || {}).pct;
+    if(built != null) chips.push(siteChip('Built-up', built + '%', '#C9D3CC'));
+    const pm = j.air.find(a => a.name.startsWith('PM2.5'));
+    if(pm && pm.band) chips.push(siteChip('PM2.5', pm.band,
+      pm.band === 'Low' ? '#84CC16' : pm.band === 'Moderate' ? '#E9C46A' : '#E4572E'));
+    if(j.lst_day_c != null) chips.push(siteChip('Day surface temp', j.lst_day_c + '\u00b0C', '#C9D3CC'));
+    if(j.road_km != null) chips.push(siteChip('Roads in ring', j.road_km + ' km', '#C9D3CC'));
+    const bh = j.site.building_height_m;
+    const N = j.noise;
+
+    $('siteWrap').innerHTML = `
+      <div class="siteSec">
+        <div class="paneLabel">Region details</div>
+        <table class="aqTable">
+          ${j.region && j.region.name ? `<tr><td>Region</td><td style="text-align:right">${j.region.name}</td></tr>` : ''}
+          <tr><td>Type</td><td style="text-align:right">${j.region && j.region.is_drawn ? 'Drawn ROI' : (j.site.radius_m + ' m radius')}</td></tr>
+          ${j.region && j.region.area_km2 != null ? `<tr><td>Area</td><td style="text-align:right">${j.region.area_km2} km\u00b2</td></tr>` : ''}
+          <tr><td>Centroid</td><td style="text-align:right">${j.region ? j.region.centroid_lat + ', ' + j.region.centroid_lon : plat.toFixed(5) + ', ' + plon.toFixed(5)}</td></tr>
+          ${j.region && j.region.altitude_m != null ? `<tr><td>Altitude</td><td style="text-align:right">${j.region.altitude_m} m</td></tr>` : ''}
+        </table>
+      </div>
+      <div class="siteSec">
+        <div class="paneLabel">Land cover use in region <span class="per">\u00b7 ${P.lulc}</span></div>
+        <div class="pieBox">${siteCanvas('cLulcPie').replace('chartBox','x')}</div>
+        ${j.lulc.slice(0, 6).map(x =>
+          `<div class="lulcRow"><i style="background:${x.color}"></i>${x.label}<span style="margin-left:auto">${x.pct}%</span></div>`).join('')}
+        <p class="srcNote">Green cover ${j.green_pct != null ? j.green_pct + '%' : '\u2014'}${
+          (j.lulc.find(x => x.class === 50) || {}).pct != null
+            ? ' \u00b7 built-up ' + (j.lulc.find(x => x.class === 50) || {}).pct + '%' : ''}</p>
+      </div>
+      <div class="siteSec">
+        <div class="paneLabel">Environment indicators \u00b7 ${j.site.radius_m} m context</div>
+        <div class="chips">${chips.join('')}</div>
+        <p class="srcNote" style="margin-top:5px">${bh != null
+          ? 'Selected structure: ~' + bh + ' m tall (' + P.buildings + ').'
+          : 'No building detected at the point \u2014 treated as an open site.'}
+          ${j.historical_note}</p>
+      </div>
+      <div class="siteSec"><div class="paneLabel">Air temperature \u00b0C <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cTemp')}${statLine(mo,'temp_c','\u00b0C',1)}</div>
+      <div class="siteSec"><div class="paneLabel">Relative humidity % <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cRh')}${statLine(mo,'rh_pct','%',0)}</div>
+      <div class="siteSec"><div class="paneLabel">Rainfall mm/month <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cRain')}${statLine(mo,'rain_mm',' mm',0,true)}</div>
+      <div class="siteSec"><div class="paneLabel">Wind m/s \u00b7 prevailing: monsoon ${prevailing(mo,[5,6,7,8])}, winter ${prevailing(mo,[11,0,1])} <span class="per">\u00b7 ${P.climate}</span></div>
+        ${siteCanvas('cWind')}${dirStrip(mo)}${statLine(mo,'wind_ms',' m/s',1)}</div>
+      <div class="siteSec"><div class="paneLabel">Solar kWh/m\u00b2/day <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cSolar')}${statLine(mo,'solar_kwh_m2_day','',2)}</div>
+      <div class="siteSec"><div class="paneLabel">Mean radiant temperature \u00b0C (approx., sun-exposed midday) <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cMrt')}${statLine(mo,'mrt_c','\u00b0C',1)}
+        <p class="srcNote">Estimated from ERA5 solar + thermal fluxes for an unshaded standing person; treat as indicative.</p></div>
+      <p class="srcNote">Data periods \u2014 climate: ${P.climate}; surface temp: ${P.lst};
+      land cover: ${P.lulc}; roads: ${P.roads}.
+      ERA5-Land describes the ~9 km mesoclimate, not street-level microclimate.</p>`;
+
+    sitePieChart('cLulcPie', j.lulc.slice(0, 6));
+    siteChart('cTemp', L, mo.map(m => m.temp_c), '#E4572E');
+    siteChart('cRh', L, mo.map(m => m.rh_pct), '#00B4D8');
+    siteChart('cRain', L, mo.map(m => m.rain_mm), '#2A9D8F');
+    siteChart('cWind', L, mo.map(m => m.wind_ms), '#7FD0BC');
+    siteChart('cSolar', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
+    siteChart('cMrt', L, mo.map(m => m.mrt_c), '#F15BB5');
+  }catch(e){ toast('Site brief: ' + e.message, 9000); }
+  btn.disabled = false; btn.textContent = 'Generate site brief';
+});
+
+/* ---------- mobile panel toggle ---------- */
+$('panelToggle').addEventListener('click', () => $('panel').classList.toggle('open'));
+map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove('open'); });
+</script>
+</body>
+</html>

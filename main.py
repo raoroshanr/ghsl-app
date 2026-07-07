@@ -1,0 +1,3196 @@
+"""
+DeepSeeGo - backend API
+------------------------
+Built by Vinamravigyan Technologies Private Limited.
+
+Endpoints:
+  GET  /                    -> health check
+  GET  /datasets            -> datasets + per-dataset years, legend and info text
+  GET  /tiles               -> XYZ tile URL for one dataset + year (cached ~55 min)
+  GET  /regions/states      -> Indian states (FAO GAUL, via Earth Engine)
+  GET  /regions/districts   -> districts of one state
+  GET  /regions/geometry    -> simplified boundary GeoJSON
+  POST /timeseries          -> one value per available year inside a region
+  POST /thumbnails          -> per-year map thumbnails CLIPPED to the region
+
+Every dataset lives inside Earth Engine - nothing is downloaded to the server.
+Datasets differ in how their image for a given year is found ("source"), which
+band is shown vs analysed, the reducer that summarises a region, native scale,
+and which years exist. All of that is declared in the DATASETS registry below,
+so adding another dataset is one new dictionary entry.
+"""
+
+import os
+import io
+import re
+import json
+import time
+import math
+import struct
+import zipfile
+import xml.etree.ElementTree as ET
+import hashlib
+import threading
+import functools
+
+import ee
+import shapefile as pyshp                     # pure-python .shp reader
+from pyproj import CRS, Transformer           # CRS handling / reprojection
+from shapely.geometry import shape as shp_shape, mapping as shp_mapping, Point
+from shapely.ops import transform as shp_transform, unary_union
+from shapely.validation import make_valid
+from pyproj import Geod
+from google.cloud import storage as gcs
+import base64
+import datetime as _dt
+import concurrent.futures
+from urllib.request import urlopen
+from fastapi import FastAPI, HTTPException, Response
+
+# PDF reporting needs fpdf2 + Pillow. If requirements.txt was not redeployed
+# alongside main.py, the service must still boot and say so plainly instead of
+# crash-looping (which silently leaves the OLD revision serving).
+try:
+    from PIL import Image as PILImage
+    from fpdf import FPDF
+    _PDF_OK = True
+except Exception:                                  # pragma: no cover
+    PILImage = None
+    FPDF = object
+    _PDF_OK = False
+
+APP_VERSION = "deepseego-v42"
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from typing import Optional, List
+
+# ----------------------------------------------------------------------------
+# 1. Earth Engine initialisation (LAZY - important for Cloud Run)
+# ----------------------------------------------------------------------------
+EE_PROJECT = os.environ.get("EE_PROJECT", "REPLACE_WITH_YOUR_PROJECT_ID")
+
+# Google Cloud Storage bucket that acts as the shared shapefile "database".
+# Every uploaded shape is stored here as simplified GeoJSON and appears in the
+# Region-of-Interest dropdown for ALL users of the app.
+SHAPES_BUCKET = os.environ.get("SHAPES_BUCKET", "deepseegoa-shapes")
+
+_ee_lock = threading.Lock()
+_ee_ready = False
+
+
+def ensure_ee():
+    global _ee_ready
+    if _ee_ready:
+        return
+    with _ee_lock:
+        if _ee_ready:
+            return
+        ee.Initialize(project=EE_PROJECT)
+        _ee_ready = True
+
+
+def ee_errors(fn):
+    """Turn unexpected Earth Engine exceptions into readable HTTP errors,
+    so the frontend toast shows the real cause instead of a bare 500."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Earth Engine: {e}")
+    return wrapper
+
+
+# ----------------------------------------------------------------------------
+# 2. Dataset registry
+# ----------------------------------------------------------------------------
+# source.type:
+#   ghsl            -> ee.Image(f"{asset}/{year}")               (GHSL naming)
+#   asset_map       -> ee.Image(assets[year])                    (one asset per year)
+#   collection_year -> ImageCollection(asset) filtered to that calendar year, mosaicked
+#   single          -> ee.Image(asset), same image whatever the year
+#   vector          -> ee.FeatureCollection(asset)               (polygons)
+#
+# reducer: sum | mean | mode | water_area (km2 of pixels >= 2) | count_features | length_km
+# vis: min/max/palette for continuous data; remap: exact class values -> palette
+# classes: swatch legend entries sent to the frontend
+# info: shown in the frontend "Dataset info" window
+
+GHSL_YEARS = [1975, 1980, 1985, 1990, 1995, 2000, 2005, 2010, 2015, 2020, 2025, 2030]
+
+DATASETS = {
+    # ---- GHSL multi-temporal ------------------------------------------------
+    "built_s": {
+        "label": "Built-up surface",
+        "kind": "raster",
+        "source": {"type": "ghsl", "asset": "JRC/GHSL/P2023A/GHS_BUILT_S"},
+        "band": "built_surface", "scale": 100, "reducer": "sum",
+        "vis": {"min": 0, "max": 8000, "palette": ["ffffcc", "fd8d3c", "bd0026"]},
+        "years": GHSL_YEARS,
+        "value_label": "Total built-up surface (m²)",
+        "info": {"product": "JRC GHSL P2023A · GHS-BUILT-S",
+                 "resolution": "100 m",
+                 "description": "Built-up surface in m² per 100 m cell, derived from Landsat and Sentinel-2 composites. Epochs every 5 years, 1975–2030 (2025/2030 are projections)."},
+    },
+    "built_v": {
+        "label": "Built-up volume",
+        "kind": "raster",
+        "source": {"type": "ghsl", "asset": "JRC/GHSL/P2023A/GHS_BUILT_V"},
+        "band": "built_volume_total", "scale": 100, "reducer": "sum",
+        "vis": {"min": 0, "max": 80000,
+                "palette": ["000004", "51127c", "b73779", "fc8961", "fcfdbf"]},
+        "years": GHSL_YEARS,
+        "value_label": "Total built-up volume (m³)",
+        "info": {"product": "JRC GHSL P2023A · GHS-BUILT-V",
+                 "resolution": "100 m",
+                 "description": "Built-up volume in m³ per cell, combining built surface with building-height estimates. Epochs every 5 years, 1975–2030."},
+    },
+    "pop": {
+        "label": "Population",
+        "kind": "raster",
+        "source": {"type": "ghsl", "asset": "JRC/GHSL/P2023A/GHS_POP"},
+        "band": "population_count", "scale": 100, "reducer": "sum",
+        "vis": {"min": 0, "max": 100,
+                "palette": ["ffffe0", "ffa53c", "ff5a00", "8b0000"]},
+        "years": GHSL_YEARS,
+        "value_label": "Total population",
+        "info": {"product": "JRC GHSL P2023A · GHS-POP",
+                 "resolution": "100 m",
+                 "description": "Residential population per cell, disaggregated from census counts using built-up surface. Epochs every 5 years, 1975–2030."},
+    },
+    "smod": {
+        "label": "Degree of urbanisation",
+        "kind": "raster",
+        "source": {"type": "ghsl", "asset": "JRC/GHSL/P2023A/GHS_SMOD_V2-0"},
+        "band": "smod_code", "scale": 1000, "reducer": "mode",
+        "vis": {"min": 10, "max": 30,
+                "palette": ["0a4d0a", "8fd18f", "ffe066", "ff9933", "cc3300"]},
+        "years": GHSL_YEARS,
+        "value_label": "Dominant class",
+        "class_map": {
+            "10": {"label": "Water", "color": "#4a7bd0"},
+            "11": {"label": "Very low density rural", "color": "#0a4d0a"},
+            "12": {"label": "Low density rural", "color": "#4f9a4f"},
+            "13": {"label": "Rural cluster", "color": "#8fd18f"},
+            "21": {"label": "Suburban", "color": "#ffe066"},
+            "22": {"label": "Semi-dense urban", "color": "#ffb84d"},
+            "23": {"label": "Dense urban cluster", "color": "#ff9933"},
+            "30": {"label": "Urban centre", "color": "#cc3300"}},
+        "classes": [{"color": "#0a4d0a", "label": "Water / very low density"},
+                    {"color": "#8fd18f", "label": "Rural"},
+                    {"color": "#ffe066", "label": "Suburban"},
+                    {"color": "#ff9933", "label": "Dense urban cluster"},
+                    {"color": "#cc3300", "label": "Urban centre"}],
+        "info": {"product": "JRC GHSL P2023A · GHS-SMOD",
+                 "resolution": "1 km",
+                 "description": "Settlement Model layer classifying each 1 km cell as rural, suburban or urban centre following the UN Degree of Urbanisation. Epochs every 5 years, 1975–2030."},
+    },
+
+    # ---- Water --------------------------------------------------------------
+    "water": {
+        "label": "Surface water extent",
+        "kind": "raster",
+        # v1.4 (1984-2021, Landsat Collection 1) + v1.5 extension (2022-2024,
+        # Landsat Collection 2) as published by JRC; resolved in get_image().
+        "source": {"type": "gsw_yearly"},
+        "band": "waterClass", "scale": 30, "reducer": "water_area",
+        "mask_lt": 2,   # hide land / no-data so only water pixels are drawn
+        "vis": {"min": 0, "max": 3,
+                "palette": ["ffffff", "ffffff", "99d9ea", "0000ff"]},
+        "years": list(range(1984, 2025)),        # any year viewable on the map
+        "analysis_years": [1984, 1990, 1995, 2000,   # chart + filmstrip epochs
+                           2005, 2010, 2015, 2020, 2024],
+        "value_label": "Water area (km²)",
+        "classes": [{"color": "#99d9ea", "label": "Seasonal water"},
+                    {"color": "#0000ff", "label": "Permanent water"}],
+        "info": {"product": "JRC Global Surface Water · Yearly History (v1.4 + v1.5)",
+                 "resolution": "30 m",
+                 "description": "Landsat water mapping: each pixel classed as permanent or seasonal water per year, 1984–2024 (v1.4 merged with the Collection-2 extension). Value is km² of water. Years where under 20% of the region has valid Landsat coverage — common in the 1980s over India — show as '—' rather than a false zero."},
+    },
+
+    # ---- Land cover / forest -----------------------------------------------
+    "worldcover": {
+        "label": "LULC 10 m (ESA WorldCover)",
+        "kind": "raster",
+        "source": {"type": "asset_map",
+                   "assets": {2020: "ESA/WorldCover/v100/2020",
+                              2021: "ESA/WorldCover/v200/2021"}},
+        "band": "Map", "scale": 30, "reducer": "mode",
+        "remap": {"values": [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
+                  "palette": ["006400", "ffbb22", "ffff4c", "f096ff", "fa0000",
+                              "b4b4b4", "f0f0f0", "0064c8", "0096a0", "00cf75",
+                              "fae6a0"]},
+        "years": [2020, 2021],
+        "value_label": "Dominant class",
+        "classes": [{"color": "#006400", "label": "Tree cover"},
+                    {"color": "#ffbb22", "label": "Shrubland"},
+                    {"color": "#ffff4c", "label": "Grassland"},
+                    {"color": "#f096ff", "label": "Cropland"},
+                    {"color": "#fa0000", "label": "Built-up"},
+                    {"color": "#b4b4b4", "label": "Bare / sparse"},
+                    {"color": "#f0f0f0", "label": "Snow & ice"},
+                    {"color": "#0064c8", "label": "Water"},
+                    {"color": "#0096a0", "label": "Herbaceous wetland"},
+                    {"color": "#00cf75", "label": "Mangroves"},
+                    {"color": "#fae6a0", "label": "Moss & lichen"}],
+        "info": {"product": "ESA WorldCover v100 (2020) / v200 (2021)",
+                 "resolution": "10 m",
+                 "description": "High-resolution global land-use / land-cover from Sentinel-1 and Sentinel-2, 11 classes. Two annual maps: 2020 and 2021."},
+    },
+    "forest": {
+        "label": "Forest type",
+        "kind": "raster",
+        "source": {"type": "collection_year",
+                   "asset": "COPERNICUS/Landcover/100m/Proba-V-C3/Global"},
+        "band": "forest_type", "scale": 100, "reducer": "mode",
+        "remap": {"values": [0, 1, 2, 3, 4, 5],
+                  "palette": ["282828", "666000", "009900", "70663e",
+                              "a0dc00", "929900"]},
+        "years": [2015, 2016, 2017, 2018, 2019],
+        "value_label": "Dominant class",
+        "classes": [{"color": "#282828", "label": "Unknown"},
+                    {"color": "#666000", "label": "Evergreen needleleaf"},
+                    {"color": "#009900", "label": "Evergreen broadleaf"},
+                    {"color": "#70663e", "label": "Deciduous needleleaf"},
+                    {"color": "#a0dc00", "label": "Deciduous broadleaf"},
+                    {"color": "#929900", "label": "Mixed forest"}],
+        "info": {"product": "Copernicus Global Land Cover (CGLS-LC100 C3)",
+                 "resolution": "100 m",
+                 "description": "Forest-type layer of the PROBA-V / Sentinel-based Copernicus land-cover service: needleleaf vs broadleaf, evergreen vs deciduous. Annual maps 2015–2019."},
+    },
+
+    # ---- Human pressure -----------------------------------------------------
+    "ghm": {
+        "label": "Global human modification",
+        "kind": "raster",
+        "source": {"type": "collection_all", "asset": "CSP/HM/GlobalHumanModification"},
+        "band": "gHM", "scale": 1000, "reducer": "mean",
+        "vis": {"min": 0, "max": 1,
+                "palette": ["0c0c0c", "071aff", "ff0000", "ffbd03", "fbff05", "fffdfd"]},
+        "years": [2016],
+        "value_label": "Mean modification (0–1)",
+        "info": {"product": "CSP gHM · Global Human Modification",
+                 "resolution": "~1 km",
+                 "description": "Cumulative human modification of land (0 = untouched, 1 = fully modified), combining settlement, agriculture, transport, energy and other stressors, ca. 2016."},
+    },
+
+    # ---- Buildings ----------------------------------------------------------
+    "ob_temporal": {
+        "label": "Open Buildings · temporal",
+        "kind": "raster",
+        "source": {"type": "collection_year",
+                   "asset": "GOOGLE/Research/open-buildings-temporal/v1"},
+        "band": "building_presence", "analysis_band": "building_fractional_count",
+        "scale": 4, "reducer": "sum", "mask_lt": 0.15, "scale_adaptive": True,
+        # 4 m is native. Coarser pyramid levels store the MEAN of finer pixels,
+        # so for big regions we sum at a coarser scale and multiply back by
+        # (scale/4)^2 - fast AND count-correct (see _series).
+        "vis": {"min": 0, "max": 1, "palette": ["ffffff", "fd8d3c", "bd0026"]},
+        "years": [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023],
+        "value_label": "Building count (approx.)",
+        "info": {"product": "Google Open Buildings 2.5D Temporal v1",
+                 "resolution": "4 m (effective)",
+                 "description": "Annual building presence, count and height derived from Sentinel-2 (2016–2023). In the count band each detected building contributes exactly 1.0, spread over its footprint pixels — so the regional sum IS an estimated number of buildings (not per-pixel or per-area). Sentinel-derived counts typically run below the VHR polygon count; verify small areas against the polygons dataset."},
+    },
+    "ob_polygons": {
+        "label": "Open Buildings · polygons",
+        "kind": "vector",
+        "source": {"type": "vector", "asset": "GOOGLE/Research/open-buildings/v3/polygons"},
+        "style": {"color": "E4572E", "fill": "E4572E55"},
+        "scale": None, "reducer": "count_features", "area_cap_km2": 1500,
+        "years": [2023],
+        "value_label": "Building count",
+        "info": {"product": "Google Open Buildings v3 (polygons)",
+                 "resolution": "~0.5 m imagery",
+                 "description": "1.8 billion building footprints digitised from ~0.5 m satellite imagery (May 2023). Analysis is an exact footprint count within the region (limit 1,500 km²) — the reference to judge the temporal dataset against. Zoom to city level; polygons render slowly over wide views."},
+    },
+
+    # ---- Roads ---------------------------------------------------------------
+    "roads": {
+        "label": "Road network",
+        "kind": "vector",
+        # GRIP4 regional extracts: India lives in South-East-Asia; the
+        # Middle-East-Central-Asia extract adjoins to the north-west. Merged
+        # so the whole country (and neighbours) is covered.
+        "source": {"type": "vector",
+                   "assets": ["projects/sat-io/open-datasets/GRIP4/South-East-Asia",
+                              "projects/sat-io/open-datasets/GRIP4/Middle-East-Central-Asia"]},
+        "style": {"color": "FFB703", "fill": "FFB70300", "width": 1},
+        "scale": None, "reducer": "length_km", "area_cap_km2": 20000,
+        "years": [2018],
+        "value_label": "Road length (km)",
+        "info": {"product": "GRIP4 · Global Roads Inventory Project v4",
+                 "resolution": "vector lines (~2018)",
+                 "description": "Harmonised global road network compiled from national sources and OpenStreetMap (CC-0; not for navigation). Analysis returns total road length in km inside the region — segments crossing the boundary count in full. Regions up to 20,000 km²; zoom in for display."},
+    },
+
+    # ---- Terrain ------------------------------------------------------------
+    "dem": {
+        "label": "Elevation (DEM)",
+        "kind": "raster",
+        "source": {"type": "single", "asset": "USGS/SRTMGL1_003"},
+        "band": "elevation", "scale": 30, "reducer": "mean",
+        "vis": {"min": 0, "max": 3000,
+                "palette": ["0b6b3a", "7ccd7c", "f7e08c", "c9975b", "8b5a2b", "ffffff"]},
+        "years": [2000],
+        "value_label": "Mean elevation (m)",
+        "info": {"product": "NASA SRTM · SRTMGL1 v3",
+                 "resolution": "30 m",
+                 "description": "Digital elevation model from the Shuttle Radar Topography Mission (Feb 2000), void-filled. Analysis returns the mean elevation of the region in metres."},
+    },
+    "landforms": {
+        "label": "Landforms",
+        "kind": "raster",
+        "source": {"type": "single", "asset": "CSP/ERGo/1_0/Global/ALOS_landforms"},
+        "band": "constant", "scale": 90, "reducer": "mode",
+        "remap": {"values": [11, 12, 13, 14, 15, 21, 22, 23, 24,
+                             31, 32, 33, 34, 41, 42],
+                  "palette": ["141414", "383838", "808080", "ebeb8f", "f7d311",
+                              "aa0000", "d89382", "ddc9c9", "dccdce", "1c6330",
+                              "68aa63", "b5c98e", "e1f0e5", "a975ba", "6f198c"]},
+        "years": [2015],
+        "value_label": "Dominant class",
+        "classes": [{"color": "#141414", "label": "Peak / ridge (warm)"},
+                    {"color": "#383838", "label": "Peak / ridge"},
+                    {"color": "#808080", "label": "Peak / ridge (cool)"},
+                    {"color": "#ebeb8f", "label": "Mountain / divide"},
+                    {"color": "#f7d311", "label": "Cliff"},
+                    {"color": "#aa0000", "label": "Upper slope (warm)"},
+                    {"color": "#d89382", "label": "Upper slope"},
+                    {"color": "#ddc9c9", "label": "Upper slope (cool)"},
+                    {"color": "#dccdce", "label": "Upper slope (flat)"},
+                    {"color": "#1c6330", "label": "Lower slope (warm)"},
+                    {"color": "#68aa63", "label": "Lower slope"},
+                    {"color": "#b5c98e", "label": "Lower slope (cool)"},
+                    {"color": "#e1f0e5", "label": "Lower slope (flat)"},
+                    {"color": "#a975ba", "label": "Valley"},
+                    {"color": "#6f198c", "label": "Valley (narrow)"}],
+        "info": {"product": "CSP ERGo · ALOS-derived Global Landforms",
+                 "resolution": "90 m",
+                 "description": "15 landform classes (peaks, slopes, valleys…) computed from the ALOS DEM using topographic position and moisture indices."},
+    },
+
+    # ---------------- climate (ERA5-Land / MODIS annual composites) ----------
+    "t2m": {
+        "label": "Air temperature (annual mean)", "kind": "raster",
+        "source": {"type": "annual_fn", "fn": "era5_t2m"},
+        "band": "t2m_c", "scale": 11132, "reducer": "mean",
+        "vis": {"min": 12, "max": 34, "palette":
+                ["2c7bb6", "abd9e9", "ffffbf", "fdae61", "d7191c"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Mean air temperature (°C)",
+        "info": {"product": "ECMWF ERA5-Land · monthly aggregates",
+                 "resolution": "~9 km (reanalysis)",
+                 "description": "Annual mean 2 m air temperature from the ERA5-Land reanalysis. Describes the mesoclimate — not street-level microclimate."},
+    },
+    "rain": {
+        "label": "Precipitation (annual total)", "kind": "raster",
+        "source": {"type": "annual_fn", "fn": "era5_rain"},
+        "band": "rain_mm", "scale": 11132, "reducer": "mean",
+        "vis": {"min": 200, "max": 4000, "palette":
+                ["ffffe5", "a1dab4", "41b6c4", "225ea8", "081d58"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Annual precipitation (mm)",
+        "info": {"product": "ECMWF ERA5-Land · monthly aggregates",
+                 "resolution": "~9 km (reanalysis)",
+                 "description": "Total precipitation summed over the calendar year, in millimetres."},
+    },
+    "windspd": {
+        "label": "Wind speed (annual mean)", "kind": "raster",
+        "source": {"type": "annual_fn", "fn": "era5_wind"},
+        "band": "wind_ms", "scale": 11132, "reducer": "mean",
+        "vis": {"min": 0.5, "max": 7, "palette":
+                ["f7fbff", "9ecae1", "4292c6", "08306b"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Mean 10 m wind speed (m/s)",
+        "info": {"product": "ECMWF ERA5-Land · monthly aggregates",
+                 "resolution": "~9 km (reanalysis)",
+                 "description": "Annual mean 10 m wind speed (monthly vector magnitudes averaged over the year)."},
+    },
+    "solar": {
+        "label": "Solar radiation (annual mean)", "kind": "raster",
+        "source": {"type": "annual_fn", "fn": "era5_solar"},
+        "band": "solar_kwh", "scale": 11132, "reducer": "mean",
+        "vis": {"min": 3.5, "max": 6.5, "palette":
+                ["ffffcc", "fed976", "fd8d3c", "bd0026"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Solar radiation (kWh/m²/day)",
+        "info": {"product": "ECMWF ERA5-Land · monthly aggregates",
+                 "resolution": "~9 km (reanalysis)",
+                 "description": "Surface downwelling shortwave radiation, expressed as the daily average in kWh/m² for the year."},
+    },
+    "rh": {
+        "label": "Relative humidity (annual mean)", "kind": "raster",
+        "source": {"type": "annual_fn", "fn": "era5_rh"},
+        "band": "rh_pct", "scale": 11132, "reducer": "mean",
+        "vis": {"min": 25, "max": 90, "palette":
+                ["d73027", "fee090", "abd9e9", "4575b4"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Relative humidity (%)",
+        "info": {"product": "ECMWF ERA5-Land · monthly aggregates",
+                 "resolution": "~9 km (reanalysis)",
+                 "description": "Annual mean relative humidity derived from 2 m temperature and dewpoint via the Magnus formula."},
+    },
+    "lst": {
+        "label": "Land surface temperature (day)", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "MODIS/061/MOD11A2"},
+        "band": "LST_Day_1km", "multiply": 0.02, "add": -273.15,
+        "scale": 1000, "reducer": "mean",
+        "vis": {"min": 22, "max": 48, "palette":
+                ["313695", "74add1", "fee090", "f46d43", "a50026"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Daytime land-surface temperature (°C)",
+        "info": {"product": "MODIS Terra MOD11A2 v6.1",
+                 "resolution": "1 km",
+                 "description": "Annual mean daytime land-surface (skin) temperature — highlights urban heat patterns. This is surface temperature, not air temperature."},
+    },
+
+    # ---------------- air quality ----------------
+    "pm25": {
+        "label": "PM2.5 (satellite, annual)", "kind": "raster",
+        "source": {"type": "annual_fn", "fn": "acag_pm25"},
+        "band": "pm25", "scale": 1113, "reducer": "mean",
+        "vis": {"min": 5, "max": 80, "palette":
+                ["00e400", "ffff00", "ff7e00", "ff0000", "8f3f97"]},
+        "years": list(range(2000, 2023)),
+        "analysis_years": [2000, 2005, 2010, 2015, 2020, 2022],
+        "value_label": "PM2.5 (µg/m³)",
+        "info": {"product": "ACAG/WUSTL SatPM2.5 V6 (community asset)",
+                 "resolution": "~1 km",
+                 "description": "Ground-level PM2.5 from multi-satellite AOD + GEOS-Chem, CNN-calibrated with ground stations. Annual means 2000–2022; reliable for neighbourhood/annual contrasts, not street-level."},
+    },
+    "no2": {
+        "label": "NO₂ (tropospheric column)", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "COPERNICUS/S5P/OFFL/L3_NO2"},
+        "band": "tropospheric_NO2_column_number_density",
+        "multiply": 1e6, "scale": 1113, "reducer": "mean",
+        "vis": {"min": 15, "max": 140, "palette":
+                ["2166ac", "d1e5f0", "fddbc7", "b2182b"]},
+        "years": list(range(2019, 2025)),
+        "value_label": "Tropospheric NO₂ (µmol/m²)",
+        "info": {"product": "Sentinel-5P TROPOMI · L3 offline",
+                 "resolution": "~5.5 × 3.5 km (displayed at ~1 km)",
+                 "description": "Annual mean tropospheric NO₂ column — a traffic/combustion indicator. Column measure, not ground concentration."},
+    },
+    "co": {
+        "label": "CO (column)", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "COPERNICUS/S5P/OFFL/L3_CO"},
+        "band": "CO_column_number_density",
+        "multiply": 1e3, "scale": 1113, "reducer": "mean",
+        "vis": {"min": 25, "max": 45, "palette":
+                ["ffffb2", "fecc5c", "fd8d3c", "e31a1c"]},
+        "years": list(range(2019, 2025)),
+        "value_label": "CO column (mmol/m²)",
+        "info": {"product": "Sentinel-5P TROPOMI · L3 offline",
+                 "resolution": "~5.5 × 7 km",
+                 "description": "Annual mean carbon monoxide column density."},
+    },
+    "so2": {
+        "label": "SO₂ (column)", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "COPERNICUS/S5P/OFFL/L3_SO2"},
+        "band": "SO2_column_number_density",
+        "multiply": 1e6, "scale": 1113, "reducer": "mean",
+        "vis": {"min": 0, "max": 350, "palette":
+                ["f7f7f7", "fee0b6", "e08214", "7f3b08"]},
+        "years": list(range(2019, 2025)),
+        "value_label": "SO₂ column (µmol/m²)",
+        "info": {"product": "Sentinel-5P TROPOMI · L3 offline",
+                 "resolution": "~5.5 × 3.5 km",
+                 "description": "Annual mean sulphur dioxide column — an industrial/power-plant indicator. Noisy over clean regions; interpret patterns, not single pixels."},
+    },
+    "o3": {
+        "label": "Ozone (total column)", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "COPERNICUS/S5P/OFFL/L3_O3"},
+        "band": "O3_column_number_density",
+        "multiply": 2241.62, "scale": 1113, "reducer": "mean",
+        "vis": {"min": 235, "max": 300, "palette":
+                ["ffffd9", "c7e9b4", "41b6c4", "225ea8"]},
+        "years": list(range(2019, 2025)),
+        "value_label": "Total ozone column (DU)",
+        "info": {"product": "Sentinel-5P TROPOMI · L3 offline",
+                 "resolution": "~5.5 × 3.5 km",
+                 "description": "Annual mean total ozone column in Dobson Units — the stratospheric ozone layer, not ground-level smog ozone."},
+    },
+    "aod": {
+        "label": "AOD (daily) \u00b7 MAIAC 1 km", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "MODIS/061/MCD19A2_GRANULES"},
+        "band": "Optical_Depth_055", "multiply": 0.001,
+        "scale": 1000, "reducer": "mean",
+        "vis": {"min": 0.05, "max": 1.0, "palette":
+                ["2c7bb6", "abd9e9", "ffffbf", "fdae61", "d7191c"]},
+        "years": list(range(2001, 2025)),
+        "analysis_years": [2001, 2005, 2010, 2015, 2020, 2024],
+        "value_label": "Aerosol optical depth at 550 nm",
+        "info": {"product": "MCD19A2.061: Terra & Aqua MAIAC Land Aerosol "
+                            "Optical Depth Daily 1km",
+                 "resolution": "1 km \u00b7 daily retrievals",
+                 "description": "MAIAC blue-band AOD at 550 nm from combined Terra & Aqua MODIS. The product is daily at 1 km; the map shows the annual mean of daily retrievals for the selected year. AOD is a column aerosol-load measure and the standard satellite precursor to PM estimates."},
+    },
+    "aai": {
+        "label": "Absorbing aerosol index", "kind": "raster",
+        "source": {"type": "collection_year_mean",
+                   "asset": "COPERNICUS/S5P/OFFL/L3_AER_AI"},
+        "band": "absorbing_aerosol_index",
+        "scale": 1113, "reducer": "mean",
+        "vis": {"min": -1.2, "max": 1.5, "palette":
+                ["2c7bb6", "ffffbf", "d7191c"]},
+        "years": list(range(2019, 2025)),
+        "value_label": "Absorbing aerosol index",
+        "info": {"product": "Sentinel-5P TROPOMI · L3 offline",
+                 "resolution": "~5.5 × 3.5 km",
+                 "description": "UV aerosol index — positive values flag absorbing aerosols such as smoke and dust plumes."},
+    },
+}
+
+VECTOR_AREA_CAP_KM2 = 1500   # polygon counting / drawing cap, keeps EE responsive
+
+# FAO GAUL simplified boundaries (inside Earth Engine, nothing to download).
+GSW15_ASSET = "projects/global-surface-water/assets/GSW1_5/YearlyHistory"
+_gsw15 = {"checked": False, "ok": False}
+
+
+def _gsw15_available() -> bool:
+    """The JRC v1.5 extension (2022-2024) lives outside the official catalog;
+    some service accounts cannot read it. Probe once and remember."""
+    if not _gsw15["checked"]:
+        try:
+            ensure_ee()
+            ee.ImageCollection(GSW15_ASSET).limit(1).size().getInfo()
+            _gsw15["ok"] = True
+        except Exception:
+            _gsw15["ok"] = False
+        _gsw15["checked"] = True
+    return _gsw15["ok"]
+
+
+def _effective_years(key: str, d: dict):
+    """(map_years, analysis_years) after trimming water to 2021 when the
+    v1.5 extension asset is not accessible."""
+    years = d["years"]
+    ay = d.get("analysis_years", years)
+    if key == "water" and not _gsw15_available():
+        years = [y for y in years if y <= 2021]
+        ay = sorted({y for y in ay if y <= 2021} | {2021})
+    return years, ay
+
+
+GAUL_L1 = "FAO/GAUL_SIMPLIFIED_500m/2015/level1"
+GAUL_L2 = "FAO/GAUL_SIMPLIFIED_500m/2015/level2"
+COUNTRY = "India"
+
+
+# ----------------------------------------------------------------------------
+# 3. Image resolution helpers
+# ----------------------------------------------------------------------------
+def _vector_fc(d: dict) -> "ee.FeatureCollection":
+    srcs = d["source"].get("assets") or [d["source"]["asset"]]
+    fc = ee.FeatureCollection(srcs[0])
+    for a in srcs[1:]:
+        fc = fc.merge(ee.FeatureCollection(a))
+    return fc
+
+
+def _vector_styled(d: dict, region=None):
+    fc = _vector_fc(d)
+    if region is not None:
+        fc = fc.filterBounds(region)
+    return fc.style(color=d["style"]["color"], fillColor=d["style"]["fill"],
+                    width=d["style"].get("width", 1))
+
+
+def _dataset(key: str) -> dict:
+    if key not in DATASETS:
+        raise HTTPException(status_code=400, detail=f"Unknown dataset '{key}'")
+    return DATASETS[key]
+
+
+def _check_year(key: str, d: dict, year: int):
+    years, _ = _effective_years(key, d)
+    if year not in years:
+        if key == "water" and year > 2021 and not _gsw15_available():
+            raise HTTPException(status_code=400, detail=(
+                "Water data for 2022-2024 needs the JRC v1.5 extension asset, "
+                "which this service account cannot read; years 1984-2021 are "
+                "available."))
+        raise HTTPException(status_code=400,
+                            detail=f"No data for year {year}; available: {years}")
+
+
+def _era5_year(year):
+    return (ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
+            .filterDate(f"{year}-01-01", f"{year + 1}-01-01"))
+
+
+ANNUAL_BUILDERS = {
+    "era5_t2m": lambda y: _era5_year(y).select("temperature_2m").mean()
+        .subtract(273.15).rename("t2m_c"),
+    "era5_rain": lambda y: _era5_year(y).select("total_precipitation_sum")
+        .sum().multiply(1000).rename("rain_mm"),
+    "era5_wind": lambda y: _era5_year(y).map(
+        lambda im: im.expression(
+            "sqrt(u*u + v*v)",
+            {"u": im.select("u_component_of_wind_10m"),
+             "v": im.select("v_component_of_wind_10m")})
+        ).mean().rename("wind_ms"),
+    "era5_solar": lambda y: _era5_year(y)
+        .select("surface_solar_radiation_downwards_sum").sum()
+        .divide(3.6e6 * 365).rename("solar_kwh"),
+    "era5_rh": lambda y: (lambda t, d: d.expression(
+        "100 * exp(17.625*td/(243.04+td)) / exp(17.625*t/(243.04+t))",
+        {"td": d, "t": t}).min(100).rename("rh_pct"))(
+        _era5_year(y).select("temperature_2m").mean().subtract(273.15),
+        _era5_year(y).select("dewpoint_temperature_2m").mean().subtract(273.15)),
+    "acag_pm25": lambda y: ee.ImageCollection(
+        "projects/sat-io/open-datasets/GLOBAL-SATELLITE-PM25/ANNUAL")
+        .filterDate(f"{y}-01-01", f"{y + 1}-01-01").mean()
+        .select([0]).rename("pm25"),
+}
+
+
+def get_image(key: str, year: int, for_analysis: bool = False) -> ee.Image:
+    """Resolve the raster for one dataset + year, selecting the right band."""
+    d = _dataset(key)
+    _check_year(key, d, year)
+    src = d["source"]
+    if src["type"] == "ghsl":
+        img = ee.Image(f"{src['asset']}/{year}")
+    elif src["type"] == "asset_map":
+        img = ee.Image(src["assets"][year])
+    elif src["type"] == "collection_year":
+        img = (ee.ImageCollection(src["asset"])
+               .filterDate(f"{year}-01-01", f"{year + 1}-01-01").mosaic())
+    elif src["type"] == "collection_all":
+        # For single-image collections whose image has no usable timestamp
+        # (e.g. gHM): mosaic the whole collection instead of date-filtering.
+        img = ee.ImageCollection(src["asset"]).mosaic()
+    elif src["type"] == "gsw_yearly":
+        # JRC Global Surface Water: catalog v1.4 ends in 2021; JRC publishes a
+        # v1.5 extension (Landsat Collection 2) for 2022-2024 as an EE asset.
+        # Band 0 is the water class in both; rename for a uniform 'waterClass'.
+        if year <= 2021:
+            col = ee.ImageCollection("JRC/GSW1_4/YearlyHistory")
+        else:
+            col = ee.ImageCollection(GSW15_ASSET)
+        img = (col.filterDate(f"{year}-01-01", f"{year + 1}-01-01")
+               .mosaic().select([0]).rename("waterClass"))
+    elif src["type"] == "single":
+        img = ee.Image(src["asset"])
+    elif src["type"] == "collection_year_mean":
+        img = (ee.ImageCollection(src["asset"])
+               .filterDate(f"{year}-01-01", f"{year + 1}-01-01").mean())
+    elif src["type"] == "annual_fn":
+        img = ANNUAL_BUILDERS[src["fn"]](year)
+    else:
+        raise HTTPException(status_code=500, detail=f"Bad source type for '{key}'")
+    band = d.get("analysis_band") if (for_analysis and d.get("analysis_band")) else d["band"]
+    img = img.select(band)
+    if d.get("multiply") is not None:
+        img = img.multiply(d["multiply"])
+    if d.get("add") is not None:
+        img = img.add(d["add"])
+    return img
+
+
+def styled_image(key: str, year: int):
+    """(image, vis) ready for getMapId / getThumbURL, with class remaps + masks."""
+    d = _dataset(key)
+    if d["kind"] == "vector":
+        return _vector_styled(d), {}
+    img = get_image(key, year)
+    if "mask_lt" in d:
+        img = img.updateMask(img.gte(d["mask_lt"]))
+    if "remap" in d:
+        vals = d["remap"]["values"]
+        img = img.remap(vals, list(range(len(vals)))).rename("v")
+        vis = {"min": 0, "max": len(vals) - 1, "palette": d["remap"]["palette"]}
+    else:
+        vis = dict(d["vis"])
+    return img, vis
+
+
+# ----------------------------------------------------------------------------
+# 4. FastAPI app + CORS
+# ----------------------------------------------------------------------------
+app = FastAPI(title="DeepSeeGo API",
+              description="Built by Vinamravigyan Technologies Private Limited")
+
+# Once your site is live, replace "*" with the exact origin,
+# e.g. ["https://deepseegoa.netlify.app"], to stop other sites using your quota.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _find_static_dir():
+    """Locate the folder that holds index.html. Checks next to this file and
+    the process working directory, so it works regardless of how Cloud Run
+    sets the container's CWD."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"),
+        os.path.join(os.getcwd(), "static"),
+        os.path.dirname(os.path.abspath(__file__)),   # index.html beside main.py
+        os.getcwd(),
+    ]
+    for d in candidates:
+        if os.path.exists(os.path.join(d, "index.html")):
+            return d
+    return None
+
+
+_STATIC_DIR = _find_static_dir()
+
+
+def _health_payload():
+    return {"app": "DeepSeeGo",
+            "by": "Vinamravigyan Technologies Private Limited",
+            "status": "ok", "version": APP_VERSION,
+            "report_ready": _PDF_OK, "project": EE_PROJECT,
+            "frontend_bundled": _STATIC_DIR is not None,
+            "serving_mode": "single-service (app at /)" if _STATIC_DIR
+                            else "API-only (no static/index.html found)"}
+
+
+@app.get("/health")
+def health():
+    return _health_payload()
+
+
+@app.get("/api")
+def api_health():
+    return _health_payload()
+
+
+def _class_map(d: dict):
+    """{code: {label, color}} for categorical (mode-reduced) datasets, so the
+    frontend can chart dominant classes by name and colour instead of codes."""
+    if "class_map" in d:
+        return d["class_map"]
+    r, c = d.get("remap"), d.get("classes")
+    if d.get("reducer") == "mode" and r and c and len(r["values"]) == len(c):
+        return {str(v): {"label": cc["label"], "color": cc["color"]}
+                for v, cc in zip(r["values"], c)}
+    return None
+
+
+@app.get("/datasets")
+def list_datasets():
+    """Everything the frontend needs: dropdowns, per-dataset years, legend, info."""
+    out = []
+    for k, d in DATASETS.items():
+        try:
+            years, ay = _effective_years(k, d)
+        except Exception:                       # never fail /datasets on a probe
+            years, ay = d["years"], d.get("analysis_years", d["years"])
+        out.append({
+            "key": k,
+            "label": d["label"],
+            "kind": d["kind"],
+            "years": years,
+            "analysis_years": ay,
+            "value_label": d["value_label"],
+            "vis": d.get("vis"),
+            "classes": d.get("classes"),
+            "class_map": _class_map(d),
+            "info": d["info"],
+        })
+    return {"datasets": out}
+
+
+# ---- map tiles (cached ~55 min: EE tile URLs expire and getMapId costs quota)
+TILE_TTL_SECONDS = 55 * 60
+_tile_cache = {}
+_tile_lock = threading.Lock()
+
+
+@app.get("/tiles")
+@ee_errors
+def tiles(dataset: str, year: int):
+    ensure_ee()
+    key = (dataset, year)
+    now = time.time()
+    with _tile_lock:
+        hit = _tile_cache.get(key)
+        if hit and hit[1] > now:
+            return {"tile_url": hit[0], "cached": True}
+    img, vis = styled_image(dataset, year)
+    mapid = img.getMapId(vis)
+    url = mapid["tile_fetcher"].url_format
+    with _tile_lock:
+        _tile_cache[key] = (url, now + TILE_TTL_SECONDS)
+    return {"tile_url": url, "cached": False}
+
+
+# ----------------------------------------------------------------------------
+# 5. Administrative boundaries (the "Boundary" dropdown)
+# ----------------------------------------------------------------------------
+_region_cache = {}
+_region_lock = threading.Lock()
+
+
+@app.get("/regions/states")
+@ee_errors
+def region_states():
+    ensure_ee()
+    with _region_lock:
+        if "states" in _region_cache:
+            return {"states": _region_cache["states"]}
+    fc = ee.FeatureCollection(GAUL_L1).filter(ee.Filter.eq("ADM0_NAME", COUNTRY))
+    names = fc.aggregate_array("ADM1_NAME").distinct().sort().getInfo()
+    with _region_lock:
+        _region_cache["states"] = names
+    return {"states": names}
+
+
+@app.get("/regions/districts")
+@ee_errors
+def region_districts(state: str):
+    ensure_ee()
+    key = ("districts", state)
+    with _region_lock:
+        if key in _region_cache:
+            return {"districts": _region_cache[key]}
+    fc = (ee.FeatureCollection(GAUL_L2)
+          .filter(ee.Filter.eq("ADM0_NAME", COUNTRY))
+          .filter(ee.Filter.eq("ADM1_NAME", state)))
+    names = fc.aggregate_array("ADM2_NAME").distinct().sort().getInfo()
+    if not names:
+        raise HTTPException(status_code=404, detail=f"No districts found for '{state}'")
+    with _region_lock:
+        _region_cache[key] = names
+    return {"districts": names}
+
+
+def _admin_geometry(state: str, district: Optional[str]) -> ee.Geometry:
+    if district:
+        fc = (ee.FeatureCollection(GAUL_L2)
+              .filter(ee.Filter.eq("ADM0_NAME", COUNTRY))
+              .filter(ee.Filter.eq("ADM1_NAME", state))
+              .filter(ee.Filter.eq("ADM2_NAME", district)))
+    else:
+        fc = (ee.FeatureCollection(GAUL_L1)
+              .filter(ee.Filter.eq("ADM0_NAME", COUNTRY))
+              .filter(ee.Filter.eq("ADM1_NAME", state)))
+    return fc.geometry()
+
+
+@app.get("/regions/geometry")
+@ee_errors
+def region_geometry(state: str, district: Optional[str] = None):
+    ensure_ee()
+    geom = _admin_geometry(state, district).simplify(maxError=500)
+    return {"state": state, "district": district, "geometry": geom.getInfo()}
+
+
+# ----------------------------------------------------------------------------
+# 5b. Shapefile "database" (Google Cloud Storage bucket)
+# ----------------------------------------------------------------------------
+# Uploaded shapefiles are parsed, reprojected to WGS84, simplified, and stored
+# as GeoJSON blobs in SHAPES_BUCKET under shapes/<slug>.geojson. Cloud Run has
+# no persistent disk, so the bucket is what makes shapes survive restarts and
+# be visible to every user. One-time setup (see chat instructions): create the
+# bucket + grant the service account "Storage Object Admin" on it.
+_gcs_client = None
+_gcs_lock = threading.Lock()
+
+
+def _bucket():
+    global _gcs_client
+    with _gcs_lock:
+        if _gcs_client is None:
+            _gcs_client = gcs.Client(project=EE_PROJECT)
+    return _gcs_client.bucket(SHAPES_BUCKET)
+
+
+def _shapes_setup_hint(err) -> HTTPException:
+    return HTTPException(status_code=500, detail=(
+        f"Shape store not reachable ({err}). One-time setup: create a Cloud "
+        f"Storage bucket named '{SHAPES_BUCKET}' in this project and grant the "
+        f"Cloud Run service account the 'Storage Object Admin' role on it."))
+
+
+def _slug(name: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9 _-]+", "", name).strip().replace(" ", "_")
+    return s[:60] or "shape"
+
+
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+INDIA_LON = (60.0, 100.0)     # sanity window for reprojection guesses
+INDIA_LAT = (0.0, 40.0)
+# Survey of India (onlinemaps.surveyofindia.gov.in) ships data in the India
+# National Spatial Framework Lambert Conformal Conic grid. When no .prj is
+# uploaded and coordinates are clearly not degrees, we assume this CRS.
+SOI_DEFAULT_EPSG = 7755        # WGS 84 / India NSF LCC
+
+
+def _strip_and_transform(coords, tfm):
+    """Recursively drop Z values and (optionally) reproject [x, y] pairs."""
+    if isinstance(coords[0], (int, float)):          # a single position
+        x, y = coords[0], coords[1]
+        if tfm:
+            x, y = tfm.transform(x, y)
+        return [x, y]
+    return [_strip_and_transform(c, tfm) for c in coords]
+
+
+def _thin_coords(coords, max_pts=1500):
+    """Stride-decimate absurdly dense rings BEFORE any heavy geometry work.
+    SOI digitises vertices every few metres; a big state's districts can carry
+    millions of points, which is what breaks parsing on small containers."""
+    if isinstance(coords[0][0], (int, float)):          # a ring: [[x,y,...],...]
+        n = len(coords)
+        if n > max_pts + 100:
+            step = n // max_pts + 1
+            coords = coords[::step] + [coords[-1]]
+        return coords
+    return [_thin_coords(c, max_pts) for c in coords]
+
+
+def _pick_label_field(fields):
+    names = [f[0] for f in fields[1:]]                   # skip DeletionFlag
+    for want in ("district", "dist", "taluk", "subdist", "tehsil",
+                 "block", "name", "state"):
+        for n in names:
+            if want in n.lower():
+                return n
+    for f in fields[1:]:
+        if f[1] == "C":                                  # first text column
+            return f[0]
+    return None
+
+
+def _parse_shapefile(files: dict) -> dict:
+    """files: {'shp': bytes, 'prj': bytes|None, 'dbf': bytes|None}
+    -> {'features': [{'label', 'geometry'}], 'assumed_crs'} in WGS84.
+    Features are kept SEPARATE so districts stay individually selectable."""
+    try:
+        reader = pyshp.Reader(shp=io.BytesIO(files["shp"]),
+                              dbf=io.BytesIO(files["dbf"]) if files.get("dbf") else None)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read .shp: {e}")
+
+    stn = reader.shapeTypeName
+    if "POLYGON" in stn:
+        gtype = "polygon"
+    elif "POLYLINE" in stn:
+        gtype = "line"                      # roads / metro / rail etc.
+    else:
+        raise HTTPException(status_code=400, detail=(
+            f"Shapefile contains {stn}. Only polygon boundaries and line "
+            "networks are usable (e.g. SOI *_BDY, not *_HQ point files)."))
+
+    # ---- decide on a coordinate transform -----------------------------------
+    xmin, ymin, xmax, ymax = reader.bbox
+    looks_geographic = abs(xmin) <= 180 and abs(xmax) <= 180 and \
+        abs(ymin) <= 90 and abs(ymax) <= 90
+    tfm = None
+    assumed = None
+    if files.get("prj"):
+        try:
+            crs = CRS.from_wkt(files["prj"].decode("utf-8", "ignore"))
+            if not crs.is_geographic:
+                tfm = Transformer.from_crs(crs, CRS.from_epsg(4326), always_xy=True)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not read .prj: {e}")
+    elif not looks_geographic:
+        tfm = Transformer.from_crs(CRS.from_epsg(SOI_DEFAULT_EPSG),
+                                   CRS.from_epsg(4326), always_xy=True)
+        assumed = f"EPSG:{SOI_DEFAULT_EPSG} (Survey of India NSF LCC)"
+
+    label_field = None
+    if files.get("dbf"):
+        try:
+            label_field = _pick_label_field(reader.fields)
+        except Exception:
+            label_field = None
+
+    # ---- one feature per shape, processed independently (low peak memory) ---
+    features = []
+    for i, shp in enumerate(reader.iterShapes()):
+        gi = shp.__geo_interface__
+        coords = _strip_and_transform(_thin_coords(list(gi["coordinates"])), tfm)
+        try:
+            g = shp_shape({"type": gi["type"], "coordinates": coords})
+            if gtype == "polygon" and not g.is_valid:
+                g = make_valid(g)
+            g = g.simplify(0.0005, preserve_topology=True)   # ~50 m
+            if g.is_empty:
+                continue
+            geom = shp_mapping(g)
+        except Exception:
+            continue
+        label = None
+        if label_field:
+            try:
+                label = str(reader.record(i)[label_field]).strip() or None
+            except Exception:
+                label = None
+        features.append({"label": label or f"Feature {i + 1}",
+                         "geometry": geom})
+    if not features:
+        raise HTTPException(status_code=400, detail="No usable polygons found in file.")
+
+    lons = [c for f in features for c in _bounds_lons(f["geometry"])]
+    lon1 = min(lons)
+    if not (-180 <= lon1 <= 180):
+        raise HTTPException(status_code=400, detail=(
+            "Coordinates do not look geographic after conversion — please "
+            "include the .prj file of the shapefile and upload again."))
+    if assumed and not (INDIA_LON[0] <= lon1 <= INDIA_LON[1]):
+        raise HTTPException(status_code=400, detail=(
+            f"No .prj was uploaded, and assuming {assumed} placed the shape "
+            "outside India. Please include the .prj file and upload again."))
+
+    return {"features": features, "assumed_crs": assumed, "gtype": gtype}
+
+
+def _bounds_lons(geometry):
+    t, cs = geometry["type"], geometry["coordinates"]
+    if t == "LineString":
+        return [cs[0][0]]
+    if t == "MultiLineString":
+        return [cs[0][0][0]]
+    if t == "Polygon":
+        cs = [cs]
+    return [pt[0] for poly in cs for ring in poly[:1] for pt in ring[:1]]
+
+
+def _kml_coords(text):
+    pts = []
+    for tok in (text or "").split():
+        bits = tok.split(",")
+        if len(bits) >= 2:
+            pts.append([float(bits[0]), float(bits[1])])
+    return pts
+
+
+def _parse_kml(data: bytes) -> dict:
+    """Minimal KML reader: Placemarks with LineString / Polygon geometry
+    (MultiGeometry included). KML is WGS84 by spec, so no reprojection."""
+    try:
+        root = ET.fromstring(data)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not read KML: {e}")
+
+    def tag(el):
+        return el.tag.rsplit("}", 1)[-1]
+
+    features, any_poly = [], False
+    placemarks = [el for el in root.iter() if tag(el) == "Placemark"]
+    for i, pm in enumerate(placemarks):
+        label = None
+        for el in pm.iter():
+            if tag(el) == "name" and el.text:
+                label = el.text.strip()
+                break
+        lines, polys = [], []
+        for el in pm.iter():
+            t = tag(el)
+            if t == "LineString":
+                for c in el.iter():
+                    if tag(c) == "coordinates":
+                        pts = _kml_coords(c.text)
+                        if len(pts) >= 2:
+                            lines.append(pts)
+            elif t == "Polygon":
+                outer, holes = None, []
+                for b in el.iter():
+                    tb = tag(b)
+                    if tb in ("outerBoundaryIs", "innerBoundaryIs"):
+                        for c in b.iter():
+                            if tag(c) == "coordinates":
+                                ring = _kml_coords(c.text)
+                                if len(ring) >= 4:
+                                    if tb == "outerBoundaryIs":
+                                        outer = ring
+                                    else:
+                                        holes.append(ring)
+                if outer:
+                    polys.append([outer] + holes)
+        try:
+            if polys:
+                g = shp_shape({"type": "MultiPolygon", "coordinates": polys})
+                if not g.is_valid:
+                    g = make_valid(g)
+                any_poly = True
+            elif lines:
+                g = shp_shape({"type": "MultiLineString", "coordinates": lines})
+            else:
+                continue
+            g = g.simplify(0.0005, preserve_topology=True)
+            if g.is_empty:
+                continue
+            features.append({"label": label or f"Feature {i + 1}",
+                             "geometry": shp_mapping(g)})
+        except Exception:
+            continue
+    if not features:
+        raise HTTPException(status_code=400,
+                            detail="No LineString or Polygon placemarks found in the KML.")
+    return {"features": features, "assumed_crs": None,
+            "gtype": "polygon" if any_poly else "line"}
+
+
+def _kml_from_kmz(data: bytes) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for m in z.namelist():
+            if m.lower().endswith(".kml"):
+                return z.read(m)
+    raise HTTPException(status_code=400, detail="No .kml inside the .kmz.")
+
+
+def _parts_from_zip(data: bytes) -> dict:
+    parts = {}
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for m in z.namelist():
+            ext = m.lower().rsplit(".", 1)[-1]
+            if ext in ("shp", "prj", "dbf") and ext not in parts:
+                parts[ext] = z.read(m)
+    if "shp" not in parts:
+        raise HTTPException(status_code=400,
+                            detail="No .shp found inside the zip.")
+    return parts
+
+
+_POLY_SHP_TYPES = {5, 15, 25}          # Polygon, PolygonZ, PolygonM
+_LINE_SHP_TYPES = {3, 13, 23}          # PolyLine, PolyLineZ, PolyLineM
+_kind_cache = {}                        # (blob name, generation) -> gtype|None
+
+
+def _shp_header_gtype(first_bytes: bytes):
+    """Shapefile geometry type lives at byte 32 of the .shp header."""
+    if len(first_bytes) < 36:
+        return None
+    t = struct.unpack("<i", first_bytes[32:36])[0]
+    if t in _POLY_SHP_TYPES:
+        return "polygon"
+    if t in _LINE_SHP_TYPES:
+        return "line"
+    return None
+
+
+def _entry_gtype(parts: dict):
+    """'polygon' | 'line' | None for a bucket entry. Cheap where possible:
+    ranged header reads for .shp, a 300-byte peek for cached FeatureCollections
+    (gtype is the first key), string scan for KML."""
+    b = parts.get("fc.geojson")
+    if b is not None:
+        ck = (b.name, b.generation)
+        if ck not in _kind_cache:
+            try:
+                head = b.download_as_bytes(start=0, end=499).decode("utf-8", "ignore")
+                g = "line" if '"gtype": "line"' in head else "polygon"
+                m = re.search(r'"bbox":\s*\[([^\]]+)\]', head)
+                bbox = [float(x) for x in m.group(1).split(",")] if m else None
+                _kind_cache[ck] = {"gtype": g, "bbox": bbox}
+            except Exception:
+                _kind_cache[ck] = {"gtype": "polygon", "bbox": None}
+        return _kind_cache[ck]
+    if "geojson" in parts:                        # legacy dissolved cache
+        return {"gtype": "polygon", "bbox": None}
+    b = parts.get("shp")
+    if b is not None:
+        ck = (b.name, b.generation)
+        if ck not in _kind_cache:
+            try:                                   # 100-byte ranged read
+                g = _shp_header_gtype(b.download_as_bytes(start=0, end=99))
+                _kind_cache[ck] = {"gtype": g, "bbox": None} if g else None
+            except Exception:
+                _kind_cache[ck] = None
+        return _kind_cache[ck]
+    b = parts.get("zip")
+    if b is not None:
+        ck = (b.name, b.generation)
+        if ck not in _kind_cache:
+            g = None
+            try:
+                if (b.size or 0) <= MAX_BLOB_BYTES:
+                    with zipfile.ZipFile(io.BytesIO(b.download_as_bytes())) as z:
+                        for m in z.namelist():
+                            if m.lower().endswith(".shp"):
+                                with z.open(m) as f:
+                                    g = _shp_header_gtype(f.read(100))
+                                break
+            except Exception:
+                g = None
+            _kind_cache[ck] = {"gtype": g, "bbox": None} if g else None
+        return _kind_cache[ck]
+    b = parts.get("kml") or parts.get("kmz")
+    if b is not None:
+        ck = (b.name, b.generation)
+        if ck not in _kind_cache:
+            g = None
+            try:
+                if (b.size or 0) <= MAX_BLOB_BYTES:
+                    data = b.download_as_bytes()
+                    if b.name.lower().endswith(".kmz"):
+                        data = _kml_from_kmz(data)
+                    txt = data.decode("utf-8", "ignore")
+                    if "<Polygon" in txt:
+                        g = "polygon"
+                    elif "<LineString" in txt:
+                        g = "line"
+            except Exception:
+                g = None
+            _kind_cache[ck] = {"gtype": g, "bbox": None} if g else None
+        return _kind_cache[ck]
+    return None
+
+
+@app.get("/shapes")
+def shapes_list():
+    """List usable shapes with their geometry type: polygons (boundaries) and
+    lines (road / metro / rail networks, incl. .kml/.kmz). Point files are
+    hidden entirely."""
+    try:
+        by = {}
+        for b in _bucket().list_blobs():
+            low = b.name.lower()
+            for ext in (".fc.geojson", ".geojson", ".zip", ".shp", ".kml", ".kmz"):
+                if low.endswith(ext):
+                    by.setdefault(b.name[:-len(ext)], {})[ext.lstrip(".")] = b
+                    break
+        out = []
+        for base in sorted(by):
+            meta = _entry_gtype(by[base])
+            if meta and meta.get("gtype"):
+                out.append({"name": base, "gtype": meta["gtype"],
+                            "bbox": meta.get("bbox")})
+        return {"shapes": out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _shapes_setup_hint(e)
+
+
+MAX_BLOB_BYTES = 60 * 1024 * 1024
+
+
+def _blob_bytes(blob):
+    if blob.size and blob.size > MAX_BLOB_BYTES:
+        raise HTTPException(status_code=400,
+                            detail=f"'{blob.name}' is larger than 60 MB — simplify it first.")
+    return blob.download_as_bytes()
+
+
+def _load_shape_fc(name: str):
+    """Return ({'features': [...]}, note). Precedence:
+    <name>.fc.geojson cache  ->  raw <name>.zip / .shp (+.prj/.dbf), parsed and
+    cached  ->  legacy dissolved <name>.geojson (wrapped as one feature)."""
+    if not name or len(name) > 512 or any(c in name for c in "\n\r\x00"):
+        raise HTTPException(status_code=400, detail="Invalid shape name.")
+    try:
+        bucket = _bucket()
+        cands = {b.name.lower(): b for b in bucket.list_blobs(prefix=name)}
+        low = name.lower()
+
+        fc_blob = cands.get(low + ".fc.geojson")
+        if fc_blob is not None:
+            return json.loads(_blob_bytes(fc_blob)), None
+
+        parts, parsed, note = None, None, None
+        zp, shp = cands.get(low + ".zip"), cands.get(low + ".shp")
+        kml, kmz = cands.get(low + ".kml"), cands.get(low + ".kmz")
+        if zp is not None:
+            parts = _parts_from_zip(_blob_bytes(zp))
+        elif shp is not None:
+            parts = {"shp": _blob_bytes(shp)}
+            for ext in (".prj", ".dbf"):
+                b = cands.get(low + ext)
+                if b is not None:
+                    parts[ext[1:]] = _blob_bytes(b)
+        elif kml is not None:
+            parsed = _parse_kml(_blob_bytes(kml))
+        elif kmz is not None:
+            parsed = _parse_kml(_kml_from_kmz(_blob_bytes(kmz)))
+
+        if parts is not None:
+            parsed = _parse_shapefile(parts)
+            if parsed["assumed_crs"]:
+                note = f"No .prj found — assumed {parsed['assumed_crs']}."
+            if not parts.get("dbf") and len(parsed["features"]) > 1:
+                note = ((note + " ") if note else "") + \
+                    "No .dbf found — features are unnamed."
+
+        if parsed is not None:
+            b = None
+            for f in parsed["features"]:
+                x1, y1, x2, y2 = shp_shape(f["geometry"]).bounds
+                b = [x1, y1, x2, y2] if b is None else \
+                    [min(b[0], x1), min(b[1], y1), max(b[2], x2), max(b[3], y2)]
+            fc = {"gtype": parsed.get("gtype", "polygon"), "bbox": b,
+                  "type": "FeatureCollection", "features": parsed["features"]}
+            try:
+                bucket.blob(name + ".fc.geojson").upload_from_string(
+                    json.dumps(fc), content_type="application/geo+json")
+            except Exception:
+                pass
+            return fc, note
+
+        legacy = cands.get(low + ".geojson")
+        if legacy is not None:
+            geom = json.loads(_blob_bytes(legacy))
+            gb = list(shp_shape(geom).bounds)
+            return {"gtype": "polygon", "bbox": gb, "type": "FeatureCollection",
+                    "features": [{"label": name.rsplit("/", 1)[-1],
+                                  "geometry": geom}]}, None
+
+        raise HTTPException(status_code=404,
+                            detail=f"No shape called '{name}' in the bucket.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _shapes_setup_hint(e)
+
+
+@app.get("/shapes/geometry")
+def shapes_geometry(name: str):
+    fc, note = _load_shape_fc(name)
+    return {"name": name, "note": note, "gtype": fc.get("gtype", "polygon"),
+            "features": [{"label": f.get("label") or f"Feature {i + 1}",
+                          "geometry": f["geometry"]}
+                         for i, f in enumerate(fc["features"])]}
+
+
+# ----------------------------------------------------------------------------
+# 6. Region spec -> ee.Geometry
+# ----------------------------------------------------------------------------
+class Circle(BaseModel):
+    lat: float
+    lon: float
+    radius_km: float
+
+
+class ShapeRef(BaseModel):
+    name: str
+    feature: Optional[int] = None
+
+
+class RegionSpec(BaseModel):
+    # geojson | circles | admin | shape | advanced
+    type: str
+    geometry: Optional[dict] = None
+    circles: Optional[List[Circle]] = None
+    state: Optional[str] = None
+    district: Optional[str] = None
+    name: Optional[str] = None                 # saved-shape name
+    feature: Optional[int] = None              # index into the shape's features
+    # 'advanced': buffered layers (A) combined with a boundary side (B)
+    shapes: Optional[List[ShapeRef]] = None
+    buffer_km: Optional[float] = None
+    roi: Optional["RegionSpec"] = None         # operand B
+    roi_extra: Optional["RegionSpec"] = None   # unioned into B (drawn rect/circle)
+    op: Optional[str] = None                   # intersect|union|a_minus_b|b_minus_a
+
+
+try:
+    RegionSpec.model_rebuild()
+except AttributeError:                          # pydantic v1 fallback
+    RegionSpec.update_forward_refs()
+
+
+def build_region(spec: RegionSpec) -> ee.Geometry:
+    if spec.type == "geojson":
+        if not spec.geometry:
+            raise HTTPException(status_code=400, detail="geojson spec needs 'geometry'")
+        return ee.Geometry(spec.geometry)
+    if spec.type == "circles":
+        if not spec.circles:
+            raise HTTPException(status_code=400, detail="circles spec needs at least one circle")
+        feats = [ee.Feature(ee.Geometry.Point([c.lon, c.lat]).buffer(c.radius_km * 1000))
+                 for c in spec.circles]
+        return ee.FeatureCollection(feats).geometry()   # dissolves overlaps
+    if spec.type == "admin":
+        if not spec.state:
+            raise HTTPException(status_code=400, detail="admin spec needs 'state'")
+        return _admin_geometry(spec.state, spec.district)
+    if spec.type == "shape":
+        if not spec.name:
+            raise HTTPException(status_code=400, detail="shape spec needs 'name'")
+        geo, _ = _shape_geo(spec.name, spec.feature)
+        return ee.Geometry(_slim_geo(geo))
+    if spec.type == "advanced":
+        return _advanced_region(spec)
+    raise HTTPException(status_code=400, detail=f"Unknown region type '{spec.type}'")
+
+
+def _slim_geo(geo: dict, limit: int = 250_000) -> dict:
+    """Geometries ride inside every EE request (once per analysed year, so 12x
+    for GHSL): oversized coastlines overflow EE's request limit. Simplify
+    progressively until the payload is comfortably small."""
+    for tol in (0.002, 0.004, 0.008, 0.016):
+        if len(json.dumps(geo)) <= limit:
+            break
+        g = shp_shape(geo).simplify(tol, preserve_topology=True)
+        if g.is_empty:
+            break
+        geo = shp_mapping(g)
+    return geo
+
+
+def _shape_geo(name: str, feature: Optional[int]):
+    """(geometry, gtype) for one saved shape: a single feature, or the union
+    of all features (lines concatenated, polygons dissolved by EE later)."""
+    fc, _ = _load_shape_fc(name)
+    gtype = fc.get("gtype", "polygon")
+    feats = fc["features"]
+    if feature is not None:
+        if not (0 <= feature < len(feats)):
+            raise HTTPException(status_code=400,
+                                detail=f"'{name}' has no feature #{feature}")
+        return feats[feature]["geometry"], gtype
+    parts = []
+    multi = "MultiPolygon" if gtype == "polygon" else "MultiLineString"
+    single = "Polygon" if gtype == "polygon" else "LineString"
+    for f in feats:
+        g = f["geometry"]
+        if g["type"] == multi:
+            parts.extend(g["coordinates"])
+        elif g["type"] == single:
+            parts.append(g["coordinates"])
+    if not parts:
+        raise HTTPException(status_code=400, detail=f"'{name}' has no usable geometry.")
+    return {"type": multi, "coordinates": parts}, gtype
+
+
+def _advanced_region(spec: RegionSpec) -> ee.Geometry:
+    """Buffer one-or-more saved layers, optionally intersect with an ROI."""
+    if not spec.shapes:
+        raise HTTPException(status_code=400,
+                            detail="Advanced region needs at least one layer.")
+    buf_km = spec.buffer_km or 0
+    feats, has_line = [], False
+    for ref in spec.shapes:
+        geo, gtype = _shape_geo(ref.name, ref.feature)
+        has_line = has_line or (gtype == "line")
+        feats.append(ee.Feature(ee.Geometry(_slim_geo(geo, 150_000))))
+    if has_line and buf_km <= 0:
+        raise HTTPException(status_code=400, detail=(
+            "Line layers (roads / metro / rail) have no area — set a buffer "
+            "distance greater than 0 km."))
+    geom = ee.FeatureCollection(feats).geometry()
+    if buf_km > 0:
+        geom = geom.buffer(buf_km * 1000, 100)
+
+    b_parts = [build_region(r) for r in (spec.roi, spec.roi_extra) if r is not None]
+    if not b_parts:
+        return geom
+    b = b_parts[0]
+    for extra in b_parts[1:]:
+        b = b.union(extra, maxError=100)
+
+    op = (spec.op or "intersect").lower()
+    if op == "intersect":
+        return geom.intersection(b, maxError=100)
+    if op == "union":                       # union dissolves overlaps in EE
+        return geom.union(b, maxError=100)
+    if op == "a_minus_b":
+        return geom.difference(b, maxError=100)
+    if op == "b_minus_a":
+        return b.difference(geom, maxError=100)
+    raise HTTPException(status_code=400,
+                        detail="op must be intersect | union | a_minus_b | b_minus_a")
+
+
+_GEOD = Geod(ellps="WGS84")
+
+
+def _aeqd(lat, lon):
+    """Local azimuthal-equidistant metric projection for buffers/areas."""
+    crs = CRS.from_proj4(f"+proj=aeqd +lat_0={lat} +lon_0={lon} "
+                         "+datum=WGS84 +units=m +no_defs")
+    fwd = Transformer.from_crs(CRS.from_epsg(4326), crs, always_xy=True).transform
+    inv = Transformer.from_crs(crs, CRS.from_epsg(4326), always_xy=True).transform
+    return fwd, inv
+
+
+def _metric_buffer(geom, km):
+    c = geom.centroid
+    fwd, inv = _aeqd(c.y, c.x)
+    return shp_transform(inv, shp_transform(fwd, geom).buffer(km * 1000))
+
+
+def _area_km2(geom):
+    a, _ = _GEOD.geometry_area_perimeter(geom)
+    return abs(a) / 1e6
+
+
+class FragmentsQuery(BaseModel):
+    shapes: List[ShapeRef]                     # line layers to buffer (A)
+    buffer_km: float
+    boundary: Optional[ShapeRef] = None        # polygon layer (B)
+    extras: List[RegionSpec] = []              # drawn rects / circles (C1..Cn)
+
+
+@app.post("/fragments")
+def fragments(q: FragmentsQuery):
+    """Planar arrangement of all operands: every atomic piece of
+    (buffered lines) x (boundary) x (drawn shapes), computed exactly with
+    shapely. Fragments are what the user allocates into zones."""
+    try:
+        if not q.shapes:
+            raise HTTPException(status_code=400, detail="Select line layers first.")
+        if not (q.buffer_km and q.buffer_km > 0):
+            raise HTTPException(status_code=400, detail="Buffer must be > 0 km.")
+
+        ops = []
+        parts = [make_valid(shp_shape(_slim_geo(_shape_geo(r.name, r.feature)[0],
+                                                150_000)))
+                 for r in q.shapes]
+        ops.append(make_valid(_metric_buffer(unary_union(parts), q.buffer_km)))
+
+        if q.boundary is not None:
+            geo, gt = _shape_geo(q.boundary.name, q.boundary.feature)
+            if gt != "polygon":
+                raise HTTPException(status_code=400,
+                                    detail="The boundary layer must be polygons.")
+            ops.append(make_valid(shp_shape(_slim_geo(geo, 150_000))))
+
+        for ex in q.extras:
+            if ex.type == "geojson" and ex.geometry:
+                g = shp_shape(ex.geometry)
+            elif ex.type == "circles" and ex.circles:
+                g = unary_union([_metric_buffer(Point(c.lon, c.lat), c.radius_km)
+                                 for c in ex.circles])
+            else:
+                raise HTTPException(status_code=400,
+                                    detail="Extras must be drawn rectangles or circles.")
+            ops.append(make_valid(g))
+
+        if len(ops) > 8:
+            raise HTTPException(status_code=400,
+                                detail="Too many shapes — 8 operands maximum.")
+
+        # incremental planar split: every existing fragment is cut by each new
+        # operand; the operand's uncovered remainder becomes a new fragment
+        frags, covered = [], None
+        for G in ops:
+            nxt = []
+            for f in frags:
+                for piece in (f.intersection(G), f.difference(G)):
+                    if not piece.is_empty:
+                        nxt.append(piece)
+            left = G.difference(covered) if covered is not None else G
+            if not left.is_empty:
+                nxt.append(left)
+            covered = G if covered is None else covered.union(G)
+            frags = nxt
+
+        out = []
+        for f in frags:
+            f = make_valid(f)
+            geoms = (list(f.geoms) if f.geom_type in ("MultiPolygon",
+                                                      "GeometryCollection")
+                     else [f])
+            for g in geoms:
+                if g.geom_type != "Polygon":
+                    continue
+                a = _area_km2(g)
+                if a < 0.02:                    # drop slivers under 2 hectares
+                    continue
+                gg = g.simplify(0.0003, preserve_topology=True)
+                if gg.is_empty:
+                    continue
+                out.append({"area_km2": round(a, 3),
+                            "geometry": shp_mapping(gg)})
+        if not out:
+            raise HTTPException(status_code=400,
+                                detail="The shapes produce no fragments — check overlaps.")
+        if len(out) > 48:
+            raise HTTPException(status_code=400, detail=(
+                f"{len(out)} fragments — too many to allocate by hand; "
+                "use fewer / simpler shapes."))
+        out.sort(key=lambda x: -x["area_km2"])
+        for i, o in enumerate(out):
+            o["id"] = i
+        return {"fragments": out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Fragmenting failed: {e}")
+
+
+class PreviewQuery(BaseModel):
+    region: RegionSpec
+
+
+@app.post("/region_preview")
+@ee_errors
+def region_preview(q: PreviewQuery):
+    """Resolve any RegionSpec (incl. 'advanced') to a drawable GeoJSON."""
+    ensure_ee()
+    geom = build_region(q.region).simplify(maxError=200)
+    return {"geometry": geom.getInfo()}
+
+
+def _cap_vector_area(region: ee.Geometry, cap_km2: int = VECTOR_AREA_CAP_KM2):
+    area_km2 = region.area(maxError=100).getInfo() / 1e6
+    if area_km2 > cap_km2:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Region is {area_km2:,.0f} km². This vector dataset is "
+                    f"limited to {cap_km2:,} km² — choose a smaller region."))
+
+
+class ClippedTilesQuery(BaseModel):
+    dataset: str
+    year: int
+    region: RegionSpec
+
+
+@app.post("/tiles_clipped")
+@ee_errors
+def tiles_clipped(q: ClippedTilesQuery):
+    """Tile URL for one dataset + year CLIPPED to the region of interest,
+    so only the selected region appears on the map. Cached like /tiles."""
+    ensure_ee()
+    spec_hash = hashlib.md5(
+        json.dumps(q.region.dict(), sort_keys=True).encode()).hexdigest()[:16]
+    key = (q.dataset, q.year, spec_hash)
+    now = time.time()
+    with _tile_lock:
+        hit = _tile_cache.get(key)
+        if hit and hit[1] > now:
+            return {"tile_url": hit[0], "cached": True}
+
+    region = build_region(q.region)
+    d = _dataset(q.dataset)
+    if d["kind"] == "vector":
+        img = _vector_styled(d, region).clip(region)
+        vis = {}
+    else:
+        img, vis = styled_image(q.dataset, q.year)
+        img = img.clip(region)
+    mapid = img.getMapId(vis)
+    url = mapid["tile_fetcher"].url_format
+    with _tile_lock:
+        _tile_cache[key] = (url, now + TILE_TTL_SECONDS)
+    return {"tile_url": url, "cached": False}
+
+
+THUMB_CRS = "EPSG:3857"        # match the on-screen map; default EE thumbs
+                                # are plate-carree and look stretched
+OVERLAY_OPACITY = 0.78
+
+
+def _s2_background(region: ee.Geometry) -> ee.Image:
+    """Recent cloud-free Sentinel-2 true-colour composite, clipped: the
+    realistic satellite backdrop under every analysis frame."""
+    col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+           .filterBounds(region)
+           .filterDate("2023-01-01", "2025-06-30")
+           .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 35))
+           .sort("CLOUDY_PIXEL_PERCENTAGE", False))   # least cloudy on top
+    # mosaic of least-cloudy scenes: far cheaper than a median composite,
+    # which was the main reason report rendering timed out
+    rgb = col.mosaic().select(["B4", "B3", "B2"])
+    return rgb.visualize(min=0, max=2500).clip(region)
+
+
+def _region_outline(region: ee.Geometry) -> ee.Image:
+    return (ee.Image().paint(ee.FeatureCollection([ee.Feature(region)]), 0, 2)
+            .visualize(palette=["ffffff"]))
+
+
+def _frame(region: ee.Geometry, data_rgb=None) -> ee.Image:
+    """Satellite backdrop (+ optional data overlay at ~80% opacity) + a thin
+    white outline of the analysis region."""
+    img = _s2_background(region)
+    if data_rgb is not None:
+        img = img.blend(data_rgb.updateMask(
+            ee.Image.constant(OVERLAY_OPACITY)))
+    return img.blend(_region_outline(region))
+
+
+def _data_rgb(dataset: str, year: int, region: ee.Geometry, d: dict):
+    if d["kind"] == "vector":
+        return _vector_styled(d, region).clip(region)
+    img, vis = styled_image(dataset, year)
+    return img.clip(region).visualize(**vis)
+
+
+class HiresQuery(BaseModel):
+    dataset: str
+    year: Optional[int] = None      # None -> pure-satellite context frame
+    region: RegionSpec
+
+
+@app.post("/hires")
+@ee_errors
+def hires(q: HiresQuery):
+    """A high-resolution (2048 px) PNG of one epoch clipped to the region -
+    served when the user clicks a filmstrip map to download it."""
+    ensure_ee()
+    d = _dataset(q.dataset)
+    region = build_region(q.region)
+    bounds = region.bounds(1)
+    if d["kind"] == "vector":
+        _cap_vector_area(region, d.get("area_cap_km2", VECTOR_AREA_CAP_KM2))
+    data = None if q.year is None else _data_rgb(q.dataset, q.year, region, d)
+    url = _frame(region, data).getThumbURL(
+        {"region": bounds, "dimensions": 2048, "format": "png",
+         "crs": THUMB_CRS})
+    return {"dataset": q.dataset, "year": q.year, "url": url}
+
+
+# ----------------------------------------------------------------------------
+# 6b. PDF report: Zonal Multi-Year Analysis
+# ----------------------------------------------------------------------------
+class ReportZone(BaseModel):
+    label: str
+    color: str                      # '#RRGGBB'
+    spec: RegionSpec
+    series: List[dict]              # [{year, value}]
+
+
+class ReportQuery(BaseModel):
+    dataset: str
+    stat: str
+    region: RegionSpec              # union of all zones
+    zones: List[ReportZone]
+
+
+def _hex_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _fmt_val(v):
+    if v is None:
+        return "-"                  # latin-1 safe (em-dash breaks Helvetica)
+    if abs(v) < 10 and v != int(v):
+        return f"{v:.3f}"
+    return f"{v:,.0f}"
+
+
+def _nice_scale_km(ground_km):
+    """Largest 1/2/5x10^n that fits in ~30% of the map width."""
+    target = ground_km * 0.3
+    best = 1e-6
+    for n in range(-3, 5):
+        for m in (1, 2, 5):
+            v = m * 10 ** n
+            if v <= target:
+                best = max(best, v)
+    return best
+
+
+LOGO_B64 = "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"
+_logo_cache = {}
+
+
+def _logo_io():
+    if "b" not in _logo_cache:
+        _logo_cache["b"] = base64.b64decode(LOGO_B64)
+    return io.BytesIO(_logo_cache["b"])
+
+
+BRAND_TEAL = (11, 90, 73)
+BRAND_ORANGE = (228, 87, 46)
+BRAND_INK = (20, 33, 28)
+BRAND_DIM = (90, 100, 95)
+BRAND_CO = "VINAMRAVIGYAN TECHNOLOGIES PRIVATE LIMITED"
+
+
+def _brand_wordmark(pdf, h, size):
+    pdf.set_font("Helvetica", "B", size)
+    pdf.set_text_color(*BRAND_TEAL)
+    pdf.cell(pdf.get_string_width("DeepSee") + 0.4, h, "DeepSee")
+    pdf.set_text_color(*BRAND_ORANGE)
+    pdf.cell(pdf.get_string_width("Go") + 1.6, h, "Go")
+
+
+def _brand_header(pdf):
+    """Cover-page branding, mirroring the web app header."""
+    try:
+        pdf.image(_logo_io(), x=15, y=10.5, w=14)
+    except Exception:
+        pass
+    pdf.set_xy(32, 11.5)
+    _brand_wordmark(pdf, 9, 22)
+    pdf.set_font("Helvetica", "I", 10)
+    pdf.set_text_color(120, 130, 124)
+    pdf.cell(0, 9, "- map the big picture")
+    pdf.set_xy(32.6, 20.5)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(*BRAND_DIM)
+    pdf.cell(pdf.get_string_width("built by ") + 0.6, 4, "built by ")
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(*BRAND_INK)
+    pdf.cell(0, 4, BRAND_CO)
+    pdf.set_draw_color(220, 226, 220)
+    pdf.set_line_width(0.3)
+    pdf.line(15, 27.5, 195, 27.5)
+    pdf.set_xy(15, 31)
+
+
+class ReportPDF(FPDF if _PDF_OK else object):
+    def footer(self):
+        self.set_y(-14)
+        try:
+            self.image(_logo_io(), x=10, y=self.get_y() + 0.3, w=4.6)
+        except Exception:
+            pass
+        self.set_xy(16, self.get_y())
+        _brand_wordmark(self, 5, 9)
+        self.set_font("Helvetica", "I", 7.5)
+        self.set_text_color(*BRAND_DIM)
+        self.cell(self.get_string_width("built by ") + 0.6, 5, "built by ")
+        self.set_font("Helvetica", "B", 7.5)
+        self.set_text_color(*BRAND_INK)
+        self.cell(self.get_string_width(BRAND_CO) + 2, 5, BRAND_CO)
+        self.set_y(-14)
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(*BRAND_DIM)
+        self.cell(0, 5, f"Page {self.page_no()}", align="R")
+
+
+def _draw_legend(pdf, d, x, y, w):
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(40, 50, 45)
+    if d.get("classes"):
+        cols, cw = 2, w / 2
+        for i, c in enumerate(d["classes"][:14]):
+            cx = x + (i % cols) * cw
+            cy = y + (i // cols) * 4.2
+            r, g, b = _hex_rgb(c["color"])
+            pdf.set_fill_color(r, g, b)
+            pdf.rect(cx, cy, 3.4, 3.4, "F")
+            pdf.set_xy(cx + 4.6, cy - 0.4)
+            pdf.cell(cw - 5, 4, c["label"][:34])
+        return y + ((min(len(d["classes"]), 14) + 1) // 2) * 4.2 + 2
+    if d.get("vis"):
+        pal = [(_hex_rgb(p if p.startswith("#") else "#" + p))
+               for p in d["vis"]["palette"]]
+        steps = 60
+        for i in range(steps):
+            t = i / (steps - 1)
+            seg = min(int(t * (len(pal) - 1)), len(pal) - 2)
+            f = t * (len(pal) - 1) - seg
+            r = int(pal[seg][0] + (pal[seg + 1][0] - pal[seg][0]) * f)
+            g = int(pal[seg][1] + (pal[seg + 1][1] - pal[seg][1]) * f)
+            b = int(pal[seg][2] + (pal[seg + 1][2] - pal[seg][2]) * f)
+            pdf.set_fill_color(r, g, b)
+            pdf.rect(x + i * (w / steps), y, w / steps + 0.15, 3.4, "F")
+        pdf.set_xy(x, y + 3.8)
+        pdf.cell(w / 2, 4, f"{d['vis']['min']:,}")
+        pdf.cell(w / 2, 4, f"{d['vis']['max']:,}", align="R")
+        return y + 9
+    return y
+
+
+def _draw_scale_north(pdf, x, y, w, ground_km):
+    km = _nice_scale_km(ground_km)
+    bar_w = w * km / ground_km
+    pdf.set_draw_color(20, 33, 28)
+    pdf.set_fill_color(20, 33, 28)
+    pdf.set_line_width(0.3)
+    pdf.rect(x, y, bar_w / 2, 1.6, "F")
+    pdf.rect(x + bar_w / 2, y, bar_w / 2, 1.6, "D")
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(20, 33, 28)
+    label = f"{km:g} km" if km >= 1 else f"{km * 1000:g} m"
+    pdf.set_xy(x, y + 2)
+    pdf.cell(bar_w, 3.5, label, align="C")
+    ax = x + w - 5                      # north arrow
+    pdf.polygon([(ax, y + 3.5), (ax - 2.2, y + 8), (ax + 2.2, y + 8)],
+                style="F")
+    pdf.set_xy(ax - 3, y + 8.2)
+    pdf.cell(6, 3.5, "N", align="C")
+
+
+def _compose_report_frames(bg_png, years, data_pngs):
+    """[(title, png)]: satellite context first, then per-year frames made by
+    alpha-compositing the data overlay (78% opacity) onto the one backdrop."""
+    bg = PILImage.open(io.BytesIO(bg_png)).convert("RGBA")
+    frames = [("Zones - satellite context", bg_png)]
+    for y in years:
+        raw = data_pngs.get(y)
+        if raw is None:
+            frames.append((f"{y} (data unavailable)", bg_png))
+            continue
+        try:
+            ov = PILImage.open(io.BytesIO(raw)).convert("RGBA")
+            if ov.size != bg.size:
+                ov = ov.resize(bg.size)
+            alpha = ov.split()[3].point(lambda v: int(v * OVERLAY_OPACITY))
+            ov.putalpha(alpha)
+            out = PILImage.alpha_composite(bg, ov)
+            buf = io.BytesIO()
+            out.convert("RGB").save(buf, "PNG")
+            frames.append((str(y), buf.getvalue()))
+        except Exception:
+            frames.append((f"{y} (data unavailable)", bg_png))
+    return frames
+
+
+def _place_map(pdf, png, x, y, w, h):
+    if png is not None:
+        pdf.image(io.BytesIO(png), x=x, y=y, w=w, h=h, keep_aspect_ratio=True)
+        return
+    pdf.set_draw_color(180, 188, 182)
+    pdf.rect(x, y, w, h, "D")
+    pdf.set_font("Helvetica", "I", 11)
+    pdf.set_text_color(120, 130, 124)
+    pdf.set_xy(x, y + h / 2 - 4)
+    pdf.cell(w, 8, "Map could not be rendered - rebuild the report to retry",
+             align="C")
+
+
+def _build_report_pdf(meta, frames, table, ground_km):
+    """meta: {heading, subtitle, dataset_meta, zones:[(label,color)]}
+    frames: [(title, png_bytes)] - context first; table: (years, matrix)."""
+    pdf = ReportPDF(orientation="P", format="A4")
+    pdf.set_auto_page_break(auto=False)
+    MW = 180                                       # content width (mm)
+
+    # ---- cover / first page: branding + heading + zones + context map ----
+    pdf.add_page()
+    _brand_header(pdf)
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(20, 33, 28)
+    pdf.cell(0, 12, meta["heading"], new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(90, 100, 95)
+    pdf.cell(0, 6, meta["subtitle"], new_x="LMARGIN", new_y="NEXT")
+    y = pdf.get_y() + 3
+    pdf.set_font("Helvetica", "", 9)
+    for label, color in meta["zones"]:
+        r, g, b = _hex_rgb(color)
+        pdf.set_fill_color(r, g, b)
+        pdf.rect(15, y + 0.7, 4, 4, "F")
+        pdf.set_text_color(40, 50, 45)
+        pdf.set_xy(21, y)
+        pdf.cell(80, 5.4, label)
+        y += 5.6
+    if frames:
+        title, png = frames[0]
+        pdf.set_xy(15, y + 3)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(20, 33, 28)
+        pdf.cell(0, 7, title, new_x="LMARGIN", new_y="NEXT")
+        iy = pdf.get_y() + 1
+        ih = min(150, 275 - iy)
+        _place_map(pdf, png, 15, iy, MW, ih)
+        _draw_scale_north(pdf, 15, iy + ih + 2, MW, ground_km)
+
+    # ---- one page per year ----
+    for title, png in frames[1:]:
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.set_text_color(20, 33, 28)
+        pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
+        iy = pdf.get_y() + 1
+        ih = 195
+        _place_map(pdf, png, 15, iy, MW, ih)
+        ly = iy + ih + 3
+        _draw_scale_north(pdf, 15, ly, MW * 0.5, ground_km)
+        _draw_legend(pdf, meta["dataset_meta"], 15 + MW * 0.55, ly, MW * 0.45)
+
+    # ---- table page(s) ----
+    years, zones, matrix = table
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(20, 33, 28)
+    pdf.cell(0, 10, "Zone-wise year-wise values", new_x="LMARGIN", new_y="NEXT")
+    cw = min(34.0, (MW - 20) / max(1, len(zones)))
+    row_h = 6.5
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(240, 243, 240)
+    pdf.cell(20, row_h, "Year", border=1, fill=True)
+    for label, color in zones:
+        r, g, b = _hex_rgb(color)
+        pdf.set_text_color(r, g, b)
+        pdf.cell(cw, row_h, label[:16], border=1, fill=True, align="R")
+    pdf.ln(row_h)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(40, 50, 45)
+    for yi, year in enumerate(years):
+        if pdf.get_y() > 262:
+            pdf.add_page()
+        pdf.cell(20, row_h, str(year), border=1)
+        for zi in range(len(zones)):
+            pdf.cell(cw, row_h, _fmt_val(matrix[yi][zi]), border=1, align="R")
+        pdf.ln(row_h)
+    return bytes(pdf.output())
+
+
+@app.post("/report")
+def report(q: ReportQuery):
+    """A4 PDF: Zonal Multi-Year Analysis - per-year satellite-composited maps
+    with zone outlines, legend, scale + north, and the zones x years table."""
+    if not _PDF_OK:
+        raise HTTPException(status_code=500, detail=(
+            "PDF libraries are not installed on this revision - add 'fpdf2' "
+            "and 'Pillow' to requirements.txt and redeploy."))
+    ensure_ee()
+    d = _dataset(q.dataset)
+    if not q.zones:
+        raise HTTPException(status_code=400, detail="No zones supplied.")
+    if len(q.zones) > 8:
+        raise HTTPException(status_code=400, detail="At most 8 zones per report.")
+    years = [p["year"] for p in q.zones[0].series]
+    if len(years) > 14:
+        raise HTTPException(status_code=400, detail="At most 14 years per report.")
+
+    region = build_region(q.region)
+    bounds = region.bounds(1)
+
+    # ground width for the scale bar (WGS84 geodesic across the bbox middle)
+    bb = bounds.getInfo()["coordinates"][0]
+    lons = [p[0] for p in bb]; lats = [p[1] for p in bb]
+    mid = (min(lats) + max(lats)) / 2
+    ground_km = _GEOD.line_length([min(lons), max(lons)], [mid, mid]) / 1000
+
+    zone_paint = ee.Image().paint(ee.FeatureCollection([]), 0, 1).visualize(
+        palette=["000000"]).updateMask(ee.Image.constant(0))
+    zone_layers = []
+    for z in q.zones:
+        zg = build_region(z.spec)
+        zone_layers.append(ee.Image().paint(
+            ee.FeatureCollection([ee.Feature(zg)]), 0, 3
+        ).visualize(palette=[z.color.lstrip("#")]))
+
+    # adaptive resolution: very wide regions render the satellite backdrop
+    # at slightly lower resolution to keep report builds fast
+    dim = 950 if ground_km > 120 else 1100
+    tp = {"region": bounds, "dimensions": dim, "format": "png",
+          "crs": THUMB_CRS}
+
+    def fetch_png(make_img, attempts=3):
+        """Fresh thumbnail URL per attempt; transient EE hiccups retried."""
+        for i in range(attempts):
+            try:
+                url = make_img().getThumbURL(tp)
+                with urlopen(url, timeout=110) as r:
+                    return r.read()
+            except Exception:
+                if i < attempts - 1:
+                    time.sleep(2 * (i + 1))
+        return None
+
+    # The Sentinel-2 backdrop is BY FAR the heaviest render, so it is done
+    # exactly ONCE (with zone outlines burned in); each year only fetches its
+    # lightweight data layer, and Pillow composites them locally.
+    def bg_img():
+        base = _frame(region)
+        for zl in zone_layers:
+            base = base.blend(zl)
+        return base
+
+    bg_png = fetch_png(bg_img)
+    if bg_png is None:
+        raise HTTPException(status_code=502, detail=(
+            "Satellite backdrop rendering failed - Earth Engine may be "
+            "under load; please try again."))
+
+    def data_png(year):
+        return fetch_png(lambda: _data_rgb(q.dataset, year, region, d))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        data = dict(zip(years, ex.map(data_png, years)))
+
+    frames = _compose_report_frames(bg_png, years, data)
+
+    matrix = [[(z.series[yi].get("value") if yi < len(z.series) else None)
+               for z in q.zones] for yi in range(len(years))]
+    meta = {
+        "heading": "Zonal Multi-Year Analysis",
+        "subtitle": f"{d['label']}  -  {q.stat.upper()}  -  "
+                    f"{len(q.zones)} zones  -  DeepSeeGo",
+        "dataset_meta": d,
+        "zones": [(z.label, z.color) for z in q.zones],
+    }
+    pdf = _build_report_pdf(meta, frames,
+                            (years, meta["zones"], matrix), ground_km)
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             'attachment; filename="DeepSeeGo_Zonal_Report.pdf"'})
+
+
+# ----------------------------------------------------------------------------
+# 6b2. Bhuvan API proxy: browsers cannot call Bhuvan directly (no CORS),
+# so the backend relays requests. Only bhuvan-app1.nrsc.gov.in/api/ paths.
+# ----------------------------------------------------------------------------
+import re as _re
+from urllib.parse import quote as _q
+
+BHUVAN_API_BASE = "https://bhuvan-app1.nrsc.gov.in/api/"
+
+
+class BhuvanQuery(BaseModel):
+    path: str          # e.g. "geocode/rgeo.php"
+    query: str = ""    # raw query string incl. token (frontend substitutes)
+
+
+def _bhuvan_url(path: str, query: str) -> str:
+    if not _re.fullmatch(r"[A-Za-z0-9_\-./]{1,120}", path) or ".." in path \
+            or path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid Bhuvan API path.")
+    if len(query) > 4000 or any(c in query for c in "\r\n"):
+        raise HTTPException(status_code=400, detail="Invalid query string.")
+    return BHUVAN_API_BASE + path + (("?" + query) if query else "")
+
+
+@app.post("/bhuvan_api")
+def bhuvan_api(q: BhuvanQuery):
+    url = _bhuvan_url(q.path, q.query)
+    try:
+        with urlopen(url, timeout=30) as r:
+            body = r.read(300_000).decode("utf-8", "ignore")
+            ctype = r.headers.get("Content-Type", "")
+    except Exception as e:
+        raise HTTPException(status_code=502,
+                            detail=f"Bhuvan did not respond: {e}")
+    return {"path": q.path, "content_type": ctype, "body": body}
+
+
+# ----------------------------------------------------------------------------
+# 6b3. Live air-quality providers. Open-Meteo needs no key; others read their
+# key from an environment variable so it never touches code or the browser.
+# ----------------------------------------------------------------------------
+AQ_KEYS = {
+    "openweather": "OPENWEATHER_KEY",
+    "iqair": "IQAIR_KEY",
+    "openaq": "OPENAQ_KEY",
+    "apininjas": "APININJAS_KEY",
+}
+
+AQI_CATS = [(50, "Good", "#00e400"), (100, "Moderate", "#ffff00"),
+            (150, "Unhealthy (sensitive)", "#ff7e00"),
+            (200, "Unhealthy", "#ff0000"),
+            (300, "Very unhealthy", "#8f3f97"), (1e9, "Hazardous", "#7e0023")]
+
+
+def _aqi_cat(aqi):
+    if aqi is None:
+        return None, None
+    for hi, label, color in AQI_CATS:
+        if aqi <= hi:
+            return label, color
+    return None, None
+
+
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/122 Safari/537.36 DeepSeeGo/1.0")
+
+
+try:
+    import requests as _rq
+    _SESSION = _rq.Session()
+    _RQ_OK = True
+except Exception:                       # pragma: no cover
+    _RQ_OK = False
+
+
+def _get_json(url, headers=None, timeout=45, tries=3):
+    """Prefer the requests library (browser-like TLS; some government
+    endpoints reset raw-urllib TLS handshakes), retrying on the
+    RemoteDisconnected pattern, then fall back to urllib."""
+    h = {"User-Agent": _UA, "Accept": "application/json, text/plain, */*",
+         "Connection": "close"}
+    if headers:
+        h.update(headers)
+    last = None
+    if _RQ_OK:
+        for i in range(tries):
+            try:
+                r = _SESSION.get(url, headers=h, timeout=(10, timeout))
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last = e
+                time.sleep(1.5 * (i + 1))
+    from urllib.request import Request
+    try:
+        req = Request(url, headers=h)
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read(600_000).decode("utf-8", "ignore"))
+    except Exception as e:
+        raise last or e
+
+
+class AQLiveQuery(BaseModel):
+    lat: float
+    lon: float
+    providers: List[str] = ["open-meteo"]
+
+
+@app.post("/air_quality_live")
+def air_quality_live(q: AQLiveQuery):
+    """Live AQ from multiple providers. Open-Meteo always works; keyed
+    providers activate when their env var is set. Each provider is independent:
+    one failing never blocks the others."""
+    out = {}
+
+    def openmeteo():
+        u = ("https://air-quality-api.open-meteo.com/v1/air-quality?"
+             f"latitude={q.lat}&longitude={q.lon}&current=pm2_5,pm10,"
+             "nitrogen_dioxide,sulphur_dioxide,ozone,carbon_monoxide,"
+             "us_aqi,european_aqi")
+        c = _get_json(u).get("current", {})
+        label, color = _aqi_cat(c.get("us_aqi"))
+        return {"aqi_us": c.get("us_aqi"), "aqi_eu": c.get("european_aqi"),
+                "category": label, "color": color,
+                "pollutants": {"PM2.5": c.get("pm2_5"), "PM10": c.get("pm10"),
+                               "NO2": c.get("nitrogen_dioxide"),
+                               "SO2": c.get("sulphur_dioxide"),
+                               "O3": c.get("ozone"),
+                               "CO": c.get("carbon_monoxide")},
+                "units": "ug/m3 (CO: ug/m3)", "source": "Open-Meteo (CAMS)"}
+
+    def openweather():
+        k = os.environ.get(AQ_KEYS["openweather"])
+        if not k:
+            return {"error": "OPENWEATHER_KEY not set on the server"}
+        u = ("https://api.openweathermap.org/data/2.5/air_pollution?"
+             f"lat={q.lat}&lon={q.lon}&appid={k}")
+        d = _get_json(u)["list"][0]
+        comp = d["comp"] if "comp" in d else d["components"]
+        return {"aqi_owm_1to5": d["main"]["aqi"],
+                "pollutants": {"PM2.5": comp.get("pm2_5"), "PM10": comp.get("pm10"),
+                               "NO2": comp.get("no2"), "SO2": comp.get("so2"),
+                               "O3": comp.get("o3"), "CO": comp.get("co"),
+                               "NH3": comp.get("nh3")},
+                "units": "ug/m3", "source": "OpenWeather"}
+
+    def _openaq_latest(loc_id, hdr, sensor_map):
+        NAME = {"pm25": "PM2.5", "pm10": "PM10", "no2": "NO2",
+                "so2": "SO2", "o3": "O3", "co": "CO"}
+        pol, units = {}, None
+        lat = _get_json(f"https://api.openaq.org/v3/locations/{loc_id}/latest",
+                        headers=hdr)
+        for m in lat.get("results", []):
+            sid = m.get("sensorsId")
+            pname, punit = sensor_map.get(sid, (None, None))
+            v = m.get("value")
+            if pname and v is not None:
+                try:
+                    pol[NAME.get(pname, pname.upper())] = round(float(v), 1)
+                    if punit:
+                        units = punit
+                except (TypeError, ValueError):
+                    pass
+        return pol, units
+
+    def openaq():
+        k = os.environ.get(AQ_KEYS["openaq"])
+        if not k:
+            return {"error": "OPENAQ_KEY not set on the server "
+                             "(OpenAQ v3 requires a free API key)"}
+        hdr = {"X-API-Key": k}
+        try:
+            loc = _get_json(
+                "https://api.openaq.org/v3/locations?"
+                f"coordinates={q.lat},{q.lon}&radius=25000&limit=10",
+                headers=hdr)
+        except Exception as e:
+            return {"error": f"OpenAQ did not respond: {e}"}
+        results = loc.get("results", [])
+        if not results:
+            return {"error": "No OpenAQ station within 25 km of this point"}
+
+        # order candidates by distance, take the nearest with LIVE values
+        def dist(st):
+            c = st.get("coordinates") or {}
+            if c.get("latitude") is None:
+                return 1e18
+            return _haversine_m(q.lat, q.lon, c["latitude"], c["longitude"])
+        results.sort(key=dist)
+
+        stale = []
+        for st in results[:6]:
+            sensor_map = {s.get("id"): ((s.get("parameter") or {}).get("name"),
+                                        (s.get("parameter") or {}).get("units"))
+                          for s in st.get("sensors", [])}
+            try:
+                pol, units = _openaq_latest(st.get("id"), hdr, sensor_map)
+            except Exception:
+                pol, units = {}, None
+            km = round(dist(st) / 1000, 1) if dist(st) < 1e17 else None
+            c = st.get("coordinates") or {}
+            if pol:
+                return {"station": st.get("name"), "distance_km": km,
+                        "station_lat": c.get("latitude"),
+                        "station_lon": c.get("longitude"),
+                        "pollutants": pol, "units": units or "ug/m3",
+                        "source": "OpenAQ v3 (nearest station with live data)"}
+            stale.append(f"{st.get('name')} ({km} km)")
+        return {"error": "Nearby OpenAQ stations have no recent readings: "
+                         + "; ".join(stale[:4]),
+                "hint": "OpenAQ stations often report intermittently; "
+                        "Open-Meteo covers this point continuously."}
+
+    runners = {"open-meteo": openmeteo, "openweather": openweather,
+               "openaq": openaq}
+    for p in q.providers:
+        fn = runners.get(p)
+        if not fn:
+            out[p] = {"error": "unknown provider"}
+            continue
+        try:
+            out[p] = fn()
+        except Exception as e:
+            out[p] = {"error": str(e)}
+    return {"lat": q.lat, "lon": q.lon, "providers": out}
+
+
+class ApportionQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: int = 2000
+
+
+# emission-weight per source category (rough relative PM potency, unitless)
+_SRC_CATS = [
+    ("traffic", "Road traffic", "#E4572E"),
+    ("industry", "Industry / factories", "#9B5DE5"),
+    ("waste", "Waste / landfill / burning", "#F15BB5"),
+    ("power", "Power / combustion plant", "#E9C46A"),
+    ("construction", "Construction / quarry", "#B4B4B4"),
+]
+
+
+OVERPASS_MIRRORS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.osm.jp/api/interpreter",
+]
+
+
+def _overpass(query, per_timeout=15, budget=55):
+    """Query Overpass across many mirrors within a hard time budget so the
+    caller never hangs. Returns parsed JSON or None. Public instances
+    rate-limit, so we rotate mirrors and accept the first that answers."""
+    from urllib.request import Request
+    start = time.time()
+    for url in OVERPASS_MIRRORS:
+        if time.time() - start > budget:
+            break
+        try:
+            req = Request(url, data=query.encode(),
+                          headers={"User-Agent": _UA,
+                                   "Content-Type": "text/plain"})
+            with urlopen(req, timeout=per_timeout) as r:
+                body = r.read()
+            js = json.loads(body)
+            # a valid Overpass answer always has an "elements" array
+            if isinstance(js, dict) and "elements" in js:
+                return js
+        except Exception:
+            continue
+    return None
+
+
+def _overpass_sources(lat, lon, radius=2000):
+    """Fetch pollutant-source features around the point from OSM."""
+    q = f"""[out:json][timeout:12];
+(way["landuse"="industrial"](around:{radius},{lat},{lon});
+ relation["landuse"="industrial"](around:{radius},{lat},{lon});
+ way["man_made"="works"](around:{radius},{lat},{lon});
+ way["landuse"="landfill"](around:{radius},{lat},{lon});
+ relation["landuse"="landfill"](around:{radius},{lat},{lon});
+ node["amenity"="waste_transfer_station"](around:{radius},{lat},{lon});
+ way["power"="plant"](around:{radius},{lat},{lon});
+ relation["power"="plant"](around:{radius},{lat},{lon});
+ way["landuse"="quarry"](around:{radius},{lat},{lon});
+ way["landuse"="construction"](around:{radius},{lat},{lon});
+ way["highway"~"motorway|trunk|primary|secondary"](around:{radius},{lat},{lon}););
+out center tags 200;"""
+    return _overpass(q)
+
+
+def _classify_source(tags):
+    if tags.get("landuse") == "industrial" or tags.get("man_made") == "works":
+        return "industry", 1.0
+    if tags.get("landuse") == "landfill" or \
+            tags.get("amenity") == "waste_transfer_station":
+        return "waste", 1.2                # waste burning is PM-heavy
+    if tags.get("power") == "plant":
+        return "power", 1.3
+    if tags.get("landuse") in ("quarry", "construction"):
+        return "construction", 0.8
+    hw = tags.get("highway")
+    if hw:
+        w = {"motorway": 1.4, "trunk": 1.2, "primary": 1.0,
+             "secondary": 0.7}.get(hw, 0.6)
+        return "traffic", w
+    return None, 0.0
+
+
+@app.post("/source_apportion")
+@ee_errors
+def source_apportion(q: ApportionQuery):
+    """Proximity- and wind-weighted RELATIVE source screening (NOT measured
+    apportionment). Each nearby OSM pollutant source contributes weight =
+    potency / distance^2, boosted if it lies upwind of the prevailing wind."""
+    ensure_ee()
+    # Prevailing wind from ERA5-Land. A plain annual vector mean cancels out
+    # on monsoon coasts (reversing seasons), so we take the resultant of the
+    # 12 monthly-mean vectors - a stable prevailing direction still emerges.
+    wind_from = None
+    try:
+        pt6 = ee.Geometry.Point([q.lon, q.lat]).buffer(6000)
+        coll = (ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
+                .filterDate("2019-01-01", "2025-01-01")
+                .select(["u_component_of_wind_10m", "v_component_of_wind_10m"]))
+        su = sv = 0.0
+        got = 0
+        for m in range(1, 13):
+            img = coll.filter(ee.Filter.calendarRange(m, m, "month")).mean()
+            rr = img.reduceRegion(ee.Reducer.mean(), pt6, 9000,
+                                  bestEffort=True).getInfo()
+            mu, mv = rr.get("u_component_of_wind_10m"), rr.get("v_component_of_wind_10m")
+            if mu is not None and mv is not None:
+                su += mu; sv += mv; got += 1
+        if got:
+            u, v = su / got, sv / got
+            if (u * u + v * v) ** 0.5 > 0.02:
+                wind_from = (math.degrees(math.atan2(-u, -v))) % 360
+    except Exception:
+        wind_from = None
+
+    SCAN_M = max(500, min(5000, int(q.radius_m or 2000)))
+    osm = _overpass_sources(q.lat, q.lon, SCAN_M)
+    if osm is None:
+        return {"lat": q.lat, "lon": q.lon, "scan_radius_m": SCAN_M,
+                "contributions": [], "sources_found": 0,
+                "osm_ok": False,
+                "prevailing_wind_from": None, "prevailing_wind_from_deg": None,
+                "method": "OpenStreetMap (Overpass) is busy right now - the "
+                          "public mirrors were all slow. Try again in a moment."}
+
+    cats = {k: 0.0 for k, _, _ in _SRC_CATS}
+    nearest = {k: None for k in cats}
+    counts = {k: 0 for k in cats}
+    color_of = {k: c for k, _, c in _SRC_CATS}
+    label_of = {k: l for k, l, _ in _SRC_CATS}
+    sources_list = []
+    for el in osm.get("elements", []):
+        c = el.get("center") or ({"lat": el.get("lat"), "lon": el.get("lon")}
+                                 if el.get("lat") is not None else None)
+        if not c or c.get("lat") is None:
+            continue
+        cat, potency = _classify_source(el.get("tags", {}))
+        if not cat:
+            continue
+        d = _haversine_m(q.lat, q.lon, c["lat"], c["lon"])
+        if d < 30:
+            d = 30.0
+        # base weight: inverse-square distance x source potency
+        w = potency / ((d / 1000.0) ** 2)
+        # wind boost: if the source lies UPWIND (same bearing the wind comes
+        # from), it can advect pollution to the point -> up to +80%
+        if wind_from is not None:
+            brg = (math.degrees(math.atan2(
+                math.sin(math.radians(c["lon"] - q.lon)) * math.cos(math.radians(c["lat"])),
+                math.cos(math.radians(q.lat)) * math.sin(math.radians(c["lat"])) -
+                math.sin(math.radians(q.lat)) * math.cos(math.radians(c["lat"])) *
+                math.cos(math.radians(c["lon"] - q.lon)))) ) % 360
+            diff = abs((brg - wind_from + 180) % 360 - 180)
+            w *= 1.0 + 0.8 * max(0.0, math.cos(math.radians(diff)))
+        cats[cat] += w
+        counts[cat] += 1
+        if nearest[cat] is None or d < nearest[cat]:
+            nearest[cat] = d
+        if len(sources_list) < 120:
+            t = el.get("tags", {})
+            sources_list.append({
+                "src_lat": round(c["lat"], 6), "src_lon": round(c["lon"], 6),
+                "label": label_of[cat], "color": color_of[cat],
+                "kind": t.get("landuse") or t.get("man_made") or
+                        t.get("power") or t.get("highway") or "",
+                "dist_m": round(d)})
+
+    total = sum(cats.values())
+    contributions = []
+    if total > 0:
+        for key, label, color in _SRC_CATS:
+            if cats[key] <= 0:
+                continue
+            contributions.append({
+                "key": key, "label": label, "color": color,
+                "pct": round(100.0 * cats[key] / total, 1),
+                "count": counts[key],
+                "nearest_m": None if nearest[key] is None else round(nearest[key]),
+            })
+        contributions.sort(key=lambda x: -x["pct"])
+
+    compass = None
+    if wind_from is not None:
+        compass = COMPASS[int(((wind_from + 11.25) % 360) // 22.5)]
+    return {
+        "lat": q.lat, "lon": q.lon, "scan_radius_m": SCAN_M, "osm_ok": True,
+        "prevailing_wind_from_deg": None if wind_from is None else round(wind_from),
+        "prevailing_wind_from": compass,
+        "contributions": contributions,
+        "sources_found": sum(counts.values()),
+        "sources_list": sources_list,
+        "method": ("Relative screening from OSM source proximity (inverse-square "
+                   "distance) x category potency, boosted for sources upwind of "
+                   "the annual prevailing wind. This is a PROXIMITY MODEL, not "
+                   "measured source apportionment (which requires particle "
+                   "composition / receptor modelling)."),
+    }
+
+
+@app.get("/openaq_test")
+def openaq_test(lat: float = 15.28, lon: float = 73.96):
+    k = os.environ.get(AQ_KEYS["openaq"])
+    if not k:
+        return {"ok": False, "reason": "OPENAQ_KEY env var not set"}
+    hdr = {"X-API-Key": k}
+    try:
+        loc = _get_json("https://api.openaq.org/v3/locations?"
+                        f"coordinates={lat},{lon}&radius=25000&limit=5",
+                        headers=hdr)
+    except Exception as e:
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+    out = []
+    for st in loc.get("results", []):
+        try:
+            lt = _get_json(
+                f"https://api.openaq.org/v3/locations/{st['id']}/latest",
+                headers=hdr)
+            vals = [(m.get("sensorsId"), m.get("value"))
+                    for m in lt.get("results", [])]
+        except Exception as e:
+            vals = f"latest error: {e}"
+        out.append({"station": st.get("name"), "id": st.get("id"),
+                    "sensors": [(s.get("id"),
+                                 (s.get("parameter") or {}).get("name"))
+                                for s in st.get("sensors", [])],
+                    "latest": vals})
+    return {"ok": True, "stations": out}
+
+
+@app.get("/air_quality_status")
+def air_quality_status():
+    """Which providers are ready. CPCB is ready when its cached feed exists."""
+    return {"open-meteo": True,
+            **{p: bool(os.environ.get(v)) for p, v in AQ_KEYS.items()}}
+
+
+# ----------------------------------------------------------------------------
+# 6c. Site Brief: point-based environmental snapshot
+# ----------------------------------------------------------------------------
+MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+           "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+
+# WorldCover class -> (label, is_green)
+WC_CLASSES = {10: ("Tree cover", True), 20: ("Shrubland", True),
+              30: ("Grassland", True), 40: ("Cropland", False),
+              50: ("Built-up", False), 60: ("Bare / sparse", False),
+              70: ("Snow & ice", False), 80: ("Water", False),
+              90: ("Herbaceous wetland", True), 95: ("Mangroves", True),
+              100: ("Moss & lichen", True)}
+WC_COLORS = {10: "#006400", 20: "#ffbb22", 30: "#ffff4c", 40: "#f096ff",
+             50: "#fa0000", 60: "#b4b4b4", 70: "#f0f0f0", 80: "#0064c8",
+             90: "#0096a0", 95: "#00cf75", 100: "#fae6a0"}
+
+
+def _sun_position(lat, lon, when_utc):
+    """Approximate solar azimuth (deg from N, clockwise) and elevation (deg).
+    Accuracy ~0.3 deg - ample for shadow studies."""
+    jd = when_utc.timestamp() / 86400.0 + 2440587.5
+    n = jd - 2451545.0
+    L = (280.460 + 0.9856474 * n) % 360
+    g = math.radians((357.528 + 0.9856003 * n) % 360)
+    lam = math.radians(L + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g))
+    eps = math.radians(23.439 - 0.0000004 * n)
+    ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    gmst = (18.697374558 + 24.06570982441908 * n) % 24
+    lst = (gmst + lon / 15.0) % 24
+    ha = math.radians(((lst * 15 - math.degrees(ra)) + 540) % 360 - 180)
+    latr = math.radians(lat)
+    elev = math.degrees(math.asin(
+        math.sin(latr) * math.sin(dec) +
+        math.cos(latr) * math.cos(dec) * math.cos(ha)))
+    az = math.degrees(math.atan2(
+        math.sin(ha),
+        math.cos(ha) * math.sin(latr) - math.tan(dec) * math.cos(latr)))
+    return (az + 180) % 360, elev
+
+
+def _daylight_h(lat, month):
+    doy = [15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349][month - 1]
+    decl = math.radians(23.44) * math.sin(2 * math.pi * (284 + doy) / 365)
+    x = -math.tan(math.radians(lat)) * math.tan(decl)
+    x = max(-1.0, min(1.0, x))
+    return 2 * math.degrees(math.acos(x)) / 15
+
+
+def _monthly_from(info, lat):
+    """Pure post-processing of the batched ERA5 numbers -> monthly rows with
+    temp, RH (Magnus), rain, wind speed/direction, solar, approx MRT."""
+    rows = []
+    SIG = 5.67e-8
+    for m in range(1, 13):
+        def g(p):
+            v = info.get(f"{p}{m}")
+            return None if v is None else float(v)
+        t, td, u, v = g("t"), g("d"), g("u"), g("v")
+        s, th, pr = g("s"), g("th"), g("p")
+        days = MONTH_DAYS[m - 1]
+        row = {"month": MONTHS[m - 1], "temp_c": None, "rh_pct": None,
+               "rain_mm": None, "wind_ms": None, "wind_from_deg": None,
+               "wind_from": None, "solar_kwh_m2_day": None, "mrt_c": None}
+        if t is not None:
+            row["temp_c"] = round(t - 273.15, 1)
+        if t is not None and td is not None:
+            tc, dc = t - 273.15, td - 273.15
+            rh = 100 * math.exp(17.625 * dc / (243.04 + dc)) / \
+                 math.exp(17.625 * tc / (243.04 + tc))
+            row["rh_pct"] = round(max(0, min(100, rh)), 0)
+        if pr is not None:
+            row["rain_mm"] = round(pr * 1000, 0)   # *_sum is the monthly total (m)
+        if u is not None and v is not None:
+            row["wind_ms"] = round(math.hypot(u, v), 1)
+            drn = round((math.degrees(math.atan2(-u, -v))) % 360)
+            row["wind_from_deg"] = drn
+            row["wind_from"] = COMPASS[int(((drn + 11.25) % 360) // 22.5)]
+        if s is not None:
+            row["solar_kwh_m2_day"] = round(s / 3.6e6 / days, 2)
+        if t is not None and s is not None and th is not None:
+            dl = _daylight_h(lat, m)
+            s_day = s / (days * dl * 3600)                # daytime W/m2
+            l_dn = th / (days * 86400)
+            l_up = 0.97 * SIG * t ** 4
+            mrt = ((0.5 * l_dn + 0.5 * l_up + (0.7 / 0.97) * 0.5 * s_day)
+                   / SIG) ** 0.25
+            row["mrt_c"] = round(mrt - 273.15, 1)
+        rows.append(row)
+    return rows
+
+
+def _haversine_m(lat1, lon1, lat2, lon2):
+    R = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _parse_overpass(js, lat, lon):
+    out = {"industry_m": None, "rail_m": None, "airport_m": None}
+    for el in js.get("elements", []):
+        c = el.get("center") or ({"lat": el.get("lat"), "lon": el.get("lon")}
+                                 if el.get("lat") else None)
+        if not c or c.get("lat") is None:
+            continue
+        d = _haversine_m(lat, lon, c["lat"], c["lon"])
+        tags = el.get("tags", {})
+        key = ("industry_m" if tags.get("landuse") == "industrial" else
+               "rail_m" if tags.get("railway") == "rail" else
+               "airport_m" if tags.get("aeroway") == "aerodrome" else None)
+        if key and (out[key] is None or d < out[key]):
+            out[key] = round(d)
+    return out
+
+
+def _overpass_noise(lat, lon):
+    q = f"""[out:json][timeout:20];
+(way["landuse"="industrial"](around:2000,{lat},{lon});
+ relation["landuse"="industrial"](around:2000,{lat},{lon});
+ way["railway"="rail"](around:2000,{lat},{lon});
+ way["aeroway"="aerodrome"](around:10000,{lat},{lon});
+ relation["aeroway"="aerodrome"](around:10000,{lat},{lon}););
+out center 60;"""
+    js = _overpass(q)
+    return None if js is None else _parse_overpass(js, lat, lon)
+
+
+class SiteQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 500
+    region: Optional[RegionSpec] = None     # drawn ROI overrides the ring
+
+
+@app.post("/site_brief")
+@ee_errors
+def site_brief(q: SiteQuery):
+    """Historical environmental snapshot for a point. Every component reports
+    its exact data period. Single batched Earth Engine round-trip + one OSM
+    query for noise-source proximity."""
+    ensure_ee()
+    if not (10 <= q.radius_m <= 3000):
+        raise HTTPException(status_code=400, detail="radius_m must be 10-3000.")
+    pt = ee.Geometry.Point([q.lon, q.lat])
+    # land-cover / roads / buildings use the drawn ROI when given, else the ring
+    ring = build_region(q.region) if q.region is not None else pt.buffer(q.radius_m)
+    clim_geom = pt.buffer(6000)
+
+    era = (ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
+           .filterDate("2015-01-01", "2025-01-01"))
+    BANDS = {"t": "temperature_2m", "d": "dewpoint_temperature_2m",
+             "u": "u_component_of_wind_10m", "v": "v_component_of_wind_10m",
+             "s": "surface_solar_radiation_downwards_sum",
+             "th": "surface_thermal_radiation_downwards_sum",
+             "p": "total_precipitation_sum"}
+    stats = {}
+    for m in range(1, 13):
+        img = era.filter(ee.Filter.calendarRange(m, m, "month")).mean()
+        r = img.select(list(BANDS.values())).reduceRegion(
+            ee.Reducer.mean(), clim_geom, 9000, bestEffort=True)
+        for k, b in BANDS.items():
+            stats[f"{k}{m}"] = r.get(b)
+
+    lst = (ee.ImageCollection("MODIS/061/MOD11A2")
+           .filterDate("2023-01-01", "2024-01-01").select("LST_Day_1km")
+           .mean().multiply(0.02))
+    stats["lst"] = lst.reduceRegion(ee.Reducer.mean(), pt.buffer(1500), 1000,
+                                    bestEffort=True).get("LST_Day_1km")
+
+    def s5p(col, band, buf=3500, scale=1113):
+        img = (ee.ImageCollection(col).filterDate("2024-01-01", "2025-01-01")
+               .select(band).mean())
+        return img.reduceRegion(ee.Reducer.mean(), pt.buffer(buf), scale,
+                                bestEffort=True).get(band)
+
+    stats["no2"] = s5p("COPERNICUS/S5P/OFFL/L3_NO2",
+                       "tropospheric_NO2_column_number_density")
+    stats["co"] = s5p("COPERNICUS/S5P/OFFL/L3_CO", "CO_column_number_density")
+    stats["so2"] = s5p("COPERNICUS/S5P/OFFL/L3_SO2", "SO2_column_number_density")
+    stats["o3"] = s5p("COPERNICUS/S5P/OFFL/L3_O3", "O3_column_number_density")
+    stats["aai"] = s5p("COPERNICUS/S5P/OFFL/L3_AER_AI",
+                       "absorbing_aerosol_index")
+
+    acag = (ee.ImageCollection(
+                "projects/sat-io/open-datasets/GLOBAL-SATELLITE-PM25/MONTHLY")
+            .filterDate("2022-01-01", "2023-01-01").mean())
+    # single-band collection; .values().get(0) is band-name agnostic
+    stats["pm25_1km"] = acag.reduceRegion(
+        ee.Reducer.mean(), pt.buffer(1200), 1113, bestEffort=True
+    ).values().get(0)
+
+    today = _dt.date.today()
+    pm_start = (today - _dt.timedelta(days=75)).isoformat()
+    cams = (ee.ImageCollection("ECMWF/CAMS/NRT")
+            .filterDate(pm_start, today.isoformat())
+            .select(["particulate_matter_d_less_than_25_um_surface",
+                     "particulate_matter_d_less_than_10_um_surface"]).mean())
+    pmr = cams.reduceRegion(ee.Reducer.mean(), pt.buffer(25000), 40000,
+                            bestEffort=True)
+    stats["pm25"] = pmr.get("particulate_matter_d_less_than_25_um_surface")
+    stats["pm10"] = pmr.get("particulate_matter_d_less_than_10_um_surface")
+
+    wc = ee.Image("ESA/WorldCover/v200/2021").select("Map")
+    stats["wc"] = ee.Image.pixelArea().addBands(wc).reduceRegion(
+        ee.Reducer.sum().group(groupField=1, groupName="class"),
+        ring, 10, maxPixels=1e9, bestEffort=True).get("groups")
+
+    ob = (ee.ImageCollection("GOOGLE/Research/open-buildings-temporal/v1")
+          .filterDate("2023-01-01", "2024-01-01").mosaic()
+          .select("building_height"))
+    stats["bh"] = ob.reduceRegion(ee.Reducer.max(), pt.buffer(20), 4,
+                                  bestEffort=True).get("building_height")
+
+    roads_all = _vector_fc(DATASETS["roads"])
+    ring_roads = roads_all.filterBounds(ring)
+    stats["road_m"] = ring_roads.map(
+        lambda f: f.set("l", f.geometry().length(maxError=10))
+    ).aggregate_sum("l")
+    near = roads_all.filterBounds(pt.buffer(1500)).map(
+        lambda f: f.set("d", f.geometry().distance(pt, maxError=10)))
+    stats["road_near"] = near.aggregate_min("d")
+    stats["road_near_major"] = near.filter(
+        ee.Filter.lte("GP_RTP", 3)).aggregate_min("d")
+
+    # region metadata for the header (name, area, centroid, altitude)
+    region_area_km2 = None
+    region_name = None
+    cen_lat, cen_lon = q.lat, q.lon
+    try:
+        area_m2 = ring.area(10).getInfo()
+        region_area_km2 = round(area_m2 / 1e6, 3)
+        c = ring.centroid(10).coordinates().getInfo()
+        cen_lon, cen_lat = c[0], c[1]
+    except Exception:
+        pass
+    try:
+        gaul = (ee.FeatureCollection("FAO/GAUL/2015/level2")
+                .filterBounds(ee.Geometry.Point([cen_lon, cen_lat])).first())
+        gi = gaul.getInfo()
+        if gi and gi.get("properties"):
+            p = gi["properties"]
+            region_name = ", ".join(x for x in
+                [p.get("ADM2_NAME"), p.get("ADM1_NAME")] if x)
+    except Exception:
+        pass
+    try:
+        alt = (ee.Image("USGS/SRTMGL1_003").reduceRegion(
+            ee.Reducer.mean(), ee.Geometry.Point([cen_lon, cen_lat]).buffer(90),
+            90, bestEffort=True).get("elevation").getInfo())
+        altitude_m = None if alt is None else round(float(alt))
+    except Exception:
+        altitude_m = None
+
+    info = ee.Dictionary(stats).getInfo()      # ONE EE round-trip
+
+    def g(k):
+        v = info.get(k)
+        return None if v is None else float(v)
+
+    monthly = _monthly_from(info, q.lat)
+
+    lulc, green_pct = [], None
+    if info.get("wc"):
+        total = sum(gr["sum"] for gr in info["wc"]) or 1.0
+        green = 0.0
+        for gr in sorted(info["wc"], key=lambda x: -x["sum"]):
+            c = int(gr["class"])
+            label, is_green = WC_CLASSES.get(c, (f"Class {c}", False))
+            pct = 100.0 * gr["sum"] / total
+            if is_green:
+                green += pct
+            lulc.append({"class": c, "label": label,
+                         "color": WC_COLORS.get(c, "#888888"),
+                         "pct": round(pct, 1)})
+        green_pct = round(green, 1)
+
+    def band3(v, lo, hi):
+        return None if v is None else ("Low" if v < lo else
+                                       "Moderate" if v < hi else "Elevated")
+
+    no2u = None if g("no2") is None else round(g("no2") * 1e6, 1)
+    pm25s = None if g("pm25_1km") is None else round(g("pm25_1km"), 1)
+    pm25 = None if g("pm25") is None else round(g("pm25") * 1e9, 1)
+    pm10 = None if g("pm10") is None else round(g("pm10") * 1e9, 1)
+    air = [
+        {"name": "PM2.5 (surface, satellite 1 km)", "value": pm25s,
+         "unit": "ug/m3", "band": band3(pm25s, 15, 35),
+         "period": "ACAG/WUSTL V6, 2022 annual mean, 1 km"},
+        {"name": "PM2.5 (surface, recent)", "value": pm25, "unit": "ug/m3",
+         "band": band3(pm25, 15, 35),
+         "period": "CAMS NRT ~40 km, last ~75 days"},
+        {"name": "PM10 (surface, recent)", "value": pm10, "unit": "ug/m3",
+         "band": band3(pm10, 45, 100),
+         "period": "CAMS NRT ~40 km, last ~75 days"},
+        {"name": "NO2 (column)", "value": no2u, "unit": "umol/m2",
+         "band": band3(no2u, 50, 100), "period": "Sentinel-5P, 2024 mean"},
+        {"name": "CO (column)", "value": None if g("co") is None else
+            round(g("co") * 1000, 1), "unit": "mmol/m2", "band": None,
+         "period": "Sentinel-5P, 2024 mean"},
+        {"name": "SO2 (column)", "value": None if g("so2") is None else
+            round(g("so2") * 1e6, 1), "unit": "umol/m2", "band": None,
+         "period": "Sentinel-5P, 2024 mean"},
+        {"name": "Ozone (column)", "value": None if g("o3") is None else
+            round(g("o3") / 4.4615e-4, 0), "unit": "DU", "band": None,
+         "period": "Sentinel-5P, 2024 mean"},
+        {"name": "Absorbing aerosol index", "value": None if g("aai") is None
+            else round(g("aai"), 2), "unit": "", "band": None,
+         "period": "Sentinel-5P, 2024 mean"},
+    ]
+
+    osm = _overpass_noise(q.lat, q.lon)
+    def nband(d, hi, mid):
+        return None if d is None else ("High" if d < hi else
+                                       "Moderate" if d < mid else "Low")
+    rn, rnm = g("road_near"), g("road_near_major")
+    noise = {
+        "traffic_major_road_m": None if rnm is None else round(rnm),
+        "traffic_any_road_m": None if rn is None else round(rn),
+        "traffic_band": nband(rnm if rnm is not None else rn, 100, 300),
+        "rail_m": osm and osm.get("rail_m"),
+        "rail_band": nband(osm and osm.get("rail_m"), 150, 400),
+        "industry_m": osm and osm.get("industry_m"),
+        "industry_band": nband(osm and osm.get("industry_m"), 250, 600),
+        "airport_m": osm and osm.get("airport_m"),
+        "airport_band": nband(osm and osm.get("airport_m"), 3000, 8000),
+        "osm_ok": osm is not None,
+    }
+
+    bh = g("bh")
+    return {
+        "site": {"lat": q.lat, "lon": q.lon, "radius_m": q.radius_m,
+                 "building_height_m": None if bh is None else round(bh, 1)},
+        "region": {"name": region_name, "area_km2": region_area_km2,
+                   "centroid_lat": round(cen_lat, 5),
+                   "centroid_lon": round(cen_lon, 5),
+                   "altitude_m": altitude_m,
+                   "is_drawn": q.region is not None},
+        "historical_note": ("All values are historical satellite / reanalysis "
+                            "records for the periods shown - not live "
+                            "measurements."),
+        "periods": {
+            "climate": "ERA5-Land monthly normals, 2015-2024",
+            "lst": "MODIS Terra 8-day LST, 2023 annual mean",
+            "s5p": "Sentinel-5P L3, 2024 annual mean",
+            "pm": "ACAG 1 km (2022 annual) + CAMS NRT (recent, ~40 km)",
+            "lulc": "ESA WorldCover, 2021",
+            "buildings": "Open Buildings 2.5D, 2023",
+            "roads": "GRIP4 (compiled ~2018)",
+            "osm": "OpenStreetMap, live database",
+        },
+        "monthly": monthly,
+        "lst_day_c": None if g("lst") is None else round(g("lst") - 273.15, 1),
+        "air": air,
+        "noise": noise,
+        "lulc": lulc, "green_pct": green_pct,
+        "road_km": None if g("road_m") is None else round(g("road_m") / 1000, 2),
+    }
+
+
+class ShadowQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 500
+
+
+@app.post("/site_shadows")
+@ee_errors
+def site_shadows(q: ShadowQuery):
+    """Cast-shadow study: Open Buildings 2.5D heights as a DSM, shadows via
+    ee.Algorithms.HillShadow for solstice dates at 09/12/15 IST, drawn over
+    the Sentinel-2 backdrop. Returns thumbnail URLs; the browser loads them."""
+    ensure_ee()
+    pt = ee.Geometry.Point([q.lon, q.lat])
+    ring = pt.buffer(q.radius_m)
+    pad = pt.buffer(q.radius_m + 250)          # occluders just outside too
+    view = pt.buffer(max(q.radius_m, 150.0))   # tiny rings still get context
+    bounds = view.bounds(1)
+
+    dsm = (ee.ImageCollection("GOOGLE/Research/open-buildings-temporal/v1")
+           .filterDate("2023-01-01", "2024-01-01").mosaic()
+           .select("building_height").unmask(0).clip(pad))
+    bg = _s2_background(view).blend(_region_outline(ring))
+    footprints = (dsm.gt(2).selfMask()
+                  .visualize(palette=["ffd166"])
+                  .updateMask(ee.Image.constant(0.35)))
+
+    panels = []
+    for label, month, day in (("21 Jun", 6, 21), ("21 Dec", 12, 21)):
+        for hh_ist in (9, 12, 15):
+            when = _dt.datetime(2024, month, day, hh_ist - 6, 30 - 0,
+                                tzinfo=_dt.timezone.utc)   # IST = UTC+5:30
+            az, elev = _sun_position(q.lat, q.lon, when)
+            if elev <= 3:
+                continue
+            shadow = ee.Algorithms.HillShadow(dsm, az, 90 - elev, 200, True)
+            dark = (shadow.Not().selfMask()
+                    .visualize(palette=["000033"])
+                    .updateMask(ee.Image.constant(0.45)))
+            img = bg.blend(dark).blend(footprints)
+            url = img.getThumbURL({"region": bounds, "dimensions": 460,
+                                   "format": "png", "crs": THUMB_CRS})
+            panels.append({"label": f"{label} \u00b7 {hh_ist:02d}:00 IST",
+                           "sun_azimuth": round(az), "sun_elevation": round(elev),
+                           "url": url})
+    return {"panels": panels,
+            "note": ("Shadows cast by surrounding buildings (Open Buildings "
+                     "2.5D heights, 4 m) on flat terrain - a site-scale "
+                     "approximation; trees and terrain are not included.")}
+
+
+# ----------------------------------------------------------------------------
+# 7. Analysis endpoints
+# ----------------------------------------------------------------------------
+class RegionQuery(BaseModel):
+    dataset: str
+    region: RegionSpec
+    years: Optional[List[int]] = None          # optional subset for /thumbnails
+
+
+def _series(dataset_key: str, region: ee.Geometry):
+    d = _dataset(dataset_key)
+
+    if d["kind"] == "vector":
+        _cap_vector_area(region, d.get("area_cap_km2", VECTOR_AREA_CAP_KM2))
+        fc = _vector_fc(d).filterBounds(region)
+        if d["reducer"] == "length_km":
+            total_m = (fc.map(lambda f: f.set("l", f.geometry().length(maxError=10)))
+                         .aggregate_sum("l").getInfo())
+            return [{"year": d["years"][0], "value": (total_m or 0) / 1000.0}]
+        return [{"year": d["years"][0], "value": fc.size().getInfo()}]
+
+    band = d.get("analysis_band") or d["band"]
+    region_area = region.area(maxError=100)      # ee.Number, stays server-side
+
+    scale, corr = d["scale"], 1.0
+    if d.get("scale_adaptive"):
+        # pick a scale that keeps pixel count sane, then correct the sum for
+        # the mean-pyramiding of coarser levels: true_sum = sum * (s/native)^2
+        import math
+        area_m2 = region.area(maxError=100).getInfo()
+        target_px = 6e7                     # per analysed year
+        scale = max(float(d["scale"]),
+                    float(math.ceil(math.sqrt(area_m2 / target_px))))
+        corr = (scale / d["scale"]) ** 2
+
+    def reduce_year(year):
+        img = get_image(dataset_key, year, for_analysis=True)
+        if d["reducer"] == "water_area":
+            # Early-Landsat years often have no valid observations over India.
+            # Report water km2 only when >=20% of the region was observed at
+            # all (class >= 1); otherwise return None so the UI shows a dash
+            # instead of a false zero.
+            px = ee.Image.pixelArea()
+            both = (px.updateMask(img.gte(1)).rename("o")
+                      .addBands(px.updateMask(img.gte(2)).rename("w")))
+            s = both.reduceRegion(reducer=ee.Reducer.sum(), geometry=region,
+                                  scale=d["scale"], maxPixels=1e11,
+                                  bestEffort=True)
+            o, w = s.get("o"), s.get("w")
+            w_km2 = ee.Number(ee.Algorithms.If(
+                ee.Algorithms.IsEqual(w, None), 0, w)).divide(1e6)
+            stat = ee.Algorithms.If(
+                ee.Algorithms.IsEqual(o, None), None,
+                ee.Algorithms.If(ee.Number(o).divide(region_area).lt(0.2),
+                                 None, w_km2))
+        else:
+            stat = img.reduceRegion(reducer=getattr(ee.Reducer, d["reducer"])(),
+                                    geometry=region,
+                                    scale=scale, maxPixels=1e11,
+                                    bestEffort=True).get(band)
+            if corr > 1.0:
+                stat = ee.Algorithms.If(stat, ee.Number(stat).multiply(corr), None)
+        return ee.Feature(None, {"year": year, "value": stat})
+
+    _, analysis_years = _effective_years(dataset_key, d)
+    fc = ee.FeatureCollection([reduce_year(y) for y in analysis_years])
+    info = fc.getInfo()      # one Earth Engine round-trip for all years
+    return [{"year": f["properties"]["year"], "value": f["properties"].get("value")}
+            for f in info["features"]]
+
+
+_CALC_STATS = {"sum", "mean", "min", "max", "median", "mode", "count"}
+
+
+class CalcQuery(BaseModel):
+    dataset: str
+    region: RegionSpec
+    stat: str
+    year: Optional[int] = None
+    all_years: bool = False
+
+
+@app.post("/calc")
+@ee_errors
+def calc(q: CalcQuery):
+    """User-chosen statistic over the dataset's analysis band, for one year or
+    for every analysis epoch (the Advanced-Analysis temporal run)."""
+    ensure_ee()
+    d = _dataset(q.dataset)
+    if d["kind"] != "raster":
+        raise HTTPException(status_code=400, detail=(
+            "Custom statistics apply to raster datasets; vector layers "
+            "(buildings-polygons, roads) have fixed count/length analyses."))
+    stat = q.stat.lower()
+    if stat == "avg":
+        stat = "mean"
+    if stat not in _CALC_STATS:
+        raise HTTPException(status_code=400,
+                            detail=f"stat must be one of {sorted(_CALC_STATS)}")
+    region = build_region(q.region)
+    band = d.get("analysis_band") or d["band"]
+
+    _, analysis_years = _effective_years(q.dataset, d)
+    if q.all_years:
+        years = analysis_years
+    else:
+        y = q.year if q.year is not None else analysis_years[-1]
+        _check_year(q.dataset, d, y)
+        years = [y]
+
+    scale, corr = d["scale"], 1.0
+    if d.get("scale_adaptive"):
+        area_m2 = region.area(maxError=100).getInfo()
+        scale = max(float(d["scale"]),
+                    float(math.ceil(math.sqrt(area_m2 / 6e7))))
+        corr = (scale / d["scale"]) ** 2
+
+    def reduce_year(year):
+        img = get_image(q.dataset, year, for_analysis=True)
+        stat_val = img.reduceRegion(reducer=getattr(ee.Reducer, stat)(),
+                                    geometry=region, scale=scale,
+                                    maxPixels=1e11, bestEffort=True).get(band)
+        if corr > 1.0 and stat in ("sum", "count"):
+            stat_val = ee.Algorithms.If(
+                stat_val, ee.Number(stat_val).multiply(corr), None)
+        return ee.Feature(None, {"year": year, "value": stat_val})
+
+    fc = ee.FeatureCollection([reduce_year(y) for y in years])
+    info = fc.getInfo()
+    series = [{"year": f["properties"]["year"],
+               "value": f["properties"].get("value")} for f in info["features"]]
+    return {"dataset": q.dataset, "stat": stat, "series": series}
+
+
+@app.post("/timeseries")
+@ee_errors
+def timeseries(q: RegionQuery):
+    ensure_ee()
+    region = build_region(q.region)
+    return {"dataset": q.dataset,
+            "value_label": _dataset(q.dataset)["value_label"],
+            "series": _series(q.dataset, region)}
+
+
+@app.post("/thumbnails")
+@ee_errors
+def thumbnails(q: RegionQuery):
+    """Per-year PNG thumbnails CLIPPED to the region (the bottom filmstrip)."""
+    ensure_ee()
+    d = _dataset(q.dataset)
+    region = build_region(q.region)
+    bounds = region.bounds(1)
+    tp = {"region": bounds, "dimensions": 480, "format": "png", "crs": THUMB_CRS}
+
+    # context frame: satellite view of the clipped zones (shown first)
+    context = {"url": _frame(region).getThumbURL(tp)}
+
+    out = []
+    if d["kind"] == "vector":
+        _cap_vector_area(region, d.get("area_cap_km2", VECTOR_AREA_CAP_KM2))
+        years = [d["years"][0]]
+    else:
+        _, analysis_years = _effective_years(q.dataset, d)
+        years = q.years or analysis_years
+    for year in years:
+        url = _frame(region, _data_rgb(q.dataset, year, region, d)).getThumbURL(tp)
+        out.append({"year": year, "url": url})
+    return {"dataset": q.dataset, "context": context, "thumbnails": out}
+
+
+# ----------------------------------------------------------------------------
+# Serve the frontend (single-page app) from the same Cloud Run service.
+# This MUST be the last thing registered, so it never shadows the API routes
+# above. With this in place the app needs no separate host (e.g. Netlify):
+# the Cloud Run URL serves both the page and the API from one origin.
+# Put index.html in a ./static folder next to this file before deploying.
+# ----------------------------------------------------------------------------
+if _STATIC_DIR is not None:
+    # Root serves the SPA; JSON health stays available at /health and /api.
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="spa")
+else:
+    # No bundled frontend found: keep JSON health at root so version checks work
+    # and /health reports serving_mode = API-only to explain the situation.
+    @app.get("/")
+    def _root_health():
+        return _health_payload()

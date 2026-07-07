@@ -1,0 +1,11 @@
+Pillow
+earthengine-api
+fastapi
+fpdf2
+google-cloud-storage
+pyproj
+pyshp
+python-multipart
+shapely
+uvicorn[standard]
+requests
