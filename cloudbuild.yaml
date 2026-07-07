@@ -1,0 +1,37 @@
+# Build -> Push -> Deploy. The third step is what was missing before:
+# without it the image is built but Cloud Run keeps running the old one.
+steps:
+  # 1) Build the container image, tagged with this commit's SHA
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/ghsl-app:$COMMIT_SHA'
+      - '.'
+
+  # 2) Push the image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/ghsl-app:$COMMIT_SHA'
+
+  # 3) Deploy that exact image to Cloud Run  <-- the previously missing step
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'ghsl-app'
+      - '--image=gcr.io/$PROJECT_ID/ghsl-app:$COMMIT_SHA'
+      - '--region=asia-south1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=1Gi'
+      - '--timeout=600'
+
+# Record the image built by this pipeline
+images:
+  - 'gcr.io/$PROJECT_ID/ghsl-app:$COMMIT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
