@@ -207,6 +207,8 @@ footer b{color:#fff}
 .chartBox{position:relative;height:150px}
 .pieBox{position:relative;height:180px}
 .chartBox canvas{position:absolute;inset:0}
+.pieBox canvas{position:absolute;inset:0}
+.pieBox{margin-bottom:10px}
 .lulcBar{display:flex;height:12px;border-radius:6px;overflow:hidden;border:1px solid #2E3E37}
 .lulcRow{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;color:#C9D3CC;padding:3px 0}
 .lulcRow i{width:10px;height:10px;border-radius:3px;flex-shrink:0}
@@ -323,6 +325,10 @@ label.chk input{width:auto}
     <div class="subTabs" id="subBar">
       <button class="active" data-tab="explore">Explore</button>
       <button data-tab="adv">Advanced Analysis</button>
+      <button data-tab="aq">Air Quality</button>
+      <button data-tab="thermal">Thermal</button>
+      <button data-tab="sunlight">Sunlight</button>
+      <button data-tab="noise">Noise</button>
     </div>
     <div id="tab-explore">
     <section>
@@ -563,6 +569,42 @@ label.chk input{width:auto}
       <button id="aqApportion" style="margin-top:6px" disabled>Pollutant source-proximity model</button>
     </section>
     </div><!-- /tab-aq -->
+
+    <div id="tab-thermal" hidden>
+    <section>
+      <h2>Thermal environment</h2>
+      <p class="hint">Land-surface temperature and air-temperature climatology at a point. Pick a location; results show in the analysis pane.</p>
+      <label class="fld" for="thSearch">Search a location</label>
+      <input type="text" id="thSearch" placeholder="Type a place & press Enter">
+      <button id="thPick" style="width:100%;margin-top:6px">Pick point on map</button>
+      <div id="thStatus" class="hint" style="min-height:20px">No point selected.</div>
+      <button id="thRun" class="primary" style="margin-top:8px" disabled>Analyse thermal</button>
+    </section>
+    </div><!-- /tab-thermal -->
+
+    <div id="tab-sunlight" hidden>
+    <section>
+      <h2>Sunlight &amp; solar</h2>
+      <p class="hint">Monthly solar irradiance (kWh/m&sup2;/day) and approximate mean radiant temperature for a sun-exposed person at the point.</p>
+      <label class="fld" for="suSearch">Search a location</label>
+      <input type="text" id="suSearch" placeholder="Type a place & press Enter">
+      <button id="suPick" style="width:100%;margin-top:6px">Pick point on map</button>
+      <div id="suStatus" class="hint" style="min-height:20px">No point selected.</div>
+      <button id="suRun" class="primary" style="margin-top:8px" disabled>Analyse sunlight</button>
+    </section>
+    </div><!-- /tab-sunlight -->
+
+    <div id="tab-noise" hidden>
+    <section>
+      <h2>Noise screening</h2>
+      <p class="hint">Distance-based screening from mapped noise sources (major roads, railways, industry, airports) via OpenStreetMap. This is a proximity screen, not an acoustic measurement.</p>
+      <label class="fld" for="noSearch">Search a location</label>
+      <input type="text" id="noSearch" placeholder="Type a place & press Enter">
+      <button id="noPick" style="width:100%;margin-top:6px">Pick point on map</button>
+      <div id="noStatus" class="hint" style="min-height:20px">No point selected.</div>
+      <button id="noRun" class="primary" style="margin-top:8px" disabled>Screen noise sources</button>
+    </section>
+    </div><!-- /tab-noise -->
   </aside>
 
   <div id="map" role="application" aria-label="Map"></div>
@@ -594,7 +636,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v42</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v43</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -606,7 +648,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v42";
+const DSG_VERSION = "deepseego-v43";
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
 const $ = id => document.getElementById(id);
@@ -978,7 +1020,8 @@ function drawingActive(){
          mapClickMode === 'advRect1' || mapClickMode === 'advRect2' ||
          mapClickMode === 'advCircle' || mapClickMode === 'sitePick' ||
          mapClickMode === 'routeA' || mapClickMode === 'routeB' ||
-         mapClickMode === 'aqPick' || mapClickMode === 'siteRoiR1' ||
+         mapClickMode === 'aqPick' || mapClickMode === 'thPick' ||
+         mapClickMode === 'suPick' || mapClickMode === 'noPick' || mapClickMode === 'siteRoiR1' ||
          mapClickMode === 'siteRoiR2' || mapClickMode === 'siteRoiC' ||
          !!(mapClickMode && mapClickMode.circleRow);
 }
@@ -1016,6 +1059,9 @@ map.on('click', ev => {
       `Rectangle  N ${b.getNorth().toFixed(4)}  S ${b.getSouth().toFixed(4)}  W ${b.getWest().toFixed(4)}  E ${b.getEast().toFixed(4)}`);
     return;
   }
+  if(mapClickMode === 'thPick'){ mapClickMode = null; _thermalTab.setPoint(lat, lng); return; }
+  if(mapClickMode === 'suPick'){ mapClickMode = null; _sunlightTab.setPoint(lat, lng); return; }
+  if(mapClickMode === 'noPick'){ mapClickMode = null; _noiseTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'aqPick'){
     mapClickMode = null;
     aqState.lat = lat; aqState.lon = lng;
@@ -1470,15 +1516,18 @@ $('strip').addEventListener('click', async ev => {
 const BASKETS = {
   sat: {sub: ['explore', 'adv'], default: 'explore'},
   urban: {sub: ['site'], default: 'site'},
-  climate: {sub: ['aq'], default: 'aq'},
+  climate: {sub: ['aq', 'thermal', 'sunlight', 'noise'], default: 'aq'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'aq'];
+const ALL_TABS = ['explore', 'adv', 'site', 'aq', 'thermal', 'sunlight', 'noise'];
 function showTab(tab){
   ALL_TABS.forEach(t => { const el = $('tab-' + t); if(el) el.hidden = t !== tab; });
   document.querySelectorAll('#subBar button').forEach(x =>
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
   if(tab === 'aq') aqInit();
+  if(tab === 'thermal') thermalInit();
+  if(tab === 'sunlight') sunlightInit();
+  if(tab === 'noise') noiseInit();
   if(tab === 'site') siteInit();
 }
 function setBasket(name){
@@ -1962,6 +2011,103 @@ $('bhuvanClear').addEventListener('click', () => {
 $('bhuvanOpacity').addEventListener('input', () => {
   if(bhuvanLayer) bhuvanLayer.setOpacity($('bhuvanOpacity').value / 100);
 });
+
+/* ---------- Climate point tabs (Thermal / Sunlight / Noise) ---------- */
+const climatePointMarkers = L.featureGroup().addTo(map);
+function climatePointTab(prefix, mode){
+  // prefix: 'th' | 'su' | 'no' ; mode: 'thermal' | 'sunlight' | 'noise'
+  const st = {lat: null, lon: null, inited: false};
+  const el = id => $(prefix + id);
+  function init(){
+    if(st.inited) return; st.inited = true;
+    el('Search').addEventListener('keydown', async ev => {
+      if(ev.key !== 'Enter') return; ev.preventDefault();
+      const q = ev.target.value.trim(); if(!q) return;
+      try{
+        const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+        const j = await r.json();
+        if(!j.length) return toast('Place not found');
+        setPoint(+j[0].lat, +j[0].lon, j[0].display_name.split(',').slice(0,3).join(','));
+        map.setView([st.lat, st.lon], 15);
+      }catch(e){ toast('Search failed'); }
+    });
+    el('Pick').addEventListener('click', () => {
+      mapClickMode = prefix + 'Pick';
+      el('Status').textContent = 'Tap a location on the map\u2026';
+    });
+    el('Run').addEventListener('click', run);
+  }
+  function setPoint(lat, lon, label){
+    st.lat = lat; st.lon = lon;
+    climatePointMarkers.clearLayers();
+    L.circleMarker([lat, lon], {radius: 6, color: '#E9C46A',
+      fillColor: '#E9C46A', fillOpacity: 0.9}).addTo(climatePointMarkers);
+    el('Run').disabled = false;
+    el('Status').textContent = (label ? label + ' \u00b7 ' : '') +
+      lat.toFixed(5) + ', ' + lon.toFixed(5);
+  }
+  async function run(){
+    if(st.lat == null) return;
+    const btn = el('Run'); const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Working\u2026';
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = ({thermal: 'Thermal', sunlight: 'Sunlight & solar',
+      noise: 'Noise screening'}[mode]) + ' \u00b7 ' +
+      st.lat.toFixed(4) + ', ' + st.lon.toFixed(4);
+    siteCharts.forEach(c => c.destroy()); siteCharts = [];
+    $('siteWrap').hidden = false;
+    $('siteWrap').innerHTML = '<p class="hint">Gathering data\u2026</p>';
+    try{
+      const j = await api('/site_brief', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({lat: st.lat, lon: st.lon, radius_m: 500})});
+      const mo = j.monthly, L = mo.map(m => m.month), P = j.periods;
+      if(mode === 'thermal'){
+        const chips = [];
+        if(j.lst_day_c != null) chips.push(siteChip('Day surface temp', j.lst_day_c + '\u00b0C', '#E4572E'));
+        if(j.lst_night_c != null) chips.push(siteChip('Night surface temp', j.lst_night_c + '\u00b0C', '#00B4D8'));
+        $('siteWrap').innerHTML =
+          `<div class="siteSec"><div class="paneLabel">Surface temperature <span class="per">\u00b7 ${P.lst}</span></div><div class="chips">${chips.join('')}</div></div>` +
+          `<div class="siteSec"><div class="paneLabel">Air temperature \u00b0C <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cTh1')}${statLine(mo,'temp_c','\u00b0C',1)}</div>` +
+          `<div class="siteSec"><div class="paneLabel">Relative humidity % <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cTh2')}${statLine(mo,'rh_pct','%',0)}</div>` +
+          `<p class="srcNote">Surface temp from MODIS LST; air temp/humidity from ERA5-Land (~9 km). Surface and air temperature differ, especially over built-up ground.</p>`;
+        siteChart('cTh1', L, mo.map(m => m.temp_c), '#E4572E');
+        siteChart('cTh2', L, mo.map(m => m.rh_pct), '#00B4D8');
+      } else if(mode === 'sunlight'){
+        $('siteWrap').innerHTML =
+          `<div class="siteSec"><div class="paneLabel">Solar irradiance kWh/m\u00b2/day <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cSu1')}${statLine(mo,'solar_kwh_m2_day','',2)}</div>` +
+          `<div class="siteSec"><div class="paneLabel">Mean radiant temperature \u00b0C (sun-exposed, approx.) <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cSu2')}${statLine(mo,'mrt_c','\u00b0C',1)}
+            <p class="srcNote">MRT estimated from ERA5 solar + thermal fluxes for an unshaded standing person; indicative only.</p></div>`;
+        siteChart('cSu1', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
+        siteChart('cSu2', L, mo.map(m => m.mrt_c), '#F15BB5');
+      } else if(mode === 'noise'){
+        const N = j.noise || {};
+        function nRow(label, m, band, note){
+          const d = m == null ? '\u2014' : (m >= 1000 ? (m/1000).toFixed(1)+' km' : Math.round(m)+' m');
+          return `<tr><td>${label}</td><td style="text-align:right">${d}</td><td${bandCls(band)}>${note || band || '\u2014'}</td></tr>`;
+        }
+        $('siteWrap').innerHTML =
+          `<div class="siteSec"><div class="paneLabel">Noise-source proximity screening</div>` +
+          `<table class="aqTable"><tr><th>Source</th><th>Distance</th><th>Exposure</th></tr>` +
+          nRow('Major road', N.traffic_major_road_m ?? N.traffic_any_road_m, N.traffic_band) +
+          nRow('Railway', N.rail_m, N.rail_band, N.osm_ok ? null : 'OSM unavailable') +
+          nRow('Industrial area', N.industry_m, N.industry_band, N.osm_ok ? null : 'OSM unavailable') +
+          nRow('Airport', N.airport_m, N.airport_band, N.osm_ok ? null : 'OSM unavailable') +
+          `</table>` +
+          `<p class="srcNote">Bands are inferred only from distance to mapped sources (${P.osm || 'OSM'}) \u2014 not acoustic measurements. Real levels depend on traffic volume, barriers and operations.</p></div>`;
+      }
+    }catch(e){ toast(mode + ': ' + e.message, 9000); }
+    btn.disabled = false; btn.textContent = orig;
+  }
+  return {init, setPoint, state: st, prefix};
+}
+const _thermalTab = climatePointTab('th', 'thermal');
+const _sunlightTab = climatePointTab('su', 'sunlight');
+const _noiseTab = climatePointTab('no', 'noise');
+function thermalInit(){ _thermalTab.init(); }
+function sunlightInit(){ _sunlightTab.init(); }
+function noiseInit(){ _noiseTab.init(); }
 
 /* ---------- Live Air Quality (multi-provider) ---------- */
 const AQ_PROVIDERS = [
