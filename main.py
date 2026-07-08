@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v58"
+APP_VERSION = "deepseego-v59"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -1478,6 +1478,18 @@ def _shape_geo(name: str, feature: Optional[int]):
             raise HTTPException(status_code=400,
                                 detail=f"'{name}' has no feature #{feature}")
         return feats[feature]["geometry"], gtype
+    if gtype == "point":
+        pts = []
+        for f in feats:
+            g = f["geometry"]
+            if g["type"] == "Point":
+                pts.append(g["coordinates"])
+            elif g["type"] == "MultiPoint":
+                pts.extend(g["coordinates"])
+        if not pts:
+            raise HTTPException(status_code=400,
+                                detail=f"'{name}' has no usable geometry.")
+        return {"type": "MultiPoint", "coordinates": pts}, gtype
     parts = []
     multi = "MultiPolygon" if gtype == "polygon" else "MultiLineString"
     single = "Polygon" if gtype == "polygon" else "LineString"
@@ -1498,15 +1510,15 @@ def _advanced_region(spec: RegionSpec) -> ee.Geometry:
         raise HTTPException(status_code=400,
                             detail="Advanced region needs at least one layer.")
     buf_km = spec.buffer_km or 0
-    feats, has_line = [], False
+    feats, needs_buffer = [], False
     for ref in spec.shapes:
         geo, gtype = _shape_geo(ref.name, ref.feature)
-        has_line = has_line or (gtype == "line")
+        needs_buffer = needs_buffer or (gtype in ("line", "point"))
         feats.append(ee.Feature(ee.Geometry(_slim_geo(geo, 150_000))))
-    if has_line and buf_km <= 0:
+    if needs_buffer and buf_km <= 0:
         raise HTTPException(status_code=400, detail=(
-            "Line layers (roads / metro / rail) have no area — set a buffer "
-            "distance greater than 0 km."))
+            "Point and line layers have no area on their own — set a buffer "
+            "radius greater than 0 km."))
     geom = ee.FeatureCollection(feats).geometry()
     if buf_km > 0:
         geom = geom.buffer(buf_km * 1000, 100)
