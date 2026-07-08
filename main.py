@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v60"
+APP_VERSION = "deepseego-v61"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -1622,24 +1622,68 @@ def fragments(q: FragmentsQuery):
             if not pfeats:
                 raise HTTPException(status_code=400,
                                     detail="No points found in the selected layers.")
+            if len(pfeats) > 400:
+                raise HTTPException(status_code=400, detail=(
+                    f"{len(pfeats)} points - too many for one run (max 400). "
+                    "Use a smaller layer or filter the points."))
+            # buffer every point
+            circles = []
+            for (label, lon, lat) in pfeats:
+                c = make_valid(_metric_buffer(Point(lon, lat), q.buffer_km))
+                if not c.is_empty:
+                    circles.append({"label": label, "lat": lat, "lon": lon,
+                                    "geom": c})
+            n = len(circles)
+            # union-find: group circles whose buffers overlap
+            parent = list(range(n))
+
+            def find(a):
+                while parent[a] != a:
+                    parent[a] = parent[parent[a]]
+                    a = parent[a]
+                return a
+
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[rb] = ra
+
+            for i in range(n):
+                for jj in range(i + 1, n):
+                    if circles[i]["geom"].intersects(circles[jj]["geom"]):
+                        union(i, jj)
+            groups = {}
+            for i in range(n):
+                groups.setdefault(find(i), []).append(i)
             out = []
-            for i, (label, lon, lat) in enumerate(pfeats):
-                circ = _metric_buffer(Point(lon, lat), q.buffer_km)
-                circ = make_valid(circ).simplify(0.0003, preserve_topology=True)
-                if circ.is_empty:
+            for members in groups.values():
+                labels = [circles[m]["label"] for m in members]
+                if len(members) == 1:
+                    geom = circles[members[0]]["geom"]
+                    name = labels[0]                       # unique zone
+                    lat = circles[members[0]]["lat"]
+                    lon = circles[members[0]]["lon"]
+                else:
+                    geom = unary_union([circles[m]["geom"] for m in members])
+                    name = "_".join(labels)                # combined name
+                    lat = sum(circles[m]["lat"] for m in members) / len(members)
+                    lon = sum(circles[m]["lon"] for m in members) / len(members)
+                geom = make_valid(geom).simplify(0.0003, preserve_topology=True)
+                if geom.is_empty:
                     continue
-                out.append({"id": len(out), "name": label,
-                            "area_km2": round(_area_km2(circ), 3),
+                out.append({"id": len(out), "name": name,
+                            "merged": len(members) > 1, "n_points": len(members),
+                            "area_km2": round(_area_km2(geom), 3),
                             "lat": round(lat, 6), "lon": round(lon, 6),
-                            "geometry": shp_mapping(circ)})
+                            "geometry": shp_mapping(geom)})
             if not out:
                 raise HTTPException(status_code=400,
                                     detail="Points produced no fragments.")
-            if len(out) > 60:
-                raise HTTPException(status_code=400, detail=(
-                    f"{len(out)} points - too many; use fewer points or a "
-                    "smaller layer."))
-            return {"fragments": out, "point_mode": True}
+            out.sort(key=lambda x: -x["area_km2"])
+            for i, o in enumerate(out):
+                o["id"] = i
+            return {"fragments": out, "point_mode": True,
+                    "n_points": n, "n_zones": len(out)}
 
         ops = []
         parts = [make_valid(shp_shape(_slim_geo(_shape_geo(r.name, r.feature)[0],
