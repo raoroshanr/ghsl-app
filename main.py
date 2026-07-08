@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v50"
+APP_VERSION = "deepseego-v51"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2615,6 +2615,13 @@ def _classify_building(t):
     if b in ("yes", "", None):
         return "other", "Other / unspecified", "#94A3B8"
     return "other", "Other / unspecified", "#94A3B8"
+
+
+@app.get("/buildings_test")
+def buildings_test(lat: float = 12.8138, lon: float = 74.8614):
+    """Browser-testable buildings check. Open /buildings_test?lat=..&lon=.. to
+    see whether OSM returns categorised buildings for a point."""
+    return buildings(BuildingsQuery(lat=lat, lon=lon, radius_m=500))
 
 
 @app.post("/buildings")
