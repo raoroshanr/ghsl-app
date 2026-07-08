@@ -432,8 +432,20 @@ label.chk input{width:auto}
       </div>
 
       <div class="step locked" id="step2">
-        <div class="stepH">2 &middot; Buffer &mdash; km, both sides</div>
-        <input type="number" id="advBuffer" value="5" step="any" min="0.1">
+        <div class="stepH" id="advBufferH">2 &middot; Buffer &mdash; km, both sides</div>
+        <div id="advBufferRadiusRow" hidden>
+          <label class="fld">Circle radius around each point</label>
+          <select id="advBufferRadius" style="width:100%">
+            <option value="0.5">500 m</option>
+            <option value="1" selected>1 km</option>
+            <option value="2">2 km</option>
+            <option value="3">3 km</option>
+            <option value="5">5 km</option>
+          </select>
+        </div>
+        <div id="advBufferKmRow">
+          <input type="number" id="advBuffer" value="5" step="any" min="0.1">
+        </div>
         <button id="advBufferApply" style="width:100%;margin-top:6px">Apply buffer</button>
       </div>
 
@@ -662,7 +674,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v55</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v56</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -674,7 +686,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v55";
+const DSG_VERSION = "deepseego-v56";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1660,6 +1672,19 @@ function relockFrom(n){
 }
 function unlock(n){ $('step' + n).classList.remove('locked'); }
 
+function selectionHasPoints(){
+  return (allShapes || []).some(s => s.gtype === 'point' &&
+    (wiz.lines || []).includes(s.name));
+}
+function updateBufferMode(){
+  const pts = selectionHasPoints();
+  const kmRow = $('advBufferKmRow'), radRow = $('advBufferRadiusRow'), h = $('advBufferH');
+  if(kmRow) kmRow.hidden = pts;
+  if(radRow) radRow.hidden = !pts;
+  if(h) h.innerHTML = pts
+    ? '2 &middot; Radius &mdash; circle around each point'
+    : '2 &middot; Buffer &mdash; km, both sides';
+}
 function buildAdvShapeLists(){
   const box = $('advLineList'); if(!box) return;
   const filt = ($('advLineFilter') && $('advLineFilter').value) || 'all';
@@ -1675,6 +1700,7 @@ function buildAdvShapeLists(){
     wiz.lines = [...box.querySelectorAll('input:checked')].map(i => i.value);
     relockFrom(3);
     advLineLayer.clearLayers();
+    updateBufferMode();
     if(wiz.lines.length) unlock(2); else $('step2').classList.add('locked');
   }));
 }
@@ -1719,11 +1745,13 @@ if($('advCsvFile')) $('advCsvFile').addEventListener('change', async (ev) => {
   }catch(e){ $('advCsvNote').textContent = e.message; toast(e.message, 7000); }
 });
 $('advBufferApply').addEventListener('click', async () => {
-  const buf = parseFloat($('advBuffer').value);
-  if(!(buf > 0)) return toast('Buffer must be greater than 0 km');
-  if(!wiz.lines.length) return toast('Tick at least one line layer');
+  const usePts = selectionHasPoints();
+  const buf = usePts ? parseFloat($('advBufferRadius').value)
+                     : parseFloat($('advBuffer').value);
+  if(!(buf > 0)) return toast(usePts ? 'Pick a radius' : 'Buffer must be greater than 0 km');
+  if(!wiz.lines.length) return toast('Tick at least one point or line layer');
   const btn = $('advBufferApply');
-  btn.disabled = true; btn.textContent = 'Loading lines\u2026';
+  btn.disabled = true; btn.textContent = usePts ? 'Building circles\u2026' : 'Loading lines\u2026';
   relockFrom(3);                       // reset downstream BEFORE rebuilding
   try{
     advLineLayer.clearLayers();
@@ -1732,8 +1760,11 @@ $('advBufferApply').addEventListener('click', async () => {
       try{
         const j = await api('/shapes/geometry?name=' + encodeURIComponent(name));
         j.features.forEach(f => {
-          const lyr = L.geoJSON(f.geometry, {style: {color: '#0B5A49', weight: 3}})
-                       .addTo(advLineLayer);
+          const lyr = L.geoJSON(f.geometry, {
+            style: {color: '#0B5A49', weight: 3},
+            pointToLayer: (pt, ll) => L.circleMarker(ll, {radius: 5,
+              color: '#fff', weight: 1, fillColor: '#0B5A49', fillOpacity: 0.9})
+          }).addTo(advLineLayer);
           bounds = bounds ? bounds.extend(lyr.getBounds()) : lyr.getBounds();
         });
         if(j.note) toast(j.note, 6000);
