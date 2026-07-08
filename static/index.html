@@ -307,14 +307,6 @@ label.chk input{width:auto}
   #drawer{width:92vw}
   #chartWrap{height:190px}
 }
-#modal3d{position:fixed;inset:0;z-index:9999;background:#0b1512;display:flex;flex-direction:column}
-#modal3dBar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:#101b16;border-bottom:1px solid #223}
-#modal3dBar #modal3dTitle{font-weight:600;color:#E7EDE8}
-#modal3dBar button{margin-left:auto;padding:6px 16px;background:#E4572E;color:#fff;border:none;border-radius:6px;cursor:pointer}
-#modal3dCanvasWrap{flex:1;position:relative;overflow:hidden}
-#modal3dCanvasWrap canvas{display:block}
-#modal3dLegend{position:absolute;bottom:44px;left:16px;background:rgba(16,27,22,.85);padding:8px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#E7EDE8}
-#modal3dHint{padding:8px 16px;background:#101b16;border-top:1px solid #223;text-align:center}
 </style>
 </head>
 <body>
@@ -427,8 +419,16 @@ label.chk input{width:auto}
       <h2>Build Zone</h2>
 
       <div class="step" id="step1">
-        <div class="stepH">1 &middot; Network layers (lines)</div>
+        <div class="stepH">1 &middot; Points or lines of interest</div>
+        <select id="advLineFilter" style="width:100%;margin-bottom:6px">
+          <option value="all">All layers</option>
+          <option value="line">Lines only</option>
+          <option value="point">Points only</option>
+        </select>
         <div id="advLineList" class="advList">Loading&hellip;</div>
+        <label class="fld" style="margin-top:8px">Upload points (CSV with lat, lon columns)</label>
+        <input type="file" id="advCsvFile" accept=".csv,text/csv" style="width:100%">
+        <div id="advCsvNote" class="hint"></div>
       </div>
 
       <div class="step locked" id="step2">
@@ -662,11 +662,10 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v54</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v55</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 /* ============================================================
    DeepSeeGo frontend
@@ -675,7 +674,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v54";
+const DSG_VERSION = "deepseego-v55";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1578,7 +1577,7 @@ function wipeMapAnalysis(){
   // consts are initialised (temporal dead zone) - harmless to skip then.
   try {
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
-     sourceMarkers, siteLayer, buildingLayer].forEach(g => {
+     sourceMarkers, siteLayer, buildingLayer, building3dLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -1586,6 +1585,8 @@ function wipeMapAnalysis(){
     [_thermalTab, _sunlightTab, _noiseTab, _weatherTab].forEach(t => {
       try { if(t){ t.state.lat = null; t.state.lon = null; } } catch(e){}
     });
+    try { _building3dOn = false; const tb=$('site3dBtn');
+      if(tb) tb.textContent = '3D building view (extruded)'; } catch(e){}
   } catch(e){ /* consts not initialised yet at first load */ }
 }
 function showTab(tab){
@@ -1661,11 +1662,15 @@ function unlock(n){ $('step' + n).classList.remove('locked'); }
 
 function buildAdvShapeLists(){
   const box = $('advLineList'); if(!box) return;
-  const lines = allShapes.filter(s => s.gtype === 'line');
-  box.innerHTML = lines.length
-    ? lines.map(s => `<label><input type="checkbox" value="${s.name}">` +
-                     `<i>\u3030</i>${s.name}</label>`).join('')
-    : 'No line layers (KML roads / metro / rail) in the bucket yet.';
+  const filt = ($('advLineFilter') && $('advLineFilter').value) || 'all';
+  const items = allShapes.filter(s =>
+    (s.gtype === 'line' || s.gtype === 'point') &&
+    (filt === 'all' || s.gtype === filt));
+  const icon = g => g === 'point' ? '\u25C9' : '\u3030';
+  box.innerHTML = items.length
+    ? items.map(s => `<label><input type="checkbox" value="${s.name}">` +
+                     `<i>${icon(s.gtype)}</i>${s.name} <span class="per">${s.gtype}</span></label>`).join('')
+    : 'No point or line layers in the bucket yet. Upload a CSV below, or add shapes to the bucket.';
   box.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
     wiz.lines = [...box.querySelectorAll('input:checked')].map(i => i.value);
     relockFrom(3);
@@ -1674,6 +1679,45 @@ function buildAdvShapeLists(){
   }));
 }
 
+if($('advLineFilter')) $('advLineFilter').addEventListener('change', buildAdvShapeLists);
+const csvPointLayer = L.featureGroup().addTo(map);
+function parseCsvPoints(text){
+  // find lat/lon columns from the header, return [{lat,lon,label}]
+  const lines = text.split(/\r?\n/).filter(l => l.trim() && !l.startsWith('#'));
+  if(!lines.length) return [];
+  const head = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const li = head.findIndex(h => ['lat','latitude','y'].includes(h));
+  const oi = head.findIndex(h => ['lon','lng','long','longitude','x'].includes(h));
+  if(li < 0 || oi < 0) throw new Error('CSV needs lat/latitude and lon/longitude columns');
+  const ni = head.findIndex(h => ['name','label','id','site'].includes(h));
+  const out = [];
+  for(let k = 1; k < lines.length; k++){
+    const c = lines[k].split(',');
+    const la = parseFloat(c[li]), lo = parseFloat(c[oi]);
+    if(isFinite(la) && isFinite(lo)) out.push({lat: la, lon: lo,
+      label: ni >= 0 ? (c[ni]||'').trim() : ('Point ' + k)});
+  }
+  return out;
+}
+if($('advCsvFile')) $('advCsvFile').addEventListener('change', async (ev) => {
+  const f = ev.target.files && ev.target.files[0]; if(!f) return;
+  try{
+    const text = await f.text();
+    const pts = parseCsvPoints(text);
+    if(!pts.length){ $('advCsvNote').textContent = 'No valid lat/lon rows found.'; return; }
+    csvPointLayer.clearLayers();
+    let b = null;
+    pts.forEach(p => {
+      const mk = L.circleMarker([p.lat, p.lon], {radius: 5, color: '#fff',
+        weight: 1, fillColor: '#E4572E', fillOpacity: 0.9})
+        .addTo(csvPointLayer).bindPopup(`<b>${p.label}</b><br>${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`);
+      b = b ? b.extend(mk.getLatLng()) : L.latLngBounds(mk.getLatLng(), mk.getLatLng());
+    });
+    if(b) map.fitBounds(b.pad(0.3));
+    $('advCsvNote').innerHTML = `<b>${pts.length}</b> point(s) loaded from ${f.name} and shown on the map.`;
+    toast(pts.length + ' points loaded from CSV', 5000);
+  }catch(e){ $('advCsvNote').textContent = e.message; toast(e.message, 7000); }
+});
 $('advBufferApply').addEventListener('click', async () => {
   const buf = parseFloat($('advBuffer').value);
   if(!(buf > 0)) return toast('Buffer must be greater than 0 km');
@@ -2656,7 +2700,6 @@ $('customWmsAdd').addEventListener('click', () => {
 /* ---------- Site Brief ---------- */
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
 if($('site3dBtn')) $('site3dBtn').addEventListener('click', open3DView);
-if($('modal3dClose')) $('modal3dClose').addEventListener('click', close3DView);
 if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async () => {
   if(siteState.lat == null) return toast('Pick a site first');
   const btn = $('siteBuildingsBtn');
@@ -2678,104 +2721,67 @@ function heightColor(h, hmax){
   const c = a[1].map((v,i)=>Math.round(v+(b[1][i]-v)*f));
   return (c[0]<<16)|(c[1]<<8)|c[2];
 }
-let _three = null;   // holds scene handles for cleanup
+const building3dLayer = L.featureGroup().addTo(map);
+let _building3dOn = false;
+function shadeColor(rgb, f){    // f<1 darker, f>1 lighter
+  const r = Math.max(0, Math.min(255, Math.round(((rgb>>16)&255)*f)));
+  const g = Math.max(0, Math.min(255, Math.round(((rgb>>8)&255)*f)));
+  const b = Math.max(0, Math.min(255, Math.round((rgb&255)*f)));
+  return '#' + ((1<<24)|(r<<16)|(g<<8)|b).toString(16).slice(1);
+}
 async function open3DView(){
   if(siteState.lat == null) return toast('Pick a site first');
-  if(typeof THREE === 'undefined') return toast('3D library still loading, try again');
   const btn = $('site3dBtn'); const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Building 3D\u2026';
+  // toggle off if already showing
+  if(_building3dOn){ building3dLayer.clearLayers(); _building3dOn = false;
+    btn.textContent = '3D building view (extruded)'; return; }
+  btn.disabled = true; btn.textContent = 'Building massing\u2026';
   try{
     const j = await api('/building_heights', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
         radius_m: Math.min(700, +$('siteRadius').value || 400)})});
     if(!j.buildings || !j.buildings.length){ toast('No buildings with height data here'); btn.disabled=false; btn.textContent=orig; return; }
-    render3D(j);
-    $('modal3d').hidden = false;
-    $('modal3dInfo').textContent = `${j.count} buildings \u00b7 ${j.h_min}\u2013${j.h_max} m \u00b7 within ${j.radius_m} m`;
-    $('modal3dLegend').innerHTML =
-      `Height (m)<br><span style="color:#4C9F70">\u25A0</span> low ` +
-      `<span style="color:#E9C46A">\u25A0</span> mid ` +
-      `<span style="color:#E4572E">\u25A0</span> tall (\u2264 ${j.h_max} m)`;
+    draw3DOnMap(j);
+    _building3dOn = true;
+    btn.textContent = 'Hide 3D massing';
+    toast(`${j.count} buildings extruded on the map \u00b7 ${j.h_min}\u2013${j.h_max} m`, 6000);
   }catch(e){ toast('3D view: ' + e.message, 8000); }
-  btn.disabled = false; btn.textContent = orig;
+  btn.disabled = false;
 }
-function render3D(j){
-  const wrap = $('modal3dCanvasWrap');
-  wrap.innerHTML = '';
-  const W = wrap.clientWidth || window.innerWidth;
-  const H = wrap.clientHeight || (window.innerHeight - 120);
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0b1512);
-  const camera = new THREE.PerspectiveCamera(55, W/H, 0.1, 100000);
-  const renderer = new THREE.WebGLRenderer({antialias:true});
-  renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio||1);
-  wrap.appendChild(renderer.domElement);
-  // project lat/lon -> local metres around the site centre
-  const lat0 = j.lat, lon0 = j.lon;
-  const mPerLat = 110540, mPerLon = 111320 * Math.cos(lat0*Math.PI/180);
-  const toXY = (lat, lon) => [ (lon-lon0)*mPerLon, (lat-lat0)*mPerLat ];
-  // ground plane
-  const gsize = (j.radius_m||400)*2.4;
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(gsize, gsize),
-    new THREE.MeshStandardMaterial({color:0x14211c, roughness:1}));
-  ground.rotation.x = -Math.PI/2; scene.add(ground);
-  // buildings
+// Oblique 2.5D extrusion drawn as real Leaflet polygons (pans/zooms natively).
+// Roofs are offset north by an amount proportional to height; walls connect
+// base to roof. Southernmost buildings draw last so they overlap those behind.
+function draw3DOnMap(j){
+  building3dLayer.clearLayers();
   const hmax = j.h_max || 30;
-  j.buildings.forEach(b => {
-    const pts = b.ring.map(([la,lo]) => { const [x,y]=toXY(la,lo); return new THREE.Vector2(x, y); });
-    if(pts.length < 3) return;
-    const shape = new THREE.Shape(pts);
-    const geo = new THREE.ExtrudeGeometry(shape, {depth: b.h, bevelEnabled:false});
-    geo.rotateX(-Math.PI/2);   // extrude upward (Y)
-    const mat = new THREE.MeshStandardMaterial({color: heightColor(b.h, hmax),
-      roughness:0.75, metalness:0.05});
-    scene.add(new THREE.Mesh(geo, mat));
+  const VEX = 0.9;            // vertical exaggeration (ground-metres per metre)
+  const mPerLat = 110540;
+  // sort north->south so nearer (south) buildings paint on top
+  const blds = j.buildings.slice().map(b => {
+    const clat = b.ring.reduce((s,p)=>s+p[0],0)/b.ring.length;
+    return {b, clat};
+  }).sort((A,B) => B.clat - A.clat);
+  blds.forEach(({b}) => {
+    const col = heightColor(b.h, hmax);
+    const dLat = (b.h * VEX) / mPerLat;         // north offset for the roof
+    const base = b.ring;
+    const roof = base.map(([la,lo]) => [la + dLat, lo]);
+    // walls (only the south-facing edges are visible, but draw all lightly)
+    for(let i=0;i<base.length-1;i++){
+      const quad = [base[i], base[i+1], roof[i+1], roof[i]];
+      L.polygon(quad, {stroke:false, fillColor: shadeColor(col,0.6),
+        fillOpacity:0.85}).addTo(building3dLayer);
+    }
+    // roof
+    L.polygon(roof, {color: shadeColor(col,0.5), weight:0.5,
+      fillColor: shadeColor(col,1.05), fillOpacity:0.95}).addTo(building3dLayer)
+      .bindPopup(`<b>Building</b><br>height \u2248 ${b.h} m`);
   });
-  // site marker (a thin pole)
-  const pole = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,60,8),
-    new THREE.MeshStandardMaterial({color:0xffffff}));
-  pole.position.set(0,30,0); scene.add(pole);
-  // lights
-  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
-  sun.position.set(gsize*0.4, gsize*0.6, gsize*0.3); scene.add(sun);
-  // manual orbit
-  let theta = Math.PI*0.25, phi = Math.PI*0.32, radius = gsize*0.9;
-  function place(){
-    camera.position.set(
-      radius*Math.sin(phi)*Math.cos(theta),
-      radius*Math.cos(phi),
-      radius*Math.sin(phi)*Math.sin(theta));
-    camera.lookAt(0, 10, 0);
-  }
-  place();
-  let drag=false, px=0, py=0;
-  const el = renderer.domElement;
-  el.addEventListener('mousedown', e=>{drag=true;px=e.clientX;py=e.clientY;});
-  window.addEventListener('mouseup', ()=>drag=false);
-  el.addEventListener('mousemove', e=>{ if(!drag)return;
-    theta -= (e.clientX-px)*0.008; phi -= (e.clientY-py)*0.006;
-    phi = Math.max(0.12, Math.min(Math.PI*0.49, phi));
-    px=e.clientX; py=e.clientY; place(); });
-  el.addEventListener('wheel', e=>{ e.preventDefault();
-    radius *= (1 + Math.sign(e.deltaY)*0.08);
-    radius = Math.max(gsize*0.15, Math.min(gsize*3, radius)); place(); }, {passive:false});
-  // touch (basic)
-  el.addEventListener('touchstart', e=>{if(e.touches[0]){drag=true;px=e.touches[0].clientX;py=e.touches[0].clientY;}});
-  el.addEventListener('touchend', ()=>drag=false);
-  el.addEventListener('touchmove', e=>{ if(!drag||!e.touches[0])return;
-    theta -= (e.touches[0].clientX-px)*0.01; phi -= (e.touches[0].clientY-py)*0.008;
-    phi = Math.max(0.12, Math.min(Math.PI*0.49, phi));
-    px=e.touches[0].clientX; py=e.touches[0].clientY; place(); });
-  let alive = true;
-  (function loop(){ if(!alive) return; requestAnimationFrame(loop); renderer.render(scene, camera); })();
-  _three = {renderer, scene, stop: ()=>{ alive=false;
-    scene.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); });
-    renderer.dispose(); wrap.innerHTML=''; }};
+  // scan ring + a note marker at the site
+  L.circle([j.lat, j.lon], {radius: j.radius_m, color:'#E9C46A', weight:1.2,
+    fill:false, dashArray:'5 6'}).addTo(building3dLayer);
 }
-function close3DView(){ if(_three){ _three.stop(); _three=null; } $('modal3d').hidden = true; }
 async function loadBuildings(lat, lon, radius){
   buildingLayer.clearLayers();
   const rr = Math.min(1500, radius || 500);
@@ -3098,15 +3104,5 @@ $('siteRun').addEventListener('click', async () => {
 $('panelToggle').addEventListener('click', () => $('panel').classList.toggle('open'));
 map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove('open'); });
 </script>
-  <div id="modal3d" hidden>
-    <div id="modal3dBar">
-      <span id="modal3dTitle">3D building massing</span>
-      <span id="modal3dInfo" class="per"></span>
-      <button id="modal3dClose">Close</button>
-    </div>
-    <div id="modal3dCanvasWrap"></div>
-    <div id="modal3dLegend"></div>
-    <div id="modal3dHint" class="per">Drag to rotate · scroll to zoom · heights are Sentinel-2 estimates (~4 m), not survey-grade</div>
-  </div>
 </body>
 </html>
