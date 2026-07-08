@@ -307,6 +307,14 @@ label.chk input{width:auto}
   #drawer{width:92vw}
   #chartWrap{height:190px}
 }
+#modal3d{position:fixed;inset:0;z-index:9999;background:#0b1512;display:flex;flex-direction:column}
+#modal3dBar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:#101b16;border-bottom:1px solid #223}
+#modal3dBar #modal3dTitle{font-weight:600;color:#E7EDE8}
+#modal3dBar button{margin-left:auto;padding:6px 16px;background:#E4572E;color:#fff;border:none;border-radius:6px;cursor:pointer}
+#modal3dCanvasWrap{flex:1;position:relative;overflow:hidden}
+#modal3dCanvasWrap canvas{display:block}
+#modal3dLegend{position:absolute;bottom:44px;left:16px;background:rgba(16,27,22,.85);padding:8px 10px;border-radius:6px;font-family:var(--mono);font-size:11px;color:#E7EDE8}
+#modal3dHint{padding:8px 16px;background:#101b16;border-top:1px solid #223;text-align:center}
 </style>
 </head>
 <body>
@@ -511,6 +519,8 @@ label.chk input{width:auto}
       </select>
       <div id="siteStatus" class="hint" style="min-height:24px">No site selected yet.</div>
       <button id="siteRun" class="primary" disabled>Generate site brief</button>
+      <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
+      <button id="site3dBtn" style="width:100%;margin-top:6px" disabled>3D building view (extruded)</button>
     </section>
     </div><!-- /tab-site -->
 
@@ -652,10 +662,11 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v51</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v54</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 /* ============================================================
    DeepSeeGo frontend
@@ -664,7 +675,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v51";
+const DSG_VERSION = "deepseego-v54";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -2109,6 +2120,8 @@ const DATA_PROVENANCE = {
     by: 'ESA / contains Sentinel-1&2 data', doc: 'https://esa-worldcover.org/'},
   osm: {name: 'OpenStreetMap (Overpass)', kind: 'Crowd-sourced vector database (live)',
     by: 'OpenStreetMap contributors, ODbL', doc: 'https://wiki.openstreetmap.org/wiki/Map_features'},
+  openbuildings: {name: 'Google Open Buildings 2.5D Temporal', kind: 'Processed satellite (Sentinel-2, 4 m; height & footprint, no type)',
+    by: 'Google Research', doc: 'https://sites.research.google/open-buildings/'},
   era5_wind: {name: 'ERA5-Land wind', kind: 'Reanalysis (~9 km)',
     by: 'ECMWF / Copernicus C3S', doc: 'https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-monthly-means'},
 };
@@ -2642,6 +2655,127 @@ $('customWmsAdd').addEventListener('click', () => {
 
 /* ---------- Site Brief ---------- */
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
+if($('site3dBtn')) $('site3dBtn').addEventListener('click', open3DView);
+if($('modal3dClose')) $('modal3dClose').addEventListener('click', close3DView);
+if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async () => {
+  if(siteState.lat == null) return toast('Pick a site first');
+  const btn = $('siteBuildingsBtn');
+  btn.disabled = true; btn.textContent = 'Mapping buildings\u2026';
+  // make sure the analysis pane is open to show the table
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('siteWrap').hidden = false;
+  await loadBuildings(siteState.lat, siteState.lon, +$('siteRadius').value);
+  btn.disabled = false; btn.textContent = 'Map building types';
+});
+function heightColor(h, hmax){
+  // low = teal, mid = amber, tall = red
+  const t = Math.max(0, Math.min(1, h / (hmax || 30)));
+  const stops = [[0.0,[76,159,112]],[0.5,[233,196,106]],[1.0,[228,87,46]]];
+  let a = stops[0], b = stops[stops.length-1];
+  for(let i=0;i<stops.length-1;i++){ if(t>=stops[i][0] && t<=stops[i+1][0]){ a=stops[i]; b=stops[i+1]; break; } }
+  const f = (t-a[0])/((b[0]-a[0])||1);
+  const c = a[1].map((v,i)=>Math.round(v+(b[1][i]-v)*f));
+  return (c[0]<<16)|(c[1]<<8)|c[2];
+}
+let _three = null;   // holds scene handles for cleanup
+async function open3DView(){
+  if(siteState.lat == null) return toast('Pick a site first');
+  if(typeof THREE === 'undefined') return toast('3D library still loading, try again');
+  const btn = $('site3dBtn'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Building 3D\u2026';
+  try{
+    const j = await api('/building_heights', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
+        radius_m: Math.min(700, +$('siteRadius').value || 400)})});
+    if(!j.buildings || !j.buildings.length){ toast('No buildings with height data here'); btn.disabled=false; btn.textContent=orig; return; }
+    render3D(j);
+    $('modal3d').hidden = false;
+    $('modal3dInfo').textContent = `${j.count} buildings \u00b7 ${j.h_min}\u2013${j.h_max} m \u00b7 within ${j.radius_m} m`;
+    $('modal3dLegend').innerHTML =
+      `Height (m)<br><span style="color:#4C9F70">\u25A0</span> low ` +
+      `<span style="color:#E9C46A">\u25A0</span> mid ` +
+      `<span style="color:#E4572E">\u25A0</span> tall (\u2264 ${j.h_max} m)`;
+  }catch(e){ toast('3D view: ' + e.message, 8000); }
+  btn.disabled = false; btn.textContent = orig;
+}
+function render3D(j){
+  const wrap = $('modal3dCanvasWrap');
+  wrap.innerHTML = '';
+  const W = wrap.clientWidth || window.innerWidth;
+  const H = wrap.clientHeight || (window.innerHeight - 120);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1512);
+  const camera = new THREE.PerspectiveCamera(55, W/H, 0.1, 100000);
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(W, H); renderer.setPixelRatio(window.devicePixelRatio||1);
+  wrap.appendChild(renderer.domElement);
+  // project lat/lon -> local metres around the site centre
+  const lat0 = j.lat, lon0 = j.lon;
+  const mPerLat = 110540, mPerLon = 111320 * Math.cos(lat0*Math.PI/180);
+  const toXY = (lat, lon) => [ (lon-lon0)*mPerLon, (lat-lat0)*mPerLat ];
+  // ground plane
+  const gsize = (j.radius_m||400)*2.4;
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(gsize, gsize),
+    new THREE.MeshStandardMaterial({color:0x14211c, roughness:1}));
+  ground.rotation.x = -Math.PI/2; scene.add(ground);
+  // buildings
+  const hmax = j.h_max || 30;
+  j.buildings.forEach(b => {
+    const pts = b.ring.map(([la,lo]) => { const [x,y]=toXY(la,lo); return new THREE.Vector2(x, y); });
+    if(pts.length < 3) return;
+    const shape = new THREE.Shape(pts);
+    const geo = new THREE.ExtrudeGeometry(shape, {depth: b.h, bevelEnabled:false});
+    geo.rotateX(-Math.PI/2);   // extrude upward (Y)
+    const mat = new THREE.MeshStandardMaterial({color: heightColor(b.h, hmax),
+      roughness:0.75, metalness:0.05});
+    scene.add(new THREE.Mesh(geo, mat));
+  });
+  // site marker (a thin pole)
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,60,8),
+    new THREE.MeshStandardMaterial({color:0xffffff}));
+  pole.position.set(0,30,0); scene.add(pole);
+  // lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(gsize*0.4, gsize*0.6, gsize*0.3); scene.add(sun);
+  // manual orbit
+  let theta = Math.PI*0.25, phi = Math.PI*0.32, radius = gsize*0.9;
+  function place(){
+    camera.position.set(
+      radius*Math.sin(phi)*Math.cos(theta),
+      radius*Math.cos(phi),
+      radius*Math.sin(phi)*Math.sin(theta));
+    camera.lookAt(0, 10, 0);
+  }
+  place();
+  let drag=false, px=0, py=0;
+  const el = renderer.domElement;
+  el.addEventListener('mousedown', e=>{drag=true;px=e.clientX;py=e.clientY;});
+  window.addEventListener('mouseup', ()=>drag=false);
+  el.addEventListener('mousemove', e=>{ if(!drag)return;
+    theta -= (e.clientX-px)*0.008; phi -= (e.clientY-py)*0.006;
+    phi = Math.max(0.12, Math.min(Math.PI*0.49, phi));
+    px=e.clientX; py=e.clientY; place(); });
+  el.addEventListener('wheel', e=>{ e.preventDefault();
+    radius *= (1 + Math.sign(e.deltaY)*0.08);
+    radius = Math.max(gsize*0.15, Math.min(gsize*3, radius)); place(); }, {passive:false});
+  // touch (basic)
+  el.addEventListener('touchstart', e=>{if(e.touches[0]){drag=true;px=e.touches[0].clientX;py=e.touches[0].clientY;}});
+  el.addEventListener('touchend', ()=>drag=false);
+  el.addEventListener('touchmove', e=>{ if(!drag||!e.touches[0])return;
+    theta -= (e.touches[0].clientX-px)*0.01; phi -= (e.touches[0].clientY-py)*0.008;
+    phi = Math.max(0.12, Math.min(Math.PI*0.49, phi));
+    px=e.touches[0].clientX; py=e.touches[0].clientY; place(); });
+  let alive = true;
+  (function loop(){ if(!alive) return; requestAnimationFrame(loop); renderer.render(scene, camera); })();
+  _three = {renderer, scene, stop: ()=>{ alive=false;
+    scene.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); });
+    renderer.dispose(); wrap.innerHTML=''; }};
+}
+function close3DView(){ if(_three){ _three.stop(); _three=null; } $('modal3d').hidden = true; }
 async function loadBuildings(lat, lon, radius){
   buildingLayer.clearLayers();
   const rr = Math.min(1500, radius || 500);
@@ -2665,10 +2799,33 @@ async function loadBuildings(lat, lon, radius){
     const rows = b.categories.map(c =>
       `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${c.color};margin-right:6px"></i>${c.label}</td>` +
       `<td style="text-align:right">${c.count}</td><td style="text-align:right">${c.pct}%</td></tr>`).join('');
-    const html = `<div class="siteSec"><div class="paneLabel">Buildings by function <span class="per">\u00b7 ${b.total} within ${b.radius_m} m</span></div>` +
+    // Open Buildings 2.5D satellite summary + completeness cross-check
+    let obHtml = '';
+    const ob = lastSiteOB;
+    if(ob){
+      const r = [];
+      if(ob.height_mean_m != null) r.push(['Mean building height', ob.height_mean_m + ' m']);
+      if(ob.height_max_m != null) r.push(['Tallest building', ob.height_max_m + ' m']);
+      if(ob.height_growth_m != null) r.push(['Mean height change 2016\u21922023',
+        (ob.height_growth_m >= 0 ? '+' : '') + ob.height_growth_m + ' m']);
+      if(ob.footprint_m2 != null) r.push(['Built footprint', (ob.footprint_m2/1e4).toFixed(2) + ' ha']);
+      if(ob.built_up_pct != null) r.push(['Built-up share of area', ob.built_up_pct + '%']);
+      if(ob.count_est != null) r.push(['Detected buildings (satellite)', ob.count_est]);
+      const cross = (ob.count_est != null)
+        ? `<p class="srcNote">OSM has <b>${b.total}</b> mapped building(s) here; satellite (Open Buildings) detects about <b>${ob.count_est}</b>. ` +
+          (ob.count_est > b.total * 1.3
+            ? 'Satellite sees notably more \u2014 OSM tagging is likely incomplete here, so the functional split above undercounts.'
+            : 'The two are broadly consistent, so the functional split is reasonably complete.') + `</p>`
+        : '';
+      obHtml = `<div class="siteSec"><div class="paneLabel">Open Buildings (satellite) <span class="per">\u00b7 ${ob.period}</span></div>` +
+        `<table class="aqTable">${r.map(x => `<tr><td>${x[0]}</td><td style="text-align:right">${x[1]}</td></tr>`).join('')}</table>` +
+        cross +
+        `<p class="srcNote">Heights & footprints from Google Open Buildings 2.5D Temporal (Sentinel-2, 4 m). Open Buildings has footprints & heights but NOT building type \u2014 the functional split above comes from OSM. Filter-confidence and false positives over bare ground apply.</p></div>`;
+    }
+    const html = obHtml + `<div class="siteSec"><div class="paneLabel">Buildings by function (OSM) <span class="per">\u00b7 ${b.total} within ${b.radius_m} m</span></div>` +
       `<table class="aqTable"><tr><th>Category</th><th>Count</th><th>Share</th></tr>${rows}</table>` +
       `<p class="srcNote">Colour-coded points shown on the map. ${b.note}</p></div>` +
-      provenanceBlock(['osm'], {lat, lon});
+      provenanceBlock(lastSiteOB ? ['osm', 'openbuildings'] : ['osm'], {lat, lon});
     $('siteWrap').innerHTML += html;
   }catch(e){
     $('siteWrap').innerHTML += `<div class="siteSec"><div class="paneLabel">Buildings</div>` +
@@ -2679,6 +2836,7 @@ async function loadBuildings(lat, lon, radius){
 const siteLayer = L.featureGroup().addTo(map);
 const buildingLayer = L.featureGroup().addTo(map);
 const siteState = {lat: null, lon: null};
+let lastSiteOB = null;  // Open Buildings 2.5D stats from last site brief
 
 function drawSite(){
   siteLayer.clearLayers();
@@ -2812,7 +2970,12 @@ function noiseRow(name, dist, band, note){
 const siteRoiLayer = L.featureGroup().addTo(map);
 let siteRoiState = null, siteRoiRectFirst = null;
 function enableSiteRun(){
-  $('siteRun').disabled = (siteState.lat == null && siteRoiState == null);
+  const noPoint = (siteState.lat == null && siteRoiState == null);
+  $('siteRun').disabled = noPoint;
+  const bb = $('siteBuildingsBtn');
+  if(bb) bb.disabled = (siteState.lat == null);
+  const tb = $('site3dBtn');
+  if(tb) tb.disabled = (siteState.lat == null);
 }
 const _hasRoiUI = !!$('siteRoiRect');
 function clearSiteRegions(kind){
@@ -2862,6 +3025,7 @@ $('siteRun').addEventListener('click', async () => {
                                       region: siteRoiState})};
   try{
     const j = await api('/site_brief', opts);
+    lastSiteOB = j.open_buildings || null;
     if(!j.air || !j.periods || !j.noise)
       throw new Error('older backend version \u2014 deploy the latest main.py ' +
         '(the health endpoint should report deepseego-v11 or later)');
@@ -2926,7 +3090,6 @@ $('siteRun').addEventListener('click', async () => {
     siteChart('cWind', L, mo.map(m => m.wind_ms), '#7FD0BC');
     siteChart('cSolar', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
     siteChart('cMrt', L, mo.map(m => m.mrt_c), '#F15BB5');
-    loadBuildings(siteState.lat, siteState.lon, +$('siteRadius').value);
   }catch(e){ toast('Site brief: ' + e.message, 9000); }
   btn.disabled = false; btn.textContent = 'Generate site brief';
 });
@@ -2935,5 +3098,15 @@ $('siteRun').addEventListener('click', async () => {
 $('panelToggle').addEventListener('click', () => $('panel').classList.toggle('open'));
 map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove('open'); });
 </script>
+  <div id="modal3d" hidden>
+    <div id="modal3dBar">
+      <span id="modal3dTitle">3D building massing</span>
+      <span id="modal3dInfo" class="per"></span>
+      <button id="modal3dClose">Close</button>
+    </div>
+    <div id="modal3dCanvasWrap"></div>
+    <div id="modal3dLegend"></div>
+    <div id="modal3dHint" class="per">Drag to rotate · scroll to zoom · heights are Sentinel-2 estimates (~4 m), not survey-grade</div>
+  </div>
 </body>
 </html>
