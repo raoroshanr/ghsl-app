@@ -320,11 +320,12 @@ label.chk input{width:auto}
     <div class="sbTabs" id="basketBar">
       <button class="active" data-basket="sat">Satellite</button>
       <button data-basket="urban">Urban Planning</button>
-      <button data-basket="climate">Climate</button>
+      <button data-basket="climate">Atmosphere</button>
     </div>
     <div class="subTabs" id="subBar">
       <button class="active" data-tab="explore">Explore</button>
       <button data-tab="adv">Advanced Analysis</button>
+      <button data-tab="weather">Weather</button>
       <button data-tab="aq">Air Quality</button>
       <button data-tab="thermal">Thermal</button>
       <button data-tab="sunlight">Sunlight</button>
@@ -548,6 +549,18 @@ label.chk input{width:auto}
       </div>
     </div><!-- /tab-bhuvan -->
 
+    <div id="tab-weather" hidden>
+    <section>
+      <h2>Live weather</h2>
+      <p class="hint">Current conditions at a point from Open-Meteo (keyless, multi-model, assimilating the nearest station observations). Pick a location or search.</p>
+      <label class="fld" for="weSearch">Search a location</label>
+      <input type="text" id="weSearch" placeholder="Type a place & press Enter">
+      <button id="wePick" style="width:100%;margin-top:6px">Pick point on map</button>
+      <div id="weStatus" class="hint" style="min-height:20px">No point selected.</div>
+      <button id="weRun" class="primary" style="margin-top:8px" disabled>Get live weather</button>
+    </section>
+    </div><!-- /tab-weather -->
+
     <div id="tab-aq" hidden>
     <section>
       <h2>Live Air Quality</h2>
@@ -636,7 +649,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v43</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v44</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -648,7 +661,8 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v43";
+const DSG_VERSION = "deepseego-v44";
+let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
 const $ = id => document.getElementById(id);
@@ -1020,7 +1034,7 @@ function drawingActive(){
          mapClickMode === 'advRect1' || mapClickMode === 'advRect2' ||
          mapClickMode === 'advCircle' || mapClickMode === 'sitePick' ||
          mapClickMode === 'routeA' || mapClickMode === 'routeB' ||
-         mapClickMode === 'aqPick' || mapClickMode === 'thPick' ||
+         mapClickMode === 'aqPick' || mapClickMode === 'thPick' || mapClickMode === 'wePick' ||
          mapClickMode === 'suPick' || mapClickMode === 'noPick' || mapClickMode === 'siteRoiR1' ||
          mapClickMode === 'siteRoiR2' || mapClickMode === 'siteRoiC' ||
          !!(mapClickMode && mapClickMode.circleRow);
@@ -1059,6 +1073,7 @@ map.on('click', ev => {
       `Rectangle  N ${b.getNorth().toFixed(4)}  S ${b.getSouth().toFixed(4)}  W ${b.getWest().toFixed(4)}  E ${b.getEast().toFixed(4)}`);
     return;
   }
+  if(mapClickMode === 'wePick'){ mapClickMode = null; _weatherTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'thPick'){ mapClickMode = null; _thermalTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'suPick'){ mapClickMode = null; _sunlightTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'noPick'){ mapClickMode = null; _noiseTab.setPoint(lat, lng); return; }
@@ -1516,15 +1531,16 @@ $('strip').addEventListener('click', async ev => {
 const BASKETS = {
   sat: {sub: ['explore', 'adv'], default: 'explore'},
   urban: {sub: ['site'], default: 'site'},
-  climate: {sub: ['aq', 'thermal', 'sunlight', 'noise'], default: 'aq'},
+  climate: {sub: ['weather', 'aq', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'aq', 'thermal', 'sunlight', 'noise'];
+const ALL_TABS = ['explore', 'adv', 'site', 'weather', 'aq', 'thermal', 'sunlight', 'noise'];
 function showTab(tab){
   ALL_TABS.forEach(t => { const el = $('tab-' + t); if(el) el.hidden = t !== tab; });
   document.querySelectorAll('#subBar button').forEach(x =>
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
-  if(tab === 'aq') aqInit();
+  if(tab === 'aq'){ clearAllClimatePoints(); aqInit(); }
+  if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight') sunlightInit();
   if(tab === 'noise') noiseInit();
@@ -2014,6 +2030,17 @@ $('bhuvanOpacity').addEventListener('input', () => {
 
 /* ---------- Climate point tabs (Thermal / Sunlight / Noise) ---------- */
 const climatePointMarkers = L.featureGroup().addTo(map);
+function clearAllClimatePoints(){
+  // remove any point picked in another Atmosphere tab so only the active
+  // tab's selection shows
+  climatePointMarkers.clearLayers();
+  if(typeof aqLayer !== 'undefined') aqLayer.clearLayers();
+  [_thermalTab, _sunlightTab, _noiseTab, _weatherTab].forEach(t => {
+    if(t){ t.state.lat = null; t.state.lon = null;
+      const b = $(t.prefix + 'Run'); if(b) b.disabled = true;
+      const s = $(t.prefix + 'Status'); if(s) s.textContent = 'No point selected.'; }
+  });
+}
 function climatePointTab(prefix, mode){
   // prefix: 'th' | 'su' | 'no' ; mode: 'thermal' | 'sunlight' | 'noise'
   const st = {lat: null, lon: null, inited: false};
@@ -2061,7 +2088,8 @@ function climatePointTab(prefix, mode){
     try{
       const j = await api('/site_brief', {method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({lat: st.lat, lon: st.lon, radius_m: 500})});
+        body: JSON.stringify({lat: st.lat, lon: st.lon, radius_m: 500,
+          skip_osm: (mode !== 'noise')})});
       const mo = j.monthly, L = mo.map(m => m.month), P = j.periods;
       if(mode === 'thermal'){
         const chips = [];
@@ -2081,6 +2109,23 @@ function climatePointTab(prefix, mode){
             <p class="srcNote">MRT estimated from ERA5 solar + thermal fluxes for an unshaded standing person; indicative only.</p></div>`;
         siteChart('cSu1', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
         siteChart('cSu2', L, mo.map(m => m.mrt_c), '#F15BB5');
+      } else if(mode === 'weather'){
+        const w = await (await fetch(BACKEND_URL + '/weather_live', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({lat: st.lat, lon: st.lon})})).json();
+        if(w.error){ $('siteWrap').innerHTML = `<p class="srcNote" style="color:#E4572E">${w.error}</p>`; }
+        else {
+          const rows = w.fields.filter(f => f[1] != null)
+            .map(f => `<tr><td>${f[0]}</td><td style="text-align:right">${f[1]} ${f[2]}</td></tr>`).join('');
+          $('siteWrap').innerHTML =
+            `<div class="siteSec"><div class="paneLabel">Current weather <span class="per">\u00b7 ${w.source}</span></div>` +
+            `<div class="chips"><span class="chip2"><b>${w.condition}</b></span>` +
+            (w.time ? `<span class="chip2">${String(w.time).replace('T',' ')}</span>` : '') +
+            (w.elevation_m != null ? `<span class="chip2">${Math.round(w.elevation_m)} m</span>` : '') + `</div>` +
+            `<table class="aqTable" style="margin-top:8px">${rows}</table>` +
+            `<p class="srcNote">Model current conditions, updated hourly, assimilating the nearest weather-station observations. For a coastal point with no local station this is the best available live estimate.</p></div>`;
+        }
+        return;
       } else if(mode === 'noise'){
         const N = j.noise || {};
         function nRow(label, m, band, note){
@@ -2103,11 +2148,13 @@ function climatePointTab(prefix, mode){
   return {init, setPoint, state: st, prefix};
 }
 const _thermalTab = climatePointTab('th', 'thermal');
+const _weatherTab = climatePointTab('we', 'weather');
 const _sunlightTab = climatePointTab('su', 'sunlight');
 const _noiseTab = climatePointTab('no', 'noise');
-function thermalInit(){ _thermalTab.init(); }
-function sunlightInit(){ _sunlightTab.init(); }
-function noiseInit(){ _noiseTab.init(); }
+function thermalInit(){ clearAllClimatePoints(); _thermalTab.init(); }
+function weatherInit(){ clearAllClimatePoints(); _weatherTab.init(); }
+function sunlightInit(){ clearAllClimatePoints(); _sunlightTab.init(); }
+function noiseInit(){ clearAllClimatePoints(); _noiseTab.init(); }
 
 /* ---------- Live Air Quality (multi-provider) ---------- */
 const AQ_PROVIDERS = [
@@ -2401,7 +2448,6 @@ $('customWmsAdd').addEventListener('click', () => {
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
 const siteLayer = L.featureGroup().addTo(map);
 const siteState = {lat: null, lon: null};
-let siteCharts = [];
 
 function drawSite(){
   siteLayer.clearLayers();
