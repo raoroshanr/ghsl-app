@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v46"
+APP_VERSION = "deepseego-v47"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2403,7 +2403,7 @@ def _overpass(query, per_timeout=15, budget=55):
     return None
 
 
-def _overpass_sources(lat, lon, radius=2000):
+def _overpass_sources(lat, lon, radius=500):
     """Fetch pollutant-source features around the point from OSM."""
     q = f"""[out:json][timeout:12];
 (way["landuse"="industrial"](around:{radius},{lat},{lon});
@@ -2416,8 +2416,8 @@ def _overpass_sources(lat, lon, radius=2000):
  relation["power"="plant"](around:{radius},{lat},{lon});
  way["landuse"="quarry"](around:{radius},{lat},{lon});
  way["landuse"="construction"](around:{radius},{lat},{lon});
- way["highway"~"motorway|trunk|primary|secondary"](around:{radius},{lat},{lon}););
-out geom tags 200;"""
+ way["highway"](around:{radius},{lat},{lon}););
+out geom tags 400;"""
     return _overpass(q)
 
 
@@ -2434,7 +2434,9 @@ def _classify_source(tags):
     hw = tags.get("highway")
     if hw:
         w = {"motorway": 1.4, "trunk": 1.2, "primary": 1.0,
-             "secondary": 0.7}.get(hw, 0.6)
+             "secondary": 0.7, "tertiary": 0.5, "residential": 0.35,
+             "unclassified": 0.35, "living_street": 0.25,
+             "service": 0.2}.get(hw, 0.3)
         return "traffic", w
     return None, 0.0
 
@@ -2563,6 +2565,98 @@ def source_apportion(q: ApportionQuery):
                    "measured source apportionment (which requires particle "
                    "composition / receptor modelling)."),
     }
+
+
+class BuildingsQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: int = 500
+
+
+# map raw OSM building/amenity tags to friendly categories + colors
+_BLD_CATS = [
+    ("residential", "Residential", "#4C9F70",
+     {"residential", "house", "apartments", "detached", "terrace",
+      "semidetached_house", "bungalow", "dormitory", "hut", "cabin"}),
+    ("commercial", "Commercial / retail", "#E4572E",
+     {"commercial", "retail", "shop", "supermarket", "kiosk", "office"}),
+    ("industrial", "Industrial", "#9B5DE5",
+     {"industrial", "warehouse", "factory", "manufacture"}),
+    ("institutional", "Institutional / public", "#00B4D8",
+     {"school", "college", "university", "hospital", "clinic", "government",
+      "civic", "public", "kindergarten", "fire_station", "police"}),
+    ("religious", "Religious", "#E9C46A",
+     {"church", "mosque", "temple", "cathedral", "chapel", "shrine",
+      "religious", "monastery"}),
+    ("agricultural", "Agricultural", "#B5651D",
+     {"farm", "farm_auxiliary", "barn", "cowshed", "greenhouse", "stable",
+      "sty", "storage_tank", "silo"}),
+    ("transport", "Transport", "#8D99AE",
+     {"train_station", "transportation", "hangar", "parking", "garage",
+      "garages"}),
+]
+
+
+def _classify_building(t):
+    b = (t.get("building") or "").lower()
+    amenity = (t.get("amenity") or "").lower()
+    shop = t.get("shop")
+    for key, label, color, tagset in _BLD_CATS:
+        if b in tagset:
+            return key, label, color
+    # fall back on amenity/shop hints when building=yes
+    if shop:
+        return "commercial", "Commercial / retail", "#E4572E"
+    if amenity in ("school", "college", "university", "hospital", "clinic",
+                   "place_of_worship", "townhall", "library"):
+        if amenity == "place_of_worship":
+            return "religious", "Religious", "#E9C46A"
+        return "institutional", "Institutional / public", "#00B4D8"
+    if b in ("yes", "", None):
+        return "other", "Other / unspecified", "#94A3B8"
+    return "other", "Other / unspecified", "#94A3B8"
+
+
+@app.post("/buildings")
+def buildings(q: BuildingsQuery):
+    """Extract and categorise all mapped buildings within the radius from OSM,
+    with per-building points for a color-coded map layer."""
+    r = max(100, min(1500, int(q.radius_m or 500)))
+    qy = f"""[out:json][timeout:15];
+(way["building"](around:{r},{q.lat},{q.lon});
+ relation["building"](around:{r},{q.lat},{q.lon}););
+out center tags 800;"""
+    js = _overpass(qy)
+    if js is None:
+        return {"osm_ok": False, "buildings": [], "categories": [],
+                "note": "OpenStreetMap (Overpass) is busy; try again shortly."}
+    cats = {}
+    pts = []
+    for el in js.get("elements", []):
+        c = el.get("center") or ({"lat": el.get("lat"), "lon": el.get("lon")}
+                                 if el.get("lat") is not None else None)
+        if not c or c.get("lat") is None:
+            continue
+        t = el.get("tags", {})
+        key, label, color = _classify_building(t)
+        cats.setdefault(key, {"label": label, "color": color, "count": 0})
+        cats[key]["count"] += 1
+        if len(pts) < 1500:
+            pts.append({"lat": round(c["lat"], 6), "lon": round(c["lon"], 6),
+                        "cat": key, "color": color,
+                        "name": t.get("name") or "",
+                        "type": t.get("building") or t.get("amenity") or ""})
+    total = sum(v["count"] for v in cats.values())
+    categories = sorted(
+        [{"key": k, "label": v["label"], "color": v["color"],
+          "count": v["count"],
+          "pct": round(100.0 * v["count"] / total, 1) if total else 0}
+         for k, v in cats.items()], key=lambda x: -x["count"])
+    return {"osm_ok": True, "lat": q.lat, "lon": q.lon, "radius_m": r,
+            "total": total, "categories": categories, "buildings": pts,
+            "note": "Building functions from OpenStreetMap tags "
+                    "(building=*, amenity=*, shop=*). Coverage depends on "
+                    "local mapping completeness."}
 
 
 class NoiseQuery(BaseModel):
