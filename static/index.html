@@ -140,6 +140,18 @@ button.ghost.active{border-color:var(--deep);color:var(--deep);font-weight:700}
 }
 @media (prefers-reduced-motion:reduce){#drawer{transition:none}}
 #drawer.open{transform:translateX(0)}
+#drawerHandle{
+  position:absolute;left:-26px;top:50%;transform:translateY(-50%);
+  width:26px;height:64px;border:2px solid var(--signal);border-right:none;
+  border-radius:8px 0 0 8px;background:#101B16;color:var(--signal);
+  cursor:pointer;font-size:16px;font-weight:700;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:-2px 0 6px rgba(0,0,0,.35);z-index:1101;
+}
+#drawerHandle:hover{background:#16241d}
+/* when collapsed, the drawer slides fully right; the handle (left:-26px)
+   stays visible at the screen edge so it can be pulled back open */
+#drawer.open.collapsed{transform:translateX(100%)}
 #drawerHead{
   display:flex;align-items:center;gap:12px;padding:8px 14px;
   border-bottom:1px solid #2A3A33;
@@ -661,6 +673,8 @@ label.chk input{width:auto}
   <div id="cursorTip" aria-hidden="true"></div>
 
   <div id="drawer" aria-label="Analysis results">
+    <button id="drawerHandle" aria-label="Collapse or expand analysis panel"
+            title="Collapse panel">&raquo;</button>
     <div id="drawerHead">
       <div id="drawerTitle">Analysis <span class="mono" id="drawerSub"></span></div>
       <button id="csvBtn" class="ghost" hidden>&#10515; CSV</button>
@@ -685,7 +699,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v63</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v64</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -697,7 +711,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v63";
+const DSG_VERSION = "deepseego-v64";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1245,6 +1259,24 @@ map.on('click', ev => {
 /* ---------- analysis: chart + filmstrip ---------- */
 let chart = null;
 
+// analysis drawer collapse/expand handle
+function setDrawerCollapsed(on){
+  const d = $('drawer'); if(!d) return;
+  d.classList.toggle('collapsed', on);
+  const h = $('drawerHandle');
+  if(h){ h.innerHTML = on ? '\u00ab' : '\u00bb';   // << pull open, >> push back
+         h.title = on ? 'Expand panel' : 'Collapse panel'; }
+}
+// a helper analyses use to open the drawer fully expanded
+window.openDrawerExpanded = function(){
+  const d = $('drawer'); if(!d) return;
+  d.classList.add('open');
+  if(d.classList.contains('collapsed')) setDrawerCollapsed(false);
+};
+if($('drawerHandle')) $('drawerHandle').addEventListener('click', () => {
+  const d = $('drawer');
+  setDrawerCollapsed(!d.classList.contains('collapsed'));
+});
 $('drawerClose').addEventListener('click', () => $('drawer').classList.remove('open'));
 
 /* If the primary CDN failed to load Chart.js, pull it from jsDelivr instead. */
@@ -3059,6 +3091,9 @@ $('siteRadius').addEventListener('change', () => {
 });
 
 function paneMode(mode){
+  // a fresh analysis should show fully expanded, even if the user left the
+  // panel collapsed from a previous run
+  if(typeof setDrawerCollapsed === 'function') setDrawerCollapsed(false);
   const site = mode === 'site';
   $('siteWrap').hidden = !site;
   $('chartWrap').hidden = site;
