@@ -497,10 +497,7 @@ label.chk input{width:auto}
         <button id="advZonesConfirm" class="primary" style="margin-top:6px" hidden>&#10003; Confirm zones</button>
 
         <div id="ptZonePanel" hidden>
-          <p class="hint">Point mode: each point is automatically its own zone, named after the point. Review below, then confirm.</p>
-          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:6px 0">
-            <input type="checkbox" id="ptDissolve"> Dissolve all points into one combined zone
-          </label>
+          <p class="hint">Point mode: each point is its own zone (named after the point). Where buffers overlap, those points are merged into one zone with an underscore-joined name. Review below, then confirm.</p>
           <div id="ptZoneList" class="advList" style="max-height:220px;overflow:auto"></div>
           <button id="ptZonesConfirm" class="primary" style="margin-top:8px;width:100%">&#10003; Confirm zones &amp; analyse</button>
         </div>
@@ -685,7 +682,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v60</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v61</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -697,7 +694,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v60";
+const DSG_VERSION = "deepseego-v61";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1589,8 +1586,8 @@ $('strip').addEventListener('click', async ev => {
 
 /* ---------- Advanced Analysis: guided zone wizard ---------- */
 const BASKETS = {
-  sat: {sub: ['explore', 'adv'], default: 'explore'},
-  urban: {sub: ['site'], default: 'site'},
+  sat: {sub: ['explore'], default: 'explore'},
+  urban: {sub: ['site', 'adv'], default: 'site'},
   climate: {sub: ['weather', 'aq', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
 const ALL_TABS = ['explore', 'adv', 'site', 'weather', 'aq', 'thermal', 'sunlight', 'noise'];
@@ -1745,8 +1742,8 @@ if($('advCsvFile')) $('advCsvFile').addEventListener('change', async (ev) => {
     csvPointLayer.clearLayers();
     let b = null;
     pts.forEach(p => {
-      const mk = L.circleMarker([p.lat, p.lon], {radius: 5, color: '#fff',
-        weight: 1, fillColor: '#E4572E', fillOpacity: 0.9})
+      const mk = L.circleMarker([p.lat, p.lon], {radius: 5, color: '#222',
+        weight: 1, fillColor: '#FFE01B', fillOpacity: 0.95})
         .addTo(csvPointLayer).bindPopup(`<b>${p.label}</b><br>${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`);
       b = b ? b.extend(mk.getLatLng()) : L.latLngBounds(mk.getLatLng(), mk.getLatLng());
     });
@@ -1775,7 +1772,7 @@ $('advBufferApply').addEventListener('click', async () => {
           const lyr = L.geoJSON(f.geometry, {
             style: {color: '#0B5A49', weight: 3},
             pointToLayer: (pt, ll) => L.circleMarker(ll, {radius: 5,
-              color: '#fff', weight: 1, fillColor: '#0B5A49', fillOpacity: 0.9})
+              color: '#222', weight: 1, fillColor: '#FFE01B', fillOpacity: 0.95})
           }).addTo(advLineLayer);
           // gather latlngs robustly (works for points, lines, polygons)
           lyr.eachLayer(sub => {
@@ -1815,7 +1812,7 @@ $('advBufferApply').addEventListener('click', async () => {
         body: JSON.stringify({region: {type: 'advanced',
           shapes: wiz.lines.map(nm => ({name: nm})), buffer_km: buf}})});
       advBufLayer.clearLayers();
-      const bl = L.geoJSON(bp.geometry, {style: {color: '#0B5A49', weight: 2,
+      const bl = L.geoJSON(bp.geometry, {style: {color: '#FFE01B', weight: 2,
                            dashArray: '4 4', fillOpacity: 0.05}}).addTo(advBufLayer);
       map.fitBounds(bl.getBounds().pad(0.1));
     }catch(bpErr){ toast('Buffer preview: ' + bpErr.message, 6000); }
@@ -1959,6 +1956,7 @@ $('advFragment').addEventListener('click', async () => {
     // ---- POINT MODE: each point is its own named zone ----
     if(j.point_mode){
       wiz.pointMode = true;
+      wiz.ptCount = j.n_points || j.fragments.length;
       // hide the manual zone controls, show the point preview panel
       ['zoneHead','advAdd','advRemove','advZoneConfirm','advZoneNew',
        'advZonesPreview','advZonesReset','advZonesConfirm'].forEach(id => {
@@ -2022,30 +2020,25 @@ $('advFragment').addEventListener('click', async () => {
 });
 
 function renderPtZones(){
-  const dissolve = $('ptDissolve').checked;
   const box = $('ptZoneList');
-  if(dissolve){
-    const combo = wiz.fragments.map(f => f.name).join('_');
-    box.innerHTML = `<div style="padding:6px"><b>1 combined zone</b><br>` +
-      `<span class="per">(${combo})</span></div>`;
-  } else {
-    box.innerHTML = wiz.fragments.map((f,k) =>
+  const pal = ['#E4572E','#0B5A49','#00B4D8','#9B5DE5','#F15BB5',
+               '#E9C46A','#4C9F70','#2A9D8F','#B5651D','#8D99AE'];
+  const merged = wiz.fragments.filter(f => f.merged).length;
+  box.innerHTML =
+    `<p class="per" style="margin:0 0 6px">${wiz.fragments.length} zone(s) from ` +
+    `${wiz.ptCount || wiz.fragments.length} point(s)` +
+    (merged ? ` \u2014 ${merged} formed by overlapping buffers (combined names)` : '') + `</p>` +
+    wiz.fragments.map((f,k) =>
       `<div style="padding:4px 6px;display:flex;gap:8px;align-items:center">` +
-      `<i style="width:11px;height:11px;border-radius:3px;background:${['#E4572E','#0B5A49','#00B4D8','#9B5DE5','#F15BB5','#E9C46A','#4C9F70','#2A9D8F','#B5651D','#8D99AE'][k%10]}"></i>` +
-      `Zone ${k+1} <span class="per">(${f.name})</span></div>`).join('');
-  }
+      `<i style="width:11px;height:11px;border-radius:3px;flex:0 0 auto;background:${pal[k%10]}"></i>` +
+      `<span>Zone ${k+1} <span class="per">(${f.name})</span>` +
+      (f.merged ? ` <span class="per" style="color:#E9C46A">\u00b7 ${f.n_points} merged</span>` : '') +
+      `</span></div>`).join('');
 }
-if($('ptDissolve')) $('ptDissolve').addEventListener('change', renderPtZones);
 if($('ptZonesConfirm')) $('ptZonesConfirm').addEventListener('click', () => buildPtZones());
 function buildPtZones(){
-  const dissolve = $('ptDissolve').checked;
-  let zones;
-  if(dissolve){
-    const combo = wiz.fragments.map(f => f.name).join('_');
-    zones = [{label: combo, fragIds: wiz.fragments.map(f => f.id)}];
-  } else {
-    zones = wiz.fragments.map(f => ({label: f.name, fragIds: [f.id]}));
-  }
+  // each fragment is already a zone (overlaps merged in the backend)
+  const zones = wiz.fragments.map(f => ({label: f.name, fragIds: [f.id]}));
   runZoneAnalysis(zones);
 }
 $('advAdd').addEventListener('click', () => { wiz.mode = 'add';
