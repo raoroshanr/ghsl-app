@@ -208,6 +208,8 @@ footer b{color:#fff}
 .pieBox{position:relative;height:200px;width:100%;margin:4px 0 14px}
 .chartBox canvas{position:absolute;inset:0}
 .pieBox canvas{position:absolute!important;inset:0;width:100%!important;height:100%!important}
+.zoneTip{background:rgba(16,27,22,.82);color:#fff;border:none;font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600}
+.zoneTip:before{display:none}
 .searchGoRow{display:flex;gap:6px;margin-bottom:2px}
 .searchGoRow input{flex:1;min-width:0}
 .searchGoRow button{flex:0 0 auto;padding:0 14px;white-space:nowrap}
@@ -493,6 +495,15 @@ label.chk input{width:auto}
           <button id="advZonesReset" class="ghost" style="flex:1">Reset</button>
         </div>
         <button id="advZonesConfirm" class="primary" style="margin-top:6px" hidden>&#10003; Confirm zones</button>
+
+        <div id="ptZonePanel" hidden>
+          <p class="hint">Point mode: each point is automatically its own zone, named after the point. Review below, then confirm.</p>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:6px 0">
+            <input type="checkbox" id="ptDissolve"> Dissolve all points into one combined zone
+          </label>
+          <div id="ptZoneList" class="advList" style="max-height:220px;overflow:auto"></div>
+          <button id="ptZonesConfirm" class="primary" style="margin-top:8px;width:100%">&#10003; Confirm zones &amp; analyse</button>
+        </div>
       </div>
     </section>
 
@@ -674,7 +685,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v59</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v60</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -686,7 +697,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v59";
+const DSG_VERSION = "deepseego-v60";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1886,6 +1897,13 @@ function resetFragments(){
   fragLayerG.clearLayers();
   wiz.fragments = null; wiz.fragLayers = null; wiz.assign = null;
   wiz.zones = null; wiz.current = 0; wiz.mode = 'add'; wiz.zoneRuns = null;
+  wiz.pointMode = false;
+  // restore manual-zone controls that point mode hides
+  ['zoneHead','advAdd','advRemove','advZoneConfirm','advZoneNew',
+   'advZonesPreview','advZonesReset'].forEach(id => {
+    const el = $(id); if(el) el.style.display = '';
+  });
+  if($('ptZonePanel')) $('ptZonePanel').hidden = true;
   const zc = $('advZonesConfirm');
   if(zc){
     zc.hidden = true;
@@ -1937,6 +1955,37 @@ $('advFragment').addEventListener('click', async () => {
     resetFragments();
     wiz.fragments = j.fragments; wiz.assign = {}; wiz.fragLayers = {};
     wiz.zones = [{confirmed: false}]; wiz.current = 0; wiz.mode = 'add';
+
+    // ---- POINT MODE: each point is its own named zone ----
+    if(j.point_mode){
+      wiz.pointMode = true;
+      // hide the manual zone controls, show the point preview panel
+      ['zoneHead','advAdd','advRemove','advZoneConfirm','advZoneNew',
+       'advZonesPreview','advZonesReset','advZonesConfirm'].forEach(id => {
+        const el = $(id); if(el) el.style.display = 'none';
+      });
+      $('advZonesConfirm').hidden = true;
+      $('ptZonePanel').hidden = false;
+      const palette = ['#E4572E','#0B5A49','#00B4D8','#9B5DE5','#F15BB5',
+        '#E9C46A','#4C9F70','#2A9D8F','#B5651D','#8D99AE'];
+      j.fragments.forEach((f, k) => {
+        const col = palette[k % palette.length];
+        const lyr = L.geoJSON(f.geometry, {style: {color: col, weight: 2,
+          fillColor: col, fillOpacity: 0.25}}).addTo(fragLayerG);
+        lyr.bindTooltip(f.name, {permanent: true, direction: 'center',
+          className: 'zoneTip'});
+        wiz.fragLayers[f.id] = lyr;
+      });
+      map.fitBounds(fragLayerG.getBounds().pad(0.15));
+      unlock(6);
+      renderPtZones();
+      toast(j.fragments.length + ' points \u2014 each is a named zone. Review & confirm.');
+      btn.disabled = false; btn.textContent = 'Create fragments';
+      return;
+    }
+    wiz.pointMode = false;
+    $('ptZonePanel').hidden = true;
+
     j.fragments.forEach(f => {
       const lyr = L.geoJSON(f.geometry, {style: FRAG_STYLE}).addTo(fragLayerG);
       lyr.bindTooltip('#' + (f.id + 1) + ' \u00b7 ' + f.area_km2 + ' km\u00b2',
@@ -1972,6 +2021,33 @@ $('advFragment').addEventListener('click', async () => {
   btn.disabled = false; btn.textContent = 'Create fragments';
 });
 
+function renderPtZones(){
+  const dissolve = $('ptDissolve').checked;
+  const box = $('ptZoneList');
+  if(dissolve){
+    const combo = wiz.fragments.map(f => f.name).join('_');
+    box.innerHTML = `<div style="padding:6px"><b>1 combined zone</b><br>` +
+      `<span class="per">(${combo})</span></div>`;
+  } else {
+    box.innerHTML = wiz.fragments.map((f,k) =>
+      `<div style="padding:4px 6px;display:flex;gap:8px;align-items:center">` +
+      `<i style="width:11px;height:11px;border-radius:3px;background:${['#E4572E','#0B5A49','#00B4D8','#9B5DE5','#F15BB5','#E9C46A','#4C9F70','#2A9D8F','#B5651D','#8D99AE'][k%10]}"></i>` +
+      `Zone ${k+1} <span class="per">(${f.name})</span></div>`).join('');
+  }
+}
+if($('ptDissolve')) $('ptDissolve').addEventListener('change', renderPtZones);
+if($('ptZonesConfirm')) $('ptZonesConfirm').addEventListener('click', () => buildPtZones());
+function buildPtZones(){
+  const dissolve = $('ptDissolve').checked;
+  let zones;
+  if(dissolve){
+    const combo = wiz.fragments.map(f => f.name).join('_');
+    zones = [{label: combo, fragIds: wiz.fragments.map(f => f.id)}];
+  } else {
+    zones = wiz.fragments.map(f => ({label: f.name, fragIds: [f.id]}));
+  }
+  runZoneAnalysis(zones);
+}
 $('advAdd').addEventListener('click', () => { wiz.mode = 'add';
   $('advAdd').classList.add('active'); $('advRemove').classList.remove('active'); });
 $('advRemove').addEventListener('click', () => { wiz.mode = 'remove';
@@ -2051,6 +2127,40 @@ $('advZonesConfirm').addEventListener('click', () => {
         '\u201d in the analysis pane.');
 });
 
+function runZoneAnalysis(zones){
+  // zones: [{label, fragIds:[...]}]
+  const zoneRuns = zones.map((z, i) => {
+    const coords = [];
+    z.fragIds.forEach(fid => {
+      const f = wiz.fragments.find(x => x.id === fid);
+      if(f) coords.push(f.geometry.coordinates);
+    });
+    return {label: z.label, color: ZONE_COLORS[i % 8],
+            spec: {type: 'geojson',
+                   geometry: {type: 'MultiPolygon', coordinates: coords}}};
+  }).filter(z => z.spec.geometry.coordinates.length);
+  if(!zoneRuns.length) return toast('No zones to analyse');
+  wiz.zoneRuns = zoneRuns;
+  // recolor fragments to their zone color
+  zones.forEach((z, i) => z.fragIds.forEach(fid => {
+    if(wiz.fragLayers[fid]) wiz.fragLayers[fid].setStyle(
+      {color: ZONE_COLORS[i % 8], fillColor: ZONE_COLORS[i % 8], fillOpacity: 0.25});
+  }));
+  const allCoords = wiz.fragments.map(f => f.geometry.coordinates);
+  setRegion({type: 'geojson',
+             geometry: {type: 'MultiPolygon', coordinates: allCoords}},
+            'Point zones \u00b7 ' + zoneRuns.length + ' zone' +
+            (zoneRuns.length > 1 ? 's' : ''), false);
+  populateAdvSelectors();
+  updateCalcYearLabel();
+  $('advCalcSec').hidden = false;
+  $('advCalcSec').scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  $('drawerActions').hidden = false;
+  $('zwyBtn').disabled = true;
+  $('drawer').classList.add('open');
+  toast('Zones confirmed \u2014 run \u201c' + $('advCalcOne').textContent +
+        '\u201d in the analysis pane.');
+}
 async function runAdvanced(allYears, tableOnly){
   if(!wiz.zoneRuns || !wiz.zoneRuns.length)
     return toast('Confirm the zones first');
