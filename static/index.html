@@ -674,7 +674,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v56</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v57</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -686,7 +686,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v56";
+const DSG_VERSION = "deepseego-v57";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1755,7 +1755,8 @@ $('advBufferApply').addEventListener('click', async () => {
   relockFrom(3);                       // reset downstream BEFORE rebuilding
   try{
     advLineLayer.clearLayers();
-    let bounds = null;
+    const allPts = [];                  // collect every vertex/point latlng
+    let loadedAny = false;
     for(const name of wiz.lines){
       try{
         const j = await api('/shapes/geometry?name=' + encodeURIComponent(name));
@@ -1765,14 +1766,30 @@ $('advBufferApply').addEventListener('click', async () => {
             pointToLayer: (pt, ll) => L.circleMarker(ll, {radius: 5,
               color: '#fff', weight: 1, fillColor: '#0B5A49', fillOpacity: 0.9})
           }).addTo(advLineLayer);
-          bounds = bounds ? bounds.extend(lyr.getBounds()) : lyr.getBounds();
+          // gather latlngs robustly (works for points, lines, polygons)
+          lyr.eachLayer(sub => {
+            if(sub.getLatLng) allPts.push(sub.getLatLng());
+            else if(sub.getLatLngs){
+              const flat = L.LineUtil ? [] : [];
+              (function walk(a){ a.forEach(x => Array.isArray(x) ? walk(x) : allPts.push(x)); })(sub.getLatLngs());
+            }
+          });
+          loadedAny = true;
         });
         if(j.note) toast(j.note, 6000);
       }catch(lineErr){
         toast('\u201c' + name + '\u201d could not load: ' + lineErr.message, 8000);
       }
     }
-    if(!bounds) throw new Error('none of the selected line layers loaded');
+    if(!loadedAny || !allPts.length) throw new Error('none of the selected layers loaded');
+    let bounds = L.latLngBounds(allPts);
+    // a single point has zero extent - pad it so downstream reach is valid
+    if(usePts && allPts.length){
+      const pad = buf / 110.6;          // radius in degrees, roughly
+      bounds = L.latLngBounds(
+        [bounds.getSouth() - pad, bounds.getWest() - pad],
+        [bounds.getNorth() + pad, bounds.getEast() + pad]);
+    }
     wiz.buffer = buf;
     const dLat = buf / 110.6;
     const dLon = buf / (111.3 * Math.cos(bounds.getCenter().lat * Math.PI / 180));
