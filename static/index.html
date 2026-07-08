@@ -205,13 +205,15 @@ footer b{color:#fff}
 }
 .chip2 b{font-size:13px}
 .chartBox{position:relative;height:150px}
-.pieBox{position:relative;height:180px}
+.pieBox{position:relative;height:200px;width:100%;margin:4px 0 14px}
 .chartBox canvas{position:absolute;inset:0}
-.pieBox canvas{position:absolute;inset:0}
+.pieBox canvas{position:absolute!important;inset:0;width:100%!important;height:100%!important}
+.searchGoRow{display:flex;gap:6px;margin-bottom:2px}
+.searchGoRow input{flex:1;min-width:0}
+.searchGoRow button{flex:0 0 auto;padding:0 14px;white-space:nowrap}
 .xhairLbl{background:rgba(16,27,22,.85);color:#E7EDE8;border:none;font-family:var(--mono);font-size:11px;padding:2px 6px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .xhairLbl:before{display:none}
 .distLbl span{background:rgba(16,27,22,.9);color:#E7EDE8;font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:3px;white-space:nowrap}
-.pieBox{margin-bottom:10px}
 .lulcBar{display:flex;height:12px;border-radius:6px;overflow:hidden;border:1px solid #2E3E37}
 .lulcRow{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;color:#C9D3CC;padding:3px 0}
 .lulcRow i{width:10px;height:10px;border-radius:3px;flex-shrink:0}
@@ -349,7 +351,7 @@ label.chk input{width:auto}
     <section>
       <h2>Region of Interest</h2>
       <label class="fld" for="searchInput">Find a place (pans the map)</label>
-      <input id="searchInput" type="text" placeholder="Search a place… (Enter)" aria-label="Search a place" />
+      <input id="searchInput" type="text" placeholder="Search a place… (Enter/Go)" aria-label="Search a place" /><button id="searchGo" class="ghost" style="margin-left:6px;padding:0 12px">Go</button>
       <div class="modes">
         <button class="ghost active" data-mode="draw">Draw</button>
         <button class="ghost" data-mode="corners">Corners</button>
@@ -493,6 +495,11 @@ label.chk input{width:auto}
     <section>
       <h2>Site Brief</h2>
       <p class="hint">Pick a site and context radius. The brief leads with land-cover use in the region, then climate, humidity, rainfall, wind, solar and mean radiant temperature. (Air quality now lives in the Climate basket.)</p>
+      <label class="fld" for="siteSearch">Search a location</label>
+      <div class="searchGoRow">
+        <input type="text" id="siteSearch" placeholder="Type a place & press Enter">
+        <button id="siteSearchGo" class="ghost">Go</button>
+      </div>
       <button id="sitePick" style="width:100%">Pick site on map</button>
       <label class="fld" for="siteRadius">Context radius</label>
       <select id="siteRadius">
@@ -557,7 +564,7 @@ label.chk input{width:auto}
       <h2>Live weather</h2>
       <p class="hint">Current conditions at a point from Open-Meteo (keyless, multi-model, assimilating the nearest station observations). Pick a location or search.</p>
       <label class="fld" for="weSearch">Search a location</label>
-      <input type="text" id="weSearch" placeholder="Type a place & press Enter">
+      <div class="searchGoRow"><input type="text" id="weSearch" placeholder="Type a place & press Enter"><button id="weSearchGo" class="ghost">Go</button></div>
       <button id="wePick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="weStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="weRun" class="primary" style="margin-top:8px" disabled>Get live weather</button>
@@ -569,7 +576,7 @@ label.chk input{width:auto}
       <h2>Live Air Quality</h2>
       <p class="hint">Real-time air quality at a point, from multiple providers. Open-Meteo works with no key. Others activate when their API key is set as a Cloud Run environment variable &mdash; the badge shows which are ready.</p>
       <label class="fld" for="aqSearchInput">Search a location</label>
-      <input type="text" id="aqSearchInput" placeholder="Type a place & press Enter, then Pick">
+      <div class="searchGoRow"><input type="text" id="aqSearchInput" placeholder="Type a place & press Enter"><button id="aqSearchGo" class="ghost">Go</button></div>
       <button id="aqPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="aqStatus" class="hint" style="min-height:20px">No point selected.</div>
       <label class="fld">Providers</label>
@@ -591,7 +598,7 @@ label.chk input{width:auto}
       <h2>Thermal environment</h2>
       <p class="hint">Land-surface temperature and air-temperature climatology at a point. Pick a location; results show in the analysis pane.</p>
       <label class="fld" for="thSearch">Search a location</label>
-      <input type="text" id="thSearch" placeholder="Type a place & press Enter">
+      <div class="searchGoRow"><input type="text" id="thSearch" placeholder="Type a place & press Enter"><button id="thSearchGo" class="ghost">Go</button></div>
       <button id="thPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="thStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="thRun" class="primary" style="margin-top:8px" disabled>Analyse thermal</button>
@@ -603,7 +610,7 @@ label.chk input{width:auto}
       <h2>Sunlight &amp; solar</h2>
       <p class="hint">Monthly solar irradiance (kWh/m&sup2;/day) and approximate mean radiant temperature for a sun-exposed person at the point.</p>
       <label class="fld" for="suSearch">Search a location</label>
-      <input type="text" id="suSearch" placeholder="Type a place & press Enter">
+      <div class="searchGoRow"><input type="text" id="suSearch" placeholder="Type a place & press Enter"><button id="suSearchGo" class="ghost">Go</button></div>
       <button id="suPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="suStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="suRun" class="primary" style="margin-top:8px" disabled>Analyse sunlight</button>
@@ -615,7 +622,7 @@ label.chk input{width:auto}
       <h2>Noise screening</h2>
       <p class="hint">Distance-based screening from mapped noise sources (major roads, railways, industry, airports) via OpenStreetMap. This is a proximity screen, not an acoustic measurement.</p>
       <label class="fld" for="noSearch">Search a location</label>
-      <input type="text" id="noSearch" placeholder="Type a place & press Enter">
+      <div class="searchGoRow"><input type="text" id="noSearch" placeholder="Type a place & press Enter"><button id="noSearchGo" class="ghost">Go</button></div>
       <button id="noPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="noStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="noRun" class="primary" style="margin-top:8px" disabled>Screen noise sources</button>
@@ -652,7 +659,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v45</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v46</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -664,7 +671,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v45";
+const DSG_VERSION = "deepseego-v46";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -830,6 +837,12 @@ loadDatasets();
 
 /* ---------- place search (Nominatim): drops a pin at building zoom ------ */
 let searchPin = null;
+function wireGoButton(goId, inputId){
+  const g = $(goId), inp = $(inputId);
+  if(g && inp) g.addEventListener('click', () => {
+    inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+  });
+}
 $('searchInput').addEventListener('keydown', async ev => {
   if(ev.key !== 'Enter') return;
   const q = ev.target.value.trim(); if(!q) return;
@@ -847,6 +860,8 @@ $('searchInput').addEventListener('keydown', async ev => {
     else toast('Place not found');
   }catch(e){ toast('Search failed'); }
 });
+
+wireGoButton('searchGo', 'searchInput');
 
 /* ---------- region selection ---------- */
 let regionSpec = null;
@@ -2108,6 +2123,14 @@ function provenanceBlock(keys, meta){
 const osmSourceLayer = L.featureGroup().addTo(map);
 // Draw pollutant/noise sources: colored pin + dotted line to the point with
 // the distance labelled on the line. `pLat/pLon` is the analysis point.
+const ROAD_WEIGHT = {motorway: 5, trunk: 5, primary: 4, secondary: 3,
+  tertiary: 2, residential: 1.2};
+function popupHtml(s){
+  return `<b>${s.name || s.label}</b><br>${s.label}` +
+    (s.kind || s.detail ? ' \u00b7 ' + (s.kind || s.detail) : '') +
+    `<br>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(2)+' km' : s.dist_m+' m'} away` +
+    (s.osm_id ? `<br><a href="https://www.openstreetmap.org/${s.osm_type||'way'}/${s.osm_id}" target="_blank" rel="noopener">View on OSM \u2197</a>` : '');
+}
 function drawSourcesWithLines(sources, pLat, pLon, opts){
   opts = opts || {};
   osmSourceLayer.clearLayers();
@@ -2115,23 +2138,45 @@ function drawSourcesWithLines(sources, pLat, pLon, opts){
     L.circle([pLat, pLon], {radius: opts.scanM, color: '#00B4D8', weight: 1.4,
       fill: false, dashArray: '6 5'}).addTo(osmSourceLayer);
   }
-  // only line up to the nearest few per category to avoid clutter
   const perCat = {}, MAXLINE = 2;
   (sources || []).forEach(s => {
-    if(s.src_lat == null) return;
-    L.circleMarker([s.src_lat, s.src_lon], {radius: 5, color: '#fff', weight: 1,
-      fillColor: s.color || '#E4572E', fillOpacity: 0.95}).addTo(osmSourceLayer)
-      .bindPopup(`<b>${s.name || s.label}</b><br>${s.label}` +
-        (s.kind || s.detail ? ' \u00b7 ' + (s.kind || s.detail) : '') +
-        `<br>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(2)+' km' : s.dist_m+' m'} away` +
-        (s.osm_id ? `<br><a href="https://www.openstreetmap.org/${s.osm_type||'way'}/${s.osm_id}" target="_blank" rel="noopener">View on OSM \u2197</a>` : ''));
     const cat = s.cat || s.label;
+    // ---- linear features: draw the actual geometry, styled by type ----
+    if(s.geom && s.geom.length > 1){
+      if(cat === 'road' || s.road_class){
+        const w = ROAD_WEIGHT[s.road_class] || 1.5;
+        L.polyline(s.geom, {color: s.color || '#E4572E', weight: w,
+          opacity: 0.85}).addTo(osmSourceLayer).bindPopup(popupHtml(s));
+      } else if(cat === 'rail'){
+        // rail as a double line: base + dashed white overlay
+        L.polyline(s.geom, {color: s.color || '#9B5DE5', weight: 4, opacity: 0.9}).addTo(osmSourceLayer);
+        L.polyline(s.geom, {color: '#fff', weight: 1.4, opacity: 0.9,
+          dashArray: '5 6'}).addTo(osmSourceLayer).bindPopup(popupHtml(s));
+      } else if(cat === 'runway'){
+        // runway as a thick dotted line
+        L.polyline(s.geom, {color: s.color || '#00B4D8', weight: 7,
+          opacity: 0.85, dashArray: '2 10', lineCap: 'butt'})
+          .addTo(osmSourceLayer).bindPopup(popupHtml(s));
+      } else {
+        L.polyline(s.geom, {color: s.color, weight: 2, opacity: 0.8})
+          .addTo(osmSourceLayer).bindPopup(popupHtml(s));
+      }
+    } else if(s.src_lat != null){
+      // ---- area/point features: a pin ----
+      L.circleMarker([s.src_lat, s.src_lon], {radius: 5, color: '#fff', weight: 1,
+        fillColor: s.color || '#E4572E', fillOpacity: 0.95}).addTo(osmSourceLayer)
+        .bindPopup(popupHtml(s));
+    }
+    // ---- dotted distance line to the nearest point of the feature ----
+    const tLat = s.near_lat != null ? s.near_lat : s.src_lat;
+    const tLon = s.near_lon != null ? s.near_lon : s.src_lon;
+    if(tLat == null) return;
     perCat[cat] = (perCat[cat] || 0) + 1;
     if(perCat[cat] <= MAXLINE){
-      const line = L.polyline([[pLat, pLon], [s.src_lat, s.src_lon]],
-        {color: s.color || '#E4572E', weight: 1.5, dashArray: '4 4', opacity: 0.8})
+      L.polyline([[pLat, pLon], [tLat, tLon]],
+        {color: s.color || '#E4572E', weight: 1.3, dashArray: '3 5', opacity: 0.7})
         .addTo(osmSourceLayer);
-      const mid = [(pLat + s.src_lat) / 2, (pLon + s.src_lon) / 2];
+      const mid = [(pLat + tLat) / 2, (pLon + tLon) / 2];
       L.marker(mid, {icon: L.divIcon({className: 'distLbl',
         html: `<span>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(1)+'km' : s.dist_m+'m'}</span>`,
         iconSize: [40, 16], iconAnchor: [20, 8]})}).addTo(osmSourceLayer);
@@ -2159,6 +2204,9 @@ function climatePointTab(prefix, mode){
   const el = id => $(prefix + id);
   function init(){
     if(st.inited) return; st.inited = true;
+    const goBtn = $(prefix + 'SearchGo');
+    if(goBtn) goBtn.addEventListener('click', () =>
+      el('Search').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})));
     el('Search').addEventListener('keydown', async ev => {
       if(ev.key !== 'Enter') return; ev.preventDefault();
       const q = ev.target.value.trim(); if(!q) return;
@@ -2339,6 +2387,7 @@ async function aqGeocode(){
 $('aqSearchInput').addEventListener('keydown', ev => {
   if(ev.key === 'Enter'){ ev.preventDefault(); aqGeocode(); }
 });
+wireGoButton('aqSearchGo', 'aqSearchInput');
 $('aqPick').addEventListener('click', () => {
   mapClickMode = 'aqPick';
   $('aqStatus').textContent = 'Tap a location on the map\u2026';
@@ -2467,7 +2516,7 @@ $('aqApportion').addEventListener('click', async () => {
       $('siteWrap').innerHTML = `
         <div class="siteSec">
           <div class="paneLabel">Estimated relative source influence <span class="per">\u00b7 ${km} km scan</span></div>
-          <div class="pieBox">${siteCanvas('cApportionPie').replace('chartBox','x')}</div>
+          <div class="pieBox"><canvas id="cApportionPie"></canvas></div>
           <table class="aqTable" style="margin-top:8px">
             <tr><th>Source</th><th>Share</th><th>Nearest</th><th>Count</th></tr>
             ${j.contributions.map(c => `<tr>` +
@@ -2589,6 +2638,26 @@ function drawSite(){
     {radius: +$('siteRadius').value, color: '#E4572E', weight: 2,
      dashArray: '4 4', fillOpacity: 0.04}).addTo(siteLayer);
 }
+async function siteGeocode(){
+  const q = $('siteSearch').value.trim(); if(!q) return;
+  try{
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const j = await r.json();
+    if(!j.length) return toast('Place not found');
+    const lat = +j[0].lat, lon = +j[0].lon;
+    siteState.lat = lat; siteState.lon = lon;
+    if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
+    drawSite();
+    if(typeof enableSiteRun === 'function') enableSiteRun(); else $('siteRun').disabled = false;
+    map.setView([lat, lon], 15);
+    $('siteStatus').textContent = j[0].display_name.split(',').slice(0,3).join(',') +
+      ' \u00b7 ' + lat.toFixed(5) + ', ' + lon.toFixed(5);
+  }catch(e){ toast('Search failed'); }
+}
+$('siteSearch').addEventListener('keydown', ev => {
+  if(ev.key === 'Enter'){ ev.preventDefault(); siteGeocode(); }
+});
+wireGoButton('siteSearchGo', 'siteSearch');
 $('sitePick').addEventListener('click', () => {
   mapClickMode = 'sitePick';
   $('siteStatus').textContent = 'Tap the building or plot on the map\u2026';
@@ -2770,7 +2839,7 @@ $('siteRun').addEventListener('click', async () => {
       </div>
       <div class="siteSec">
         <div class="paneLabel">Land cover use in region <span class="per">\u00b7 ${P.lulc}</span></div>
-        <div class="pieBox">${siteCanvas('cLulcPie').replace('chartBox','x')}</div>
+        <div class="pieBox"><canvas id="cLulcPie"></canvas></div>
         ${j.lulc.slice(0, 6).map(x =>
           `<div class="lulcRow"><i style="background:${x.color}"></i>${x.label}<span style="margin-left:auto">${x.pct}%</span></div>`).join('')}
         <p class="srcNote">Green cover ${j.green_pct != null ? j.green_pct + '%' : '\u2014'}${
