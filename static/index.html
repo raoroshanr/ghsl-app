@@ -208,6 +208,9 @@ footer b{color:#fff}
 .pieBox{position:relative;height:180px}
 .chartBox canvas{position:absolute;inset:0}
 .pieBox canvas{position:absolute;inset:0}
+.xhairLbl{background:rgba(16,27,22,.85);color:#E7EDE8;border:none;font-family:var(--mono);font-size:11px;padding:2px 6px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.xhairLbl:before{display:none}
+.distLbl span{background:rgba(16,27,22,.9);color:#E7EDE8;font-family:var(--mono);font-size:10px;padding:1px 5px;border-radius:3px;white-space:nowrap}
 .pieBox{margin-bottom:10px}
 .lulcBar{display:flex;height:12px;border-radius:6px;overflow:hidden;border:1px solid #2E3E37}
 .lulcRow{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;color:#C9D3CC;padding:3px 0}
@@ -649,7 +652,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v44</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v45</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -661,7 +664,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v44";
+const DSG_VERSION = "deepseego-v45";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -702,8 +705,19 @@ const lightBase = L.tileLayer(
   'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   {attribution: '&copy; OpenStreetMap &copy; CARTO',
    maxZoom: 19, noWrap: true, bounds: WORLD_BOUNDS});
-L.control.layers({'Satellite (high-res)': satBase, 'Light map': lightBase},
-                 null, {position: 'topleft'}).addTo(map);
+const osmStd = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {attribution: '&copy; OpenStreetMap contributors', maxZoom: 19, noWrap: true, bounds: WORLD_BOUNDS});
+const osmCycle = L.tileLayer('https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',
+  {attribution: 'CyclOSM &copy; OpenStreetMap contributors', maxZoom: 19, noWrap: true, bounds: WORLD_BOUNDS});
+const osmTransport = L.tileLayer('https://tile.memomaps.de/tilegen/{z}/{x}/{y}.png',
+  {attribution: 'Public transport &copy; MeMoMaps &copy; OpenStreetMap contributors', maxZoom: 18, noWrap: true, bounds: WORLD_BOUNDS});
+const osmHumanitarian = L.tileLayer('https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png',
+  {attribution: 'Humanitarian OSM &copy; OpenStreetMap contributors', maxZoom: 19, noWrap: true, bounds: WORLD_BOUNDS});
+L.control.layers(
+  {'Satellite (high-res)': satBase, 'Light map': lightBase,
+   'OSM standard': osmStd, 'OSM cycle map': osmCycle,
+   'OSM transport': osmTransport, 'OSM humanitarian': osmHumanitarian},
+  null, {position: 'topleft', collapsed: true}).addTo(map);
 
 L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
 const MapMeta = L.Control.extend({
@@ -2029,11 +2043,109 @@ $('bhuvanOpacity').addEventListener('input', () => {
 });
 
 /* ---------- Climate point tabs (Thermal / Sunlight / Noise) ---------- */
+// Big crosshair marker with a lat/lon label alongside
+function crosshairIcon(color){
+  color = color || '#E4572E';
+  return L.divIcon({className: 'xhair', iconSize: [34, 34], iconAnchor: [17, 17],
+    html: `<svg width="34" height="34" viewBox="0 0 34 34">
+      <circle cx="17" cy="17" r="10" fill="none" stroke="${color}" stroke-width="2"/>
+      <line x1="17" y1="0" x2="17" y2="34" stroke="${color}" stroke-width="1.5"/>
+      <line x1="0" y1="17" x2="34" y2="17" stroke="${color}" stroke-width="1.5"/>
+      <circle cx="17" cy="17" r="2" fill="${color}"/></svg>`});
+}
+function addCrosshair(layer, lat, lon, color, label){
+  const mk = L.marker([lat, lon], {icon: crosshairIcon(color)}).addTo(layer);
+  mk.bindTooltip(
+    (label ? label + '<br>' : '') + lat.toFixed(5) + ', ' + lon.toFixed(5),
+    {permanent: true, direction: 'right', offset: [14, 0], className: 'xhairLbl'});
+  return mk;
+}
+
+// Provenance metadata for each data source, shown below results.
+const DATA_PROVENANCE = {
+  openmeteo_weather: {name: 'Open-Meteo forecast', kind: 'Multi-model NWP blend (assimilates station obs)',
+    by: 'Open-Meteo, using ECMWF/NOAA/DWD/Meteo-France models', doc: 'https://open-meteo.com/en/docs'},
+  openmeteo_aq: {name: 'Open-Meteo Air Quality (CAMS)', kind: 'Model (Copernicus CAMS)',
+    by: 'Open-Meteo / Copernicus Atmosphere Monitoring Service', doc: 'https://open-meteo.com/en/docs/air-quality-api'},
+  openweather: {name: 'OpenWeather Air Pollution', kind: 'Model + station blend',
+    by: 'OpenWeather', doc: 'https://openweathermap.org/api/air-pollution'},
+  openaq: {name: 'OpenAQ v3', kind: 'Ground-station measurements (reference + low-cost sensors)',
+    by: 'OpenAQ community / national agencies', doc: 'https://docs.openaq.org/'},
+  era5: {name: 'ERA5-Land monthly', kind: 'Reanalysis (~9 km)',
+    by: 'ECMWF / Copernicus C3S', doc: 'https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-monthly-means'},
+  modis_lst: {name: 'MODIS Land Surface Temperature (MOD11A2)', kind: 'Processed satellite retrieval (1 km, 8-day)',
+    by: 'NASA LP DAAC', doc: 'https://lpdaac.usgs.gov/products/mod11a2v061/'},
+  worldcover: {name: 'ESA WorldCover', kind: 'Processed satellite classification (10 m)',
+    by: 'ESA / contains Sentinel-1&2 data', doc: 'https://esa-worldcover.org/'},
+  osm: {name: 'OpenStreetMap (Overpass)', kind: 'Crowd-sourced vector database (live)',
+    by: 'OpenStreetMap contributors, ODbL', doc: 'https://wiki.openstreetmap.org/wiki/Map_features'},
+  era5_wind: {name: 'ERA5-Land wind', kind: 'Reanalysis (~9 km)',
+    by: 'ECMWF / Copernicus C3S', doc: 'https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-monthly-means'},
+};
+
+// Render a provenance/details block. keys: array of DATA_PROVENANCE ids.
+// meta: {location, lat, lon} optional.
+function provenanceBlock(keys, meta){
+  meta = meta || {};
+  const rows = [];
+  if(meta.location) rows.push(['Location', meta.location]);
+  if(meta.lat != null) rows.push(['Coordinates', meta.lat.toFixed(5) + ', ' + meta.lon.toFixed(5)]);
+  const srcRows = keys.map(k => {
+    const p = DATA_PROVENANCE[k]; if(!p) return '';
+    return `<tr><td style="vertical-align:top">${p.name}</td>` +
+      `<td>${p.kind}<div class="per">${p.by}</div>` +
+      `<a href="${p.doc}" target="_blank" rel="noopener" style="color:#7FD0BC;font-size:11px">Documentation \u2197</a></td></tr>`;
+  }).join('');
+  return `<div class="siteSec"><div class="paneLabel">Details &amp; data sources</div>` +
+    (rows.length ? `<table class="aqTable">${rows.map(r =>
+      `<tr><td>${r[0]}</td><td style="text-align:right">${r[1]}</td></tr>`).join('')}</table>` : '') +
+    `<table class="aqTable" style="margin-top:6px"><tr><th>Source</th><th>Type / provenance</th></tr>${srcRows}</table>` +
+    `<p class="srcNote">Reanalysis = model reconstruction blending observations (e.g. ERA5). ` +
+    `Processed = satellite retrieval turned into a physical quantity. ` +
+    `Measurements = direct instrument readings. Crowd-sourced = community-mapped (OSM).</p></div>`;
+}
+
+const osmSourceLayer = L.featureGroup().addTo(map);
+// Draw pollutant/noise sources: colored pin + dotted line to the point with
+// the distance labelled on the line. `pLat/pLon` is the analysis point.
+function drawSourcesWithLines(sources, pLat, pLon, opts){
+  opts = opts || {};
+  osmSourceLayer.clearLayers();
+  if(opts.scanM){
+    L.circle([pLat, pLon], {radius: opts.scanM, color: '#00B4D8', weight: 1.4,
+      fill: false, dashArray: '6 5'}).addTo(osmSourceLayer);
+  }
+  // only line up to the nearest few per category to avoid clutter
+  const perCat = {}, MAXLINE = 2;
+  (sources || []).forEach(s => {
+    if(s.src_lat == null) return;
+    L.circleMarker([s.src_lat, s.src_lon], {radius: 5, color: '#fff', weight: 1,
+      fillColor: s.color || '#E4572E', fillOpacity: 0.95}).addTo(osmSourceLayer)
+      .bindPopup(`<b>${s.name || s.label}</b><br>${s.label}` +
+        (s.kind || s.detail ? ' \u00b7 ' + (s.kind || s.detail) : '') +
+        `<br>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(2)+' km' : s.dist_m+' m'} away` +
+        (s.osm_id ? `<br><a href="https://www.openstreetmap.org/${s.osm_type||'way'}/${s.osm_id}" target="_blank" rel="noopener">View on OSM \u2197</a>` : ''));
+    const cat = s.cat || s.label;
+    perCat[cat] = (perCat[cat] || 0) + 1;
+    if(perCat[cat] <= MAXLINE){
+      const line = L.polyline([[pLat, pLon], [s.src_lat, s.src_lon]],
+        {color: s.color || '#E4572E', weight: 1.5, dashArray: '4 4', opacity: 0.8})
+        .addTo(osmSourceLayer);
+      const mid = [(pLat + s.src_lat) / 2, (pLon + s.src_lon) / 2];
+      L.marker(mid, {icon: L.divIcon({className: 'distLbl',
+        html: `<span>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(1)+'km' : s.dist_m+'m'}</span>`,
+        iconSize: [40, 16], iconAnchor: [20, 8]})}).addTo(osmSourceLayer);
+    }
+  });
+}
 const climatePointMarkers = L.featureGroup().addTo(map);
 function clearAllClimatePoints(){
+  osmSourceLayer.clearLayers();
   // remove any point picked in another Atmosphere tab so only the active
   // tab's selection shows
   climatePointMarkers.clearLayers();
+  if(typeof siteLayer !== 'undefined') siteLayer.clearLayers();  // clear Site Brief ring
+  if(typeof siteState !== 'undefined'){ siteState.lat = null; siteState.lon = null; }
   if(typeof aqLayer !== 'undefined') aqLayer.clearLayers();
   [_thermalTab, _sunlightTab, _noiseTab, _weatherTab].forEach(t => {
     if(t){ t.state.lat = null; t.state.lon = null;
@@ -2067,8 +2179,7 @@ function climatePointTab(prefix, mode){
   function setPoint(lat, lon, label){
     st.lat = lat; st.lon = lon;
     climatePointMarkers.clearLayers();
-    L.circleMarker([lat, lon], {radius: 6, color: '#E9C46A',
-      fillColor: '#E9C46A', fillOpacity: 0.9}).addTo(climatePointMarkers);
+    addCrosshair(climatePointMarkers, lat, lon, '#E9C46A', label || null);
     el('Run').disabled = false;
     el('Status').textContent = (label ? label + ' \u00b7 ' : '') +
       lat.toFixed(5) + ', ' + lon.toFixed(5);
@@ -2100,6 +2211,7 @@ function climatePointTab(prefix, mode){
           `<div class="siteSec"><div class="paneLabel">Air temperature \u00b0C <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cTh1')}${statLine(mo,'temp_c','\u00b0C',1)}</div>` +
           `<div class="siteSec"><div class="paneLabel">Relative humidity % <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cTh2')}${statLine(mo,'rh_pct','%',0)}</div>` +
           `<p class="srcNote">Surface temp from MODIS LST; air temp/humidity from ERA5-Land (~9 km). Surface and air temperature differ, especially over built-up ground.</p>`;
+        $('siteWrap').innerHTML += provenanceBlock(['modis_lst', 'era5'], {lat: st.lat, lon: st.lon});
         siteChart('cTh1', L, mo.map(m => m.temp_c), '#E4572E');
         siteChart('cTh2', L, mo.map(m => m.rh_pct), '#00B4D8');
       } else if(mode === 'sunlight'){
@@ -2107,6 +2219,7 @@ function climatePointTab(prefix, mode){
           `<div class="siteSec"><div class="paneLabel">Solar irradiance kWh/m\u00b2/day <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cSu1')}${statLine(mo,'solar_kwh_m2_day','',2)}</div>` +
           `<div class="siteSec"><div class="paneLabel">Mean radiant temperature \u00b0C (sun-exposed, approx.) <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cSu2')}${statLine(mo,'mrt_c','\u00b0C',1)}
             <p class="srcNote">MRT estimated from ERA5 solar + thermal fluxes for an unshaded standing person; indicative only.</p></div>`;
+        $('siteWrap').innerHTML += provenanceBlock(['era5'], {lat: st.lat, lon: st.lon});
         siteChart('cSu1', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
         siteChart('cSu2', L, mo.map(m => m.mrt_c), '#F15BB5');
       } else if(mode === 'weather'){
@@ -2123,24 +2236,37 @@ function climatePointTab(prefix, mode){
             (w.time ? `<span class="chip2">${String(w.time).replace('T',' ')}</span>` : '') +
             (w.elevation_m != null ? `<span class="chip2">${Math.round(w.elevation_m)} m</span>` : '') + `</div>` +
             `<table class="aqTable" style="margin-top:8px">${rows}</table>` +
-            `<p class="srcNote">Model current conditions, updated hourly, assimilating the nearest weather-station observations. For a coastal point with no local station this is the best available live estimate.</p></div>`;
+            `<p class="srcNote">Model current conditions, updated hourly, assimilating the nearest weather-station observations. For a coastal point with no local station this is the best available live estimate.</p></div>` +
+            provenanceBlock(['openmeteo_weather'], {lat: st.lat, lon: st.lon});
         }
         return;
       } else if(mode === 'noise'){
-        const N = j.noise || {};
-        function nRow(label, m, band, note){
-          const d = m == null ? '\u2014' : (m >= 1000 ? (m/1000).toFixed(1)+' km' : Math.round(m)+' m');
-          return `<tr><td>${label}</td><td style="text-align:right">${d}</td><td${bandCls(band)}>${note || band || '\u2014'}</td></tr>`;
+        const ns = await (await fetch(BACKEND_URL + '/noise_sources', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({lat: st.lat, lon: st.lon})})).json();
+        if(!ns.osm_ok){
+          $('siteWrap').innerHTML = `<div class="siteSec"><div class="paneLabel">Noise screening</div>` +
+            `<p class="srcNote" style="color:#E9C46A">${ns.note}</p></div>`;
+        } else {
+          drawSourcesWithLines(ns.sources, st.lat, st.lon, {});
+          const near = ns.nearest || {};
+          function band(m, hi, mid){ return m == null ? '\u2014' : (m < hi ? 'High' : m < mid ? 'Moderate' : 'Low'); }
+          const order = [['road', 100, 300], ['rail', 150, 400], ['industry', 250, 600], ['airport', 3000, 8000]];
+          const rows = order.map(([cat, hi, mid]) => {
+            const n = near[cat];
+            const d = n ? (n.dist_m >= 1000 ? (n.dist_m/1000).toFixed(2)+' km' : n.dist_m+' m') : '\u2014';
+            const b = n ? band(n.dist_m, hi, mid) : '\u2014';
+            return `<tr><td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${n?n.color:'#555'};margin-right:5px"></i>${(n&&n.label)||cat}</td>` +
+              `<td style="text-align:right">${d}</td><td${bandCls(b)}>${b}</td>` +
+              `<td class="per" style="text-align:right">${n?(n.name||''):''}</td></tr>`;
+          }).join('');
+          $('siteWrap').innerHTML =
+            `<div class="siteSec"><div class="paneLabel">Noise-source proximity screening</div>` +
+            `<table class="aqTable"><tr><th>Source</th><th>Nearest</th><th>Screen</th><th>Name</th></tr>${rows}</table>` +
+            `<p class="srcNote">${ns.sources.length} mapped source(s) shown on the map with dotted distance lines. ` +
+            `Bands from distance only \u2014 not acoustic measurements; real levels depend on traffic volume, barriers and operations.</p></div>` +
+            provenanceBlock(['osm'], {location: null, lat: st.lat, lon: st.lon});
         }
-        $('siteWrap').innerHTML =
-          `<div class="siteSec"><div class="paneLabel">Noise-source proximity screening</div>` +
-          `<table class="aqTable"><tr><th>Source</th><th>Distance</th><th>Exposure</th></tr>` +
-          nRow('Major road', N.traffic_major_road_m ?? N.traffic_any_road_m, N.traffic_band) +
-          nRow('Railway', N.rail_m, N.rail_band, N.osm_ok ? null : 'OSM unavailable') +
-          nRow('Industrial area', N.industry_m, N.industry_band, N.osm_ok ? null : 'OSM unavailable') +
-          nRow('Airport', N.airport_m, N.airport_band, N.osm_ok ? null : 'OSM unavailable') +
-          `</table>` +
-          `<p class="srcNote">Bands are inferred only from distance to mapped sources (${P.osm || 'OSM'}) \u2014 not acoustic measurements. Real levels depend on traffic volume, barriers and operations.</p></div>`;
       }
     }catch(e){ toast(mode + ': ' + e.message, 9000); }
     btn.disabled = false; btn.textContent = orig;
@@ -2279,6 +2405,11 @@ $('aqRun').addEventListener('click', async () => {
       `<div class="siteSec"><div class="paneLabel">Sources</div>${summary || '<p class="srcNote">No sources returned data.</p>'}</div>` +
       (pivotTable ? `<div class="siteSec"><div class="paneLabel">Pollutant comparison (\u00b5g/m\u00b3 where applicable)</div>${pivotTable}</div>` : '') +
       (errs ? `<div class="siteSec">${errs}</div>` : '');
+    const provKeys = [];
+    if(good.find(([id]) => id === 'open-meteo')) provKeys.push('openmeteo_aq');
+    if(good.find(([id]) => id === 'openweather')) provKeys.push('openweather');
+    if(good.find(([id]) => id === 'openaq')) provKeys.push('openaq');
+    if(provKeys.length) $('siteWrap').innerHTML += provenanceBlock(provKeys, {lat: aqState.lat, lon: aqState.lon});
 
     // drop station markers for any provider that reported a station location
     drawStationMarkers(good);
@@ -2347,8 +2478,8 @@ $('aqApportion').addEventListener('click', async () => {
           </table>
           <p class="srcNote" style="margin-top:6px">${wind}</p>
           <p class="srcNote">${j.method}</p>
-        </div>`;
-      drawSourceMarkers(j.sources_list, aqState.lat, aqState.lon, j.scan_radius_m || 2500);
+        </div>` + provenanceBlock(['osm', 'era5_wind'], {lat: aqState.lat, lon: aqState.lon});
+      drawSourcesWithLines(j.sources_list, aqState.lat, aqState.lon, {scanM: j.scan_radius_m || 2500});
       if(apportionChart){ apportionChart.destroy(); apportionChart = null; }
       apportionChart = new Chart($('cApportionPie').getContext('2d'), {
         type: 'doughnut',
