@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v47"
+APP_VERSION = "deepseego-v48"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2678,14 +2678,14 @@ def noise_sources(q: NoiseQuery):
     """Noise-source proximity with per-source coordinates and rich OSM detail,
     for map markers + distance lines. Proximity screening, not acoustics."""
     qy = f"""[out:json][timeout:15];
-(way["highway"~"motorway|trunk|primary|secondary|tertiary|residential"](around:2000,{q.lat},{q.lon});
- way["railway"="rail"](around:2500,{q.lat},{q.lon});
- way["aeroway"="runway"](around:12000,{q.lat},{q.lon});
- way["landuse"="industrial"](around:2500,{q.lat},{q.lon});
- relation["landuse"="industrial"](around:2500,{q.lat},{q.lon});
- way["aeroway"="aerodrome"](around:12000,{q.lat},{q.lon});
- relation["aeroway"="aerodrome"](around:12000,{q.lat},{q.lon}););
-out geom tags 200;"""
+(way["highway"](around:500,{q.lat},{q.lon});
+ way["railway"="rail"](around:500,{q.lat},{q.lon});
+ way["aeroway"="runway"](around:500,{q.lat},{q.lon});
+ way["landuse"="industrial"](around:500,{q.lat},{q.lon});
+ relation["landuse"="industrial"](around:500,{q.lat},{q.lon});
+ way["aeroway"="aerodrome"](around:500,{q.lat},{q.lon});
+ relation["aeroway"="aerodrome"](around:500,{q.lat},{q.lon}););
+out geom tags 400;"""
     js = _overpass(qy)
     if js is None:
         return {"osm_ok": False, "sources": [],
