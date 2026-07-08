@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v51"
+APP_VERSION = "deepseego-v54"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2567,6 +2567,58 @@ def source_apportion(q: ApportionQuery):
     }
 
 
+class HeightsQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: int = 400
+
+
+@app.post("/building_heights")
+@ee_errors
+def building_heights(q: HeightsQuery):
+    """Per-building footprints (Open Buildings v3 polygons) each carrying its
+    own height from the 2.5D Temporal raster - a zonal-stats join. Returns
+    footprint rings + height for client-side 3D extrusion. Capped for speed."""
+    ensure_ee()
+    r = max(100, min(700, int(q.radius_m or 400)))
+    pt = ee.Geometry.Point([q.lon, q.lat])
+    ring = pt.buffer(r)
+    obt = (ee.ImageCollection("GOOGLE/Research/open-buildings-temporal/v1")
+           .filterDate("2023-01-01", "2024-01-01")
+           .filterBounds(ring).mosaic())
+    img = obt.select("building_height").addBands(obt.select("building_presence"))
+    polys = (ee.FeatureCollection("GOOGLE/Research/open-buildings/v3/polygons")
+             .filterBounds(ring).limit(600))
+    stats = img.reduceRegions(collection=polys, reducer=ee.Reducer.mean(),
+                              scale=4)
+    stats = stats.filter(ee.Filter.gte("building_presence", 0.2))
+    data = stats.limit(600).getInfo()
+    out = []
+    for f in data.get("features", []):
+        p = f.get("properties", {})
+        h = p.get("building_height")
+        geom = f.get("geometry", {}) or {}
+        if h is None or geom.get("type") != "Polygon":
+            continue
+        rings = geom.get("coordinates", [])
+        if not rings:
+            continue
+        outer = rings[0]           # [[lon, lat], ...]
+        if len(outer) < 4:
+            continue
+        out.append({"h": round(float(h), 1),
+                    "ring": [[round(c[1], 6), round(c[0], 6)] for c in outer]})
+    hs = [b["h"] for b in out]
+    return {"lat": q.lat, "lon": q.lon, "radius_m": r, "count": len(out),
+            "h_min": round(min(hs), 1) if hs else None,
+            "h_max": round(max(hs), 1) if hs else None,
+            "buildings": out,
+            "note": "Per-building heights: Open Buildings v3 footprints joined "
+                    "with 2.5D Temporal heights (Sentinel-2, ~4 m, 2023). "
+                    "Heights are estimates, not survey-grade; footprint count "
+                    "capped at 600 for the view."}
+
+
 class BuildingsQuery(BaseModel):
     lat: float
     lon: float
@@ -3082,11 +3134,26 @@ def site_brief(q: SiteQuery):
         ee.Reducer.sum().group(groupField=1, groupName="class"),
         ring, 10, maxPixels=1e9, bestEffort=True).get("groups")
 
-    ob = (ee.ImageCollection("GOOGLE/Research/open-buildings-temporal/v1")
-          .filterDate("2023-01-01", "2024-01-01").mosaic()
-          .select("building_height"))
-    stats["bh"] = ob.reduceRegion(ee.Reducer.max(), pt.buffer(20), 4,
-                                  bestEffort=True).get("building_height")
+    OBT = "GOOGLE/Research/open-buildings-temporal/v1"
+    ob23 = (ee.ImageCollection(OBT)
+            .filterDate("2023-01-01", "2024-01-01").mosaic())
+    h23 = ob23.select("building_height")
+    built = ob23.select("building_presence").gte(0.2)
+    hstats = h23.updateMask(built).reduceRegion(
+        ee.Reducer.mean().combine(ee.Reducer.max(), sharedInputs=True),
+        ring, 4, bestEffort=True)
+    stats["bh"] = hstats.get("building_height_max")
+    stats["bh_mean"] = hstats.get("building_height_mean")
+    stats["ob_footprint"] = built.multiply(ee.Image.pixelArea()).reduceRegion(
+        ee.Reducer.sum(), ring, 4, bestEffort=True).get("building_presence")
+    stats["ob_count"] = ob23.select("building_fractional_count").reduceRegion(
+        ee.Reducer.sum(), ring, 4, bestEffort=True).get("building_fractional_count")
+    ob16 = (ee.ImageCollection(OBT)
+            .filterDate("2016-01-01", "2017-01-01").mosaic())
+    stats["bh_mean_2016"] = h16 = (ob16.select("building_height")
+        .updateMask(ob16.select("building_presence").gte(0.2))
+        .reduceRegion(ee.Reducer.mean(), ring, 4, bestEffort=True)
+        .get("building_height"))
 
     roads_all = _vector_fc(DATASETS["roads"])
     ring_roads = roads_all.filterBounds(ring)
@@ -3204,9 +3271,27 @@ def site_brief(q: SiteQuery):
     }
 
     bh = g("bh")
+    bh_mean = g("bh_mean")
+    bh16 = g("bh_mean_2016")
+    ob_fp = g("ob_footprint")
+    ob_ct = g("ob_count")
+    built_up = None
+    if ob_fp is not None and region_area_km2:
+        built_up = round(100.0 * ob_fp / (region_area_km2 * 1e6), 1)
     return {
         "site": {"lat": q.lat, "lon": q.lon, "radius_m": q.radius_m,
                  "building_height_m": None if bh is None else round(bh, 1)},
+        "open_buildings": {
+            "height_max_m": None if bh is None else round(bh, 1),
+            "height_mean_m": None if bh_mean is None else round(bh_mean, 1),
+            "height_mean_2016_m": None if bh16 is None else round(bh16, 1),
+            "height_growth_m": (None if (bh_mean is None or bh16 is None)
+                                else round(bh_mean - bh16, 1)),
+            "footprint_m2": None if ob_fp is None else round(ob_fp),
+            "built_up_pct": built_up,
+            "count_est": None if ob_ct is None else round(ob_ct),
+            "period": "Open Buildings 2.5D Temporal v1, 2023 (growth vs 2016)",
+        },
         "region": {"name": region_name, "area_km2": region_area_km2,
                    "centroid_lat": round(cen_lat, 5),
                    "centroid_lon": round(cen_lon, 5),
