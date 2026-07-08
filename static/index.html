@@ -324,16 +324,16 @@ label.chk input{width:auto}
   <aside id="panel">
     <div class="sbTabs" id="basketBar">
       <button class="active" data-basket="sat">Satellite</button>
-      <button data-basket="urban">Urban Planning</button>
+      <button data-basket="urban">Urban</button>
       <button data-basket="climate">Atmosphere</button>
     </div>
     <div class="subTabs" id="subBar">
       <button class="active" data-tab="explore">Explore</button>
-      <button data-tab="adv">Advanced Analysis</button>
+      <button data-tab="adv">Zonal Analysis</button>
       <button data-tab="weather">Weather</button>
-      <button data-tab="aq">Air Quality</button>
-      <button data-tab="thermal">Thermal</button>
-      <button data-tab="sunlight">Sunlight</button>
+      <button data-tab="aq">Air</button>
+      <button data-tab="thermal">Heat</button>
+      <button data-tab="sunlight">Sun</button>
       <button data-tab="noise">Noise</button>
     </div>
     <div id="tab-explore">
@@ -659,7 +659,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v46</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v47</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -671,7 +671,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v46";
+const DSG_VERSION = "deepseego-v47";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -704,6 +704,10 @@ const map = L.map('map', {
   zoomControl: true, minZoom: 2, worldCopyJump: false,
   maxBounds: WORLD_BOUNDS, maxBoundsViscosity: 1.0,
 }).setView([15.38, 74.05], 9); // Goa
+// dedicated pane so satellite DATA layers always render above ANY basemap
+// (incl. the OSM basemaps), fixing overlays vanishing under OSM tiles.
+map.createPane('datapane');
+map.getPane('datapane').style.zIndex = 450;   // above tilePane(200), below markers(600)
 const satBase = L.tileLayer(
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   {attribution: 'Tiles &copy; Esri &mdash; Esri, Maxar, Earthstar Geographics',
@@ -784,7 +788,8 @@ async function refreshTiles(){
       : await api(`/tiles?dataset=${encodeURIComponent(ds)}&year=${yr}`);
     if(ghslLayer) map.removeLayer(ghslLayer);
     ghslLayer = L.tileLayer(j.tile_url, {opacity: $('opacity').value / 100, maxZoom: 19,
-                            noWrap: true, bounds: WORLD_BOUNDS}).addTo(map);
+                            noWrap: true, bounds: WORLD_BOUNDS,
+                            pane: 'datapane'}).addTo(map);
   }catch(e){ toast('Tile layer: ' + e.message); }
 }
 
@@ -1563,7 +1568,24 @@ const BASKETS = {
   climate: {sub: ['weather', 'aq', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
 const ALL_TABS = ['explore', 'adv', 'site', 'weather', 'aq', 'thermal', 'sunlight', 'noise'];
+function wipeMapAnalysis(){
+  // clear ALL analysis overlays so switching tabs leaves a clean map.
+  // wrapped in try/catch: this may run at initial load before the layer
+  // consts are initialised (temporal dead zone) - harmless to skip then.
+  try {
+    [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
+     sourceMarkers, siteLayer, buildingLayer].forEach(g => {
+      try { if(g) g.clearLayers(); } catch(e){}
+    });
+    try { siteState.lat = null; siteState.lon = null; } catch(e){}
+    try { aqState.lat = null; aqState.lon = null; } catch(e){}
+    [_thermalTab, _sunlightTab, _noiseTab, _weatherTab].forEach(t => {
+      try { if(t){ t.state.lat = null; t.state.lon = null; } } catch(e){}
+    });
+  } catch(e){ /* consts not initialised yet at first load */ }
+}
 function showTab(tab){
+  wipeMapAnalysis();
   ALL_TABS.forEach(t => { const el = $('tab-' + t); if(el) el.hidden = t !== tab; });
   document.querySelectorAll('#subBar button').forEach(x =>
     x.classList.toggle('active', x.dataset.tab === tab));
@@ -2626,7 +2648,36 @@ $('customWmsAdd').addEventListener('click', () => {
 
 /* ---------- Site Brief ---------- */
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
+async function loadBuildings(lat, lon, radius){
+  buildingLayer.clearLayers();
+  try{
+    const b = await api('/buildings', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat, lon, radius_m: Math.min(1500, radius || 500)})});
+    if(!b.osm_ok){
+      $('siteWrap').innerHTML += `<div class="siteSec"><div class="paneLabel">Buildings</div><p class="srcNote" style="color:#E9C46A">${b.note}</p></div>`;
+      return;
+    }
+    // scan-radius ring + color-coded building points
+    L.circle([lat, lon], {radius: b.radius_m, color: '#E9C46A', weight: 1.4,
+      fill: false, dashArray: '5 6'}).addTo(buildingLayer);
+    b.buildings.forEach(pt => {
+      L.circleMarker([pt.lat, pt.lon], {radius: 3.5, color: pt.color,
+        weight: 0.6, fillColor: pt.color, fillOpacity: 0.85}).addTo(buildingLayer)
+        .bindPopup(`<b>${pt.name || pt.type || 'Building'}</b><br>${(b.categories.find(c=>c.key===pt.cat)||{}).label||pt.cat}`);
+    });
+    const rows = b.categories.map(c =>
+      `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${c.color};margin-right:6px"></i>${c.label}</td>` +
+      `<td style="text-align:right">${c.count}</td><td style="text-align:right">${c.pct}%</td></tr>`).join('');
+    const html = `<div class="siteSec"><div class="paneLabel">Buildings by function <span class="per">\u00b7 ${b.total} within ${b.radius_m} m</span></div>` +
+      `<table class="aqTable"><tr><th>Category</th><th>Count</th><th>Share</th></tr>${rows}</table>` +
+      `<p class="srcNote">Colour-coded points shown on the map. ${b.note}</p></div>` +
+      provenanceBlock(['osm'], {lat, lon});
+    $('siteWrap').innerHTML += html;
+  }catch(e){ /* buildings are a bonus; ignore failures silently */ }
+}
 const siteLayer = L.featureGroup().addTo(map);
+const buildingLayer = L.featureGroup().addTo(map);
 const siteState = {lat: null, lon: null};
 
 function drawSite(){
@@ -2873,6 +2924,7 @@ $('siteRun').addEventListener('click', async () => {
     siteChart('cWind', L, mo.map(m => m.wind_ms), '#7FD0BC');
     siteChart('cSolar', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
     siteChart('cMrt', L, mo.map(m => m.mrt_c), '#F15BB5');
+    loadBuildings(siteState.lat, siteState.lon, +$('siteRadius').value);
   }catch(e){ toast('Site brief: ' + e.message, 9000); }
   btn.disabled = false; btn.textContent = 'Generate site brief';
 });
