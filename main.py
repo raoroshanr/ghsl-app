@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v54"
+APP_VERSION = "deepseego-v55"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -992,10 +992,12 @@ def _parse_shapefile(files: dict) -> dict:
         gtype = "polygon"
     elif "POLYLINE" in stn:
         gtype = "line"                      # roads / metro / rail etc.
+    elif "POINT" in stn or "MULTIPOINT" in stn:
+        gtype = "point"                     # POIs / stations / sample sites
     else:
         raise HTTPException(status_code=400, detail=(
-            f"Shapefile contains {stn}. Only polygon boundaries and line "
-            "networks are usable (e.g. SOI *_BDY, not *_HQ point files)."))
+            f"Shapefile contains {stn}. Supported: polygon boundaries, line "
+            "networks, and point layers."))
 
     # ---- decide on a coordinate transform -----------------------------------
     xmin, ymin, xmax, ymax = reader.bbox
@@ -1184,6 +1186,8 @@ def _shp_header_gtype(first_bytes: bytes):
         return "polygon"
     if t in _LINE_SHP_TYPES:
         return "line"
+    if t in (1, 8, 11, 18, 21, 28):          # Point / MultiPoint variants
+        return "point"
     return None
 
 
@@ -1197,7 +1201,8 @@ def _entry_gtype(parts: dict):
         if ck not in _kind_cache:
             try:
                 head = b.download_as_bytes(start=0, end=499).decode("utf-8", "ignore")
-                g = "line" if '"gtype": "line"' in head else "polygon"
+                g = ("point" if '"gtype": "point"' in head else
+                     "line" if '"gtype": "line"' in head else "polygon")
                 m = re.search(r'"bbox":\s*\[([^\]]+)\]', head)
                 bbox = [float(x) for x in m.group(1).split(",")] if m else None
                 _kind_cache[ck] = {"gtype": g, "bbox": bbox}
