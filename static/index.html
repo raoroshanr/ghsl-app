@@ -331,6 +331,7 @@ label.chk input{width:auto}
     </div>
     <div class="subTabs" id="subBar">
       <button class="active" data-tab="explore">Explore</button>
+      <button data-tab="site">Site Brief</button>
       <button data-tab="adv">Zonal Analysis</button>
       <button data-tab="weather">Weather</button>
       <button data-tab="aq">Air</button>
@@ -338,7 +339,7 @@ label.chk input{width:auto}
       <button data-tab="sunlight">Sun</button>
       <button data-tab="noise">Noise</button>
     </div>
-    <div id="tab-explore">
+    <div id="layerSection">
     <section>
       <h2>Layer</h2>
       <label class="fld" for="datasetSel">Dataset</label>
@@ -349,6 +350,8 @@ label.chk input{width:auto}
       <input id="opacity" type="range" min="0" max="100" value="80" />
       <div id="legend" style="margin-top:8px"></div>
     </section>
+    </div>
+    <div id="tab-explore">
 
     <section>
       <h2>Region of Interest</h2>
@@ -682,7 +685,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v61</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v62</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -694,7 +697,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v61";
+const DSG_VERSION = "deepseego-v62";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1612,6 +1615,10 @@ function wipeMapAnalysis(){
 function showTab(tab){
   wipeMapAnalysis();
   ALL_TABS.forEach(t => { const el = $('tab-' + t); if(el) el.hidden = t !== tab; });
+  // the shared Layer (dataset / year / opacity) shows on Explore, Zonal
+  // Analysis and Site Brief - the tabs that use a raster dataset.
+  const ls = $('layerSection');
+  if(ls) ls.style.display = ['explore', 'adv', 'site'].includes(tab) ? '' : 'none';
   document.querySelectorAll('#subBar button').forEach(x =>
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
