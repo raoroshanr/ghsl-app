@@ -685,7 +685,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v62</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v63</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -697,7 +697,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v62";
+const DSG_VERSION = "deepseego-v63";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -2034,13 +2034,27 @@ function renderPtZones(){
   box.innerHTML =
     `<p class="per" style="margin:0 0 6px">${wiz.fragments.length} zone(s) from ` +
     `${wiz.ptCount || wiz.fragments.length} point(s)` +
-    (merged ? ` \u2014 ${merged} formed by overlapping buffers (combined names)` : '') + `</p>` +
+    (merged ? ` \u2014 ${merged} formed by overlapping buffers (combined names)` : '') +
+    ` \u00b7 use \u2715 to exclude a zone</p>` +
     wiz.fragments.map((f,k) =>
       `<div style="padding:4px 6px;display:flex;gap:8px;align-items:center">` +
       `<i style="width:11px;height:11px;border-radius:3px;flex:0 0 auto;background:${pal[k%10]}"></i>` +
-      `<span>Zone ${k+1} <span class="per">(${f.name})</span>` +
+      `<span style="flex:1">Zone ${k+1} <span class="per">(${f.name})</span>` +
       (f.merged ? ` <span class="per" style="color:#E9C46A">\u00b7 ${f.n_points} merged</span>` : '') +
-      `</span></div>`).join('');
+      `</span>` +
+      `<button class="ptDel" data-fid="${f.id}" title="Exclude this zone" ` +
+      `style="flex:0 0 auto;border:none;background:none;color:#E4572E;cursor:pointer;font-size:15px;line-height:1;padding:2px 4px">\u2715</button>` +
+      `</div>`).join('');
+  box.querySelectorAll('.ptDel').forEach(btn =>
+    btn.addEventListener('click', () => deletePtZone(+btn.dataset.fid)));
+}
+function deletePtZone(fid){
+  if(wiz.fragments.length <= 1) return toast('At least one zone must remain');
+  // remove its map layer and drop it from the fragment list
+  if(wiz.fragLayers[fid]){ fragLayerG.removeLayer(wiz.fragLayers[fid]); delete wiz.fragLayers[fid]; }
+  wiz.fragments = wiz.fragments.filter(f => f.id !== fid);
+  renderPtZones();
+  toast('Zone excluded \u2014 ' + wiz.fragments.length + ' remaining');
 }
 if($('ptZonesConfirm')) $('ptZonesConfirm').addEventListener('click', () => buildPtZones());
 function buildPtZones(){
