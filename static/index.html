@@ -652,7 +652,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v48</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v50</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -664,7 +664,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v48";
+const DSG_VERSION = "deepseego-v50";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -2153,7 +2153,8 @@ function drawSourcesWithLines(sources, pLat, pLon, opts){
     L.circle([pLat, pLon], {radius: opts.scanM, color: '#00B4D8', weight: 1.4,
       fill: false, dashArray: '6 5'}).addTo(osmSourceLayer);
   }
-  const perCat = {}, MAXLINE = 2;
+  // draw all feature geometry / pins; track the single nearest source overall
+  let nearest = null;
   (sources || []).forEach(s => {
     const cat = s.cat || s.label;
     // ---- linear features: draw the actual geometry, styled by type ----
@@ -2163,12 +2164,10 @@ function drawSourcesWithLines(sources, pLat, pLon, opts){
         L.polyline(s.geom, {color: s.color || '#E4572E', weight: w,
           opacity: 0.85}).addTo(osmSourceLayer).bindPopup(popupHtml(s));
       } else if(cat === 'rail'){
-        // rail as a double line: base + dashed white overlay
         L.polyline(s.geom, {color: s.color || '#9B5DE5', weight: 4, opacity: 0.9}).addTo(osmSourceLayer);
         L.polyline(s.geom, {color: '#fff', weight: 1.4, opacity: 0.9,
           dashArray: '5 6'}).addTo(osmSourceLayer).bindPopup(popupHtml(s));
       } else if(cat === 'runway'){
-        // runway as a thick dotted line
         L.polyline(s.geom, {color: s.color || '#00B4D8', weight: 7,
           opacity: 0.85, dashArray: '2 10', lineCap: 'butt'})
           .addTo(osmSourceLayer).bindPopup(popupHtml(s));
@@ -2177,26 +2176,28 @@ function drawSourcesWithLines(sources, pLat, pLon, opts){
           .addTo(osmSourceLayer).bindPopup(popupHtml(s));
       }
     } else if(s.src_lat != null){
-      // ---- area/point features: a pin ----
       L.circleMarker([s.src_lat, s.src_lon], {radius: 5, color: '#fff', weight: 1,
         fillColor: s.color || '#E4572E', fillOpacity: 0.95}).addTo(osmSourceLayer)
         .bindPopup(popupHtml(s));
     }
-    // ---- dotted distance line to the nearest point of the feature ----
+    // track the closest source of ANY type (with a usable target point)
     const tLat = s.near_lat != null ? s.near_lat : s.src_lat;
     const tLon = s.near_lon != null ? s.near_lon : s.src_lon;
-    if(tLat == null) return;
-    perCat[cat] = (perCat[cat] || 0) + 1;
-    if(perCat[cat] <= MAXLINE){
-      L.polyline([[pLat, pLon], [tLat, tLon]],
-        {color: s.color || '#E4572E', weight: 1.3, dashArray: '3 5', opacity: 0.7})
-        .addTo(osmSourceLayer);
-      const mid = [(pLat + tLat) / 2, (pLon + tLon) / 2];
-      L.marker(mid, {icon: L.divIcon({className: 'distLbl',
-        html: `<span>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(1)+'km' : s.dist_m+'m'}</span>`,
-        iconSize: [40, 16], iconAnchor: [20, 8]})}).addTo(osmSourceLayer);
+    if(tLat != null && (nearest === null || s.dist_m < nearest.dist_m)){
+      nearest = {dist_m: s.dist_m, tLat, tLon, color: s.color || '#E4572E',
+                 name: s.name || s.label};
     }
   });
+  // ---- ONE dotted line to the single nearest source of any type ----
+  if(nearest){
+    L.polyline([[pLat, pLon], [nearest.tLat, nearest.tLon]],
+      {color: nearest.color, weight: 1.6, dashArray: '3 5', opacity: 0.85})
+      .addTo(osmSourceLayer);
+    const mid = [(pLat + nearest.tLat) / 2, (pLon + nearest.tLon) / 2];
+    L.marker(mid, {icon: L.divIcon({className: 'distLbl',
+      html: `<span>${nearest.dist_m >= 1000 ? (nearest.dist_m/1000).toFixed(2)+' km' : nearest.dist_m+' m'} to nearest</span>`,
+      iconSize: [90, 16], iconAnchor: [45, 8]})}).addTo(osmSourceLayer);
+  }
 }
 const climatePointMarkers = L.featureGroup().addTo(map);
 function clearAllClimatePoints(){
@@ -2643,6 +2644,10 @@ $('customWmsAdd').addEventListener('click', () => {
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
 async function loadBuildings(lat, lon, radius){
   buildingLayer.clearLayers();
+  const rr = Math.min(1500, radius || 500);
+  // always show the scan ring first, independent of the backend result
+  L.circle([lat, lon], {radius: rr, color: '#E9C46A', weight: 1.4,
+    fill: false, dashArray: '5 6'}).addTo(buildingLayer);
   try{
     const b = await api('/buildings', {method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -2651,9 +2656,7 @@ async function loadBuildings(lat, lon, radius){
       $('siteWrap').innerHTML += `<div class="siteSec"><div class="paneLabel">Buildings</div><p class="srcNote" style="color:#E9C46A">${b.note}</p></div>`;
       return;
     }
-    // scan-radius ring + color-coded building points
-    L.circle([lat, lon], {radius: b.radius_m, color: '#E9C46A', weight: 1.4,
-      fill: false, dashArray: '5 6'}).addTo(buildingLayer);
+    // color-coded building points (ring already drawn above)
     b.buildings.forEach(pt => {
       L.circleMarker([pt.lat, pt.lon], {radius: 3.5, color: pt.color,
         weight: 0.6, fillColor: pt.color, fillOpacity: 0.85}).addTo(buildingLayer)
@@ -2680,11 +2683,13 @@ const siteState = {lat: null, lon: null};
 function drawSite(){
   siteLayer.clearLayers();
   if(siteState.lat == null) return;
-  L.circleMarker([siteState.lat, siteState.lon],
-    {radius: 6, color: '#E4572E', fillColor: '#E4572E', fillOpacity: 0.9}).addTo(siteLayer);
+  // scan-radius ring
   L.circle([siteState.lat, siteState.lon],
     {radius: +$('siteRadius').value, color: '#E4572E', weight: 2,
-     dashArray: '4 4', fillOpacity: 0.04}).addTo(siteLayer);
+     dashArray: '5 5', fillColor: '#E4572E', fillOpacity: 0.05}).addTo(siteLayer);
+  // big crosshair with lat/lon label (consistent with the other tabs)
+  addCrosshair(siteLayer, siteState.lat, siteState.lon, '#E4572E');
+  map.panTo([siteState.lat, siteState.lon]);
 }
 async function siteGeocode(){
   const q = $('siteSearch').value.trim(); if(!q) return;
