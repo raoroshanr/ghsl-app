@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v42"
+APP_VERSION = "deepseego-v44"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2555,6 +2555,56 @@ def source_apportion(q: ApportionQuery):
     }
 
 
+class WeatherQuery(BaseModel):
+    lat: float
+    lon: float
+
+
+@app.post("/weather_live")
+def weather_live(q: WeatherQuery):
+    """Current weather at the point from Open-Meteo (keyless, model-based,
+    assimilates the nearest station observations). Global coverage."""
+    u = ("https://api.open-meteo.com/v1/forecast?"
+         f"latitude={q.lat}&longitude={q.lon}"
+         "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+         "precipitation,weather_code,cloud_cover,pressure_msl,surface_pressure,"
+         "wind_speed_10m,wind_direction_10m,wind_gusts_10m,is_day"
+         "&timezone=auto")
+    try:
+        d = _get_json(u)
+    except Exception as e:
+        return {"error": f"Open-Meteo did not respond: {e}"}
+    c = d.get("current", {})
+    units = d.get("current_units", {})
+    WCODE = {0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy",
+             3: "Overcast", 45: "Fog", 48: "Rime fog", 51: "Light drizzle",
+             53: "Drizzle", 55: "Dense drizzle", 61: "Slight rain",
+             63: "Rain", 65: "Heavy rain", 66: "Freezing rain",
+             71: "Slight snow", 73: "Snow", 75: "Heavy snow", 80: "Rain showers",
+             81: "Rain showers", 82: "Violent rain showers",
+             95: "Thunderstorm", 96: "Thunderstorm w/ hail",
+             99: "Thunderstorm w/ heavy hail"}
+    return {
+        "lat": q.lat, "lon": q.lon,
+        "time": c.get("time"), "timezone": d.get("timezone"),
+        "elevation_m": d.get("elevation"),
+        "condition": WCODE.get(c.get("weather_code"), "—"),
+        "is_day": c.get("is_day"),
+        "fields": [
+            ["Temperature", c.get("temperature_2m"), units.get("temperature_2m", "°C")],
+            ["Feels like", c.get("apparent_temperature"), units.get("apparent_temperature", "°C")],
+            ["Humidity", c.get("relative_humidity_2m"), units.get("relative_humidity_2m", "%")],
+            ["Precipitation", c.get("precipitation"), units.get("precipitation", "mm")],
+            ["Cloud cover", c.get("cloud_cover"), units.get("cloud_cover", "%")],
+            ["Pressure (MSL)", c.get("pressure_msl"), units.get("pressure_msl", "hPa")],
+            ["Wind speed", c.get("wind_speed_10m"), units.get("wind_speed_10m", "km/h")],
+            ["Wind gusts", c.get("wind_gusts_10m"), units.get("wind_gusts_10m", "km/h")],
+            ["Wind direction", c.get("wind_direction_10m"), units.get("wind_direction_10m", "°")],
+        ],
+        "source": "Open-Meteo (multi-model, assimilates nearby stations)",
+    }
+
+
 @app.get("/openaq_test")
 def openaq_test(lat: float = 15.28, lon: float = 73.96):
     k = os.environ.get(AQ_KEYS["openaq"])
@@ -2730,6 +2780,7 @@ class SiteQuery(BaseModel):
     lon: float
     radius_m: float = 500
     region: Optional[RegionSpec] = None     # drawn ROI overrides the ring
+    skip_osm: bool = False                   # skip the slow OSM noise query
 
 
 @app.post("/site_brief")
@@ -2908,7 +2959,7 @@ def site_brief(q: SiteQuery):
          "period": "Sentinel-5P, 2024 mean"},
     ]
 
-    osm = _overpass_noise(q.lat, q.lon)
+    osm = None if q.skip_osm else _overpass_noise(q.lat, q.lon)
     def nband(d, hi, mid):
         return None if d is None else ("High" if d < hi else
                                        "Moderate" if d < mid else "Low")
