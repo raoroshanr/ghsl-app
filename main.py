@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v57"
+APP_VERSION = "deepseego-v58"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -1028,15 +1028,26 @@ def _parse_shapefile(files: dict) -> dict:
     features = []
     for i, shp in enumerate(reader.iterShapes()):
         gi = shp.__geo_interface__
-        coords = _strip_and_transform(_thin_coords(list(gi["coordinates"])), tfm)
         try:
-            g = shp_shape({"type": gi["type"], "coordinates": coords})
-            if gtype == "polygon" and not g.is_valid:
-                g = make_valid(g)
-            g = g.simplify(0.0005, preserve_topology=True)   # ~50 m
-            if g.is_empty:
-                continue
-            geom = shp_mapping(g)
+            if gtype == "point":
+                # points: coordinates is a flat [x, y] (or [[x,y],...] for
+                # multipoint); transform directly, no thinning/simplify.
+                raw = list(gi["coordinates"])
+                coords = _strip_and_transform(raw, tfm)
+                g = shp_shape({"type": gi["type"], "coordinates": coords})
+                if g.is_empty:
+                    continue
+                geom = shp_mapping(g)
+            else:
+                coords = _strip_and_transform(
+                    _thin_coords(list(gi["coordinates"])), tfm)
+                g = shp_shape({"type": gi["type"], "coordinates": coords})
+                if gtype == "polygon" and not g.is_valid:
+                    g = make_valid(g)
+                g = g.simplify(0.0005, preserve_topology=True)   # ~50 m
+                if g.is_empty:
+                    continue
+                geom = shp_mapping(g)
         except Exception:
             continue
         label = None
@@ -1048,7 +1059,8 @@ def _parse_shapefile(files: dict) -> dict:
         features.append({"label": label or f"Feature {i + 1}",
                          "geometry": geom})
     if not features:
-        raise HTTPException(status_code=400, detail="No usable polygons found in file.")
+        raise HTTPException(status_code=400,
+                            detail=f"No usable {gtype} features found in file.")
 
     lons = [c for f in features for c in _bounds_lons(f["geometry"])]
     lon1 = min(lons)
@@ -1066,6 +1078,10 @@ def _parse_shapefile(files: dict) -> dict:
 
 def _bounds_lons(geometry):
     t, cs = geometry["type"], geometry["coordinates"]
+    if t == "Point":
+        return [cs[0]]
+    if t == "MultiPoint":
+        return [cs[0][0]]
     if t == "LineString":
         return [cs[0][0]]
     if t == "MultiLineString":
