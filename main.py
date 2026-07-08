@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v44"
+APP_VERSION = "deepseego-v45"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2519,8 +2519,11 @@ def source_apportion(q: ApportionQuery):
             sources_list.append({
                 "src_lat": round(c["lat"], 6), "src_lon": round(c["lon"], 6),
                 "label": label_of[cat], "color": color_of[cat],
+                "name": t.get("name") or t.get("operator") or label_of[cat],
                 "kind": t.get("landuse") or t.get("man_made") or
-                        t.get("power") or t.get("highway") or "",
+                        t.get("power") or t.get("highway") or
+                        t.get("amenity") or "",
+                "osm_id": el.get("id"), "osm_type": el.get("type"),
                 "dist_m": round(d)})
 
     total = sum(cats.values())
@@ -2553,6 +2556,80 @@ def source_apportion(q: ApportionQuery):
                    "measured source apportionment (which requires particle "
                    "composition / receptor modelling)."),
     }
+
+
+class NoiseQuery(BaseModel):
+    lat: float
+    lon: float
+
+
+_NOISE_CATS = {
+    "road": ("Major road", "#E4572E"),
+    "rail": ("Railway", "#9B5DE5"),
+    "industry": ("Industrial area", "#F15BB5"),
+    "airport": ("Airport", "#00B4D8"),
+}
+
+
+@app.post("/noise_sources")
+def noise_sources(q: NoiseQuery):
+    """Noise-source proximity with per-source coordinates and rich OSM detail,
+    for map markers + distance lines. Proximity screening, not acoustics."""
+    qy = f"""[out:json][timeout:15];
+(way["highway"~"motorway|trunk|primary|secondary"](around:2000,{q.lat},{q.lon});
+ way["railway"="rail"](around:2500,{q.lat},{q.lon});
+ way["landuse"="industrial"](around:2500,{q.lat},{q.lon});
+ relation["landuse"="industrial"](around:2500,{q.lat},{q.lon});
+ way["aeroway"="aerodrome"](around:12000,{q.lat},{q.lon});
+ relation["aeroway"="aerodrome"](around:12000,{q.lat},{q.lon}););
+out center tags 150;"""
+    js = _overpass(qy)
+    if js is None:
+        return {"osm_ok": False, "sources": [],
+                "note": "OpenStreetMap (Overpass) is busy; try again shortly."}
+
+    def classify(t):
+        if t.get("highway") in ("motorway", "trunk", "primary", "secondary"):
+            return "road"
+        if t.get("railway") == "rail":
+            return "rail"
+        if t.get("landuse") == "industrial":
+            return "industry"
+        if t.get("aeroway") == "aerodrome":
+            return "airport"
+        return None
+
+    sources, nearest = [], {}
+    for el in js.get("elements", []):
+        c = el.get("center") or ({"lat": el.get("lat"), "lon": el.get("lon")}
+                                 if el.get("lat") is not None else None)
+        if not c or c.get("lat") is None:
+            continue
+        t = el.get("tags", {})
+        cat = classify(t)
+        if not cat:
+            continue
+        d = _haversine_m(q.lat, q.lon, c["lat"], c["lon"])
+        label, color = _NOISE_CATS[cat]
+        name = t.get("name") or t.get("operator") or label
+        if len(sources) < 150:
+            sources.append({
+                "cat": cat, "label": label, "color": color,
+                "name": name, "src_lat": round(c["lat"], 6),
+                "src_lon": round(c["lon"], 6), "dist_m": round(d),
+                "detail": t.get("highway") or t.get("railway") or
+                          t.get("landuse") or t.get("aeroway") or "",
+                "osm_id": el.get("id"), "osm_type": el.get("type")})
+        if cat not in nearest or d < nearest[cat]["dist_m"]:
+            nearest[cat] = {"dist_m": round(d), "name": name,
+                            "src_lat": round(c["lat"], 6),
+                            "src_lon": round(c["lon"], 6), "color": color,
+                            "label": label}
+    sources.sort(key=lambda s: s["dist_m"])
+    return {"osm_ok": True, "lat": q.lat, "lon": q.lon,
+            "sources": sources[:60], "nearest": nearest,
+            "note": "Proximity screening from OpenStreetMap features - "
+                    "distances to mapped sources, not acoustic measurements."}
 
 
 class WeatherQuery(BaseModel):
