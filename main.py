@@ -59,7 +59,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v59"
+APP_VERSION = "deepseego-v60"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -1504,6 +1504,36 @@ def _shape_geo(name: str, feature: Optional[int]):
     return {"type": multi, "coordinates": parts}, gtype
 
 
+def _point_features(shape_refs):
+    """Return [(label, lon, lat), ...] for point layers, using each point's
+    own name/label. Non-point layers contribute nothing here."""
+    pts = []
+    for ref in shape_refs:
+        fc, _ = _load_shape_fc(ref.name)
+        if fc.get("gtype") != "point":
+            continue
+        for i, f in enumerate(fc["features"]):
+            g = f["geometry"]
+            label = f.get("label") or f"Point {i + 1}"
+            if g["type"] == "Point":
+                pts.append((label, g["coordinates"][0], g["coordinates"][1]))
+            elif g["type"] == "MultiPoint":
+                for c in g["coordinates"]:
+                    pts.append((label, c[0], c[1]))
+    return pts
+
+
+def _all_points(shape_refs):
+    """True if every selected layer is a point layer."""
+    if not shape_refs:
+        return False
+    for ref in shape_refs:
+        fc, _ = _load_shape_fc(ref.name)
+        if fc.get("gtype") != "point":
+            return False
+    return True
+
+
 def _advanced_region(spec: RegionSpec) -> ee.Geometry:
     """Buffer one-or-more saved layers, optionally intersect with an ROI."""
     if not spec.shapes:
@@ -1583,6 +1613,33 @@ def fragments(q: FragmentsQuery):
             raise HTTPException(status_code=400, detail="Select line layers first.")
         if not (q.buffer_km and q.buffer_km > 0):
             raise HTTPException(status_code=400, detail="Buffer must be > 0 km.")
+
+        # POINT MODE: if every selected layer is points, make one circular
+        # fragment per point, each carrying the point's own name. No dissolving
+        # here - each point stays a separate, identifiable fragment/zone.
+        if _all_points(q.shapes) and q.boundary is None and not q.extras:
+            pfeats = _point_features(q.shapes)
+            if not pfeats:
+                raise HTTPException(status_code=400,
+                                    detail="No points found in the selected layers.")
+            out = []
+            for i, (label, lon, lat) in enumerate(pfeats):
+                circ = _metric_buffer(Point(lon, lat), q.buffer_km)
+                circ = make_valid(circ).simplify(0.0003, preserve_topology=True)
+                if circ.is_empty:
+                    continue
+                out.append({"id": len(out), "name": label,
+                            "area_km2": round(_area_km2(circ), 3),
+                            "lat": round(lat, 6), "lon": round(lon, 6),
+                            "geometry": shp_mapping(circ)})
+            if not out:
+                raise HTTPException(status_code=400,
+                                    detail="Points produced no fragments.")
+            if len(out) > 60:
+                raise HTTPException(status_code=400, detail=(
+                    f"{len(out)} points - too many; use fewer points or a "
+                    "smaller layer."))
+            return {"fragments": out, "point_mode": True}
 
         ops = []
         parts = [make_valid(shp_shape(_slim_geo(_shape_geo(r.name, r.feature)[0],
