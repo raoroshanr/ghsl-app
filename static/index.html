@@ -628,6 +628,18 @@ label.chk input{width:auto}
       <button id="aqRun" class="primary" style="margin-top:8px" disabled>Get live air quality</button>
       <button id="aqApportion" style="margin-top:6px" disabled>Pollutant source-proximity model</button>
       <p class="hint">Source scan covers a fixed 500 m radius around the point — every road and mapped feature within it.</p>
+      <label class="fld" for="dispStability" style="margin-top:8px">Dispersion &mdash; atmospheric stability</label>
+      <select id="dispStability">
+        <option value="" selected>Auto (from ERA5 sun &amp; wind)</option>
+        <option value="A">A &middot; very unstable</option>
+        <option value="B">B &middot; unstable</option>
+        <option value="C">C &middot; slightly unstable</option>
+        <option value="D">D &middot; neutral</option>
+        <option value="E">E &middot; stable</option>
+        <option value="F">F &middot; very stable</option>
+      </select>
+      <button id="aqDisperse" style="margin-top:6px" disabled>Model plume dispersion</button>
+      <button id="aqDisperseClear" class="ghost" style="margin-top:6px" hidden>Clear plume</button>
     </section>
     </div><!-- /tab-aq -->
 
@@ -699,7 +711,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v64</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v65</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -711,7 +723,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v64";
+const DSG_VERSION = "deepseego-v65";
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
 
@@ -1158,7 +1170,7 @@ map.on('click', ev => {
     L.circleMarker([lat, lng], {radius: 6, color: '#00B4D8',
       fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer);
     $('aqRun').disabled = false;
-    $('aqApportion').disabled = false;
+    $('aqApportion').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false;
     $('aqStatus').textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
     return;
   }
@@ -1637,6 +1649,7 @@ function wipeMapAnalysis(){
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
     try { aqState.lat = null; aqState.lon = null; } catch(e){}
+    try { if(dispersionOverlay){ map.removeLayer(dispersionOverlay); dispersionOverlay = null; } } catch(e){}
     [_thermalTab, _sunlightTab, _noiseTab, _weatherTab].forEach(t => {
       try { if(t){ t.state.lat = null; t.state.lon = null; } } catch(e){}
     });
@@ -2607,6 +2620,54 @@ function weatherInit(){ clearAllClimatePoints(); _weatherTab.init(); }
 function sunlightInit(){ clearAllClimatePoints(); _sunlightTab.init(); }
 function noiseInit(){ clearAllClimatePoints(); _noiseTab.init(); }
 
+/* ---------- Gaussian plume dispersion ---------- */
+let dispersionOverlay = null;
+function clearDispersion(){
+  if(dispersionOverlay){ map.removeLayer(dispersionOverlay); dispersionOverlay = null; }
+  $('aqDisperseClear').hidden = true;
+}
+async function runDispersion(){
+  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
+  const btn = $('aqDisperse'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Modelling plume\u2026';
+  try{
+    const j = await api('/dispersion', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon, radius_m: 800,
+        stability: $('dispStability').value || null})});
+    if(!j.ok){ toast(j.note || 'Dispersion unavailable', 7000); btn.disabled=false; btn.textContent=orig; return; }
+    clearDispersion();
+    dispersionOverlay = L.imageOverlay(j.image, j.bounds,
+      {opacity: 0.72, pane: 'datapane', interactive: false}).addTo(map);
+    map.fitBounds(j.bounds);
+    $('aqDisperseClear').hidden = false;
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Plume dispersion \u00b7 ' +
+      aqState.lat.toFixed(4) + ', ' + aqState.lon.toFixed(4);
+    const windTxt = j.wind_from_deg == null ? '\u2014' :
+      j.wind_from_deg.toFixed(0) + '\u00b0 @ ' + j.wind_speed_ms + ' m/s';
+    const STAB = {A:'very unstable',B:'unstable',C:'slightly unstable',
+      D:'neutral',E:'stable',F:'very stable'}[j.stability] || '';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Gaussian plume dispersion</div>` +
+      `<div class="chips">` +
+      `<span class="chip2"><b>Wind from</b> ${windTxt}</span>` +
+      `<span class="chip2"><b>Stability</b> ${j.stability} \u00b7 ${STAB}</span>` +
+      `<span class="chip2"><b>Sources</b> ${j.n_sources}</span></div>` +
+      `<div style="margin-top:8px;display:flex;align-items:center;gap:8px">` +
+      `<span class="per">Relative concentration</span>` +
+      `<span style="flex:1;height:12px;border-radius:3px;background:linear-gradient(90deg,#0B5A49,#00B4D8,#E9C46A,#E4572E)"></span>` +
+      `<span class="per">low \u2192 high</span></div>` +
+      `<p class="srcNote">${j.note}</p></div>` +
+      (typeof provenanceBlock === 'function'
+        ? provenanceBlock(['osm','era5_wind'], {lat: aqState.lat, lon: aqState.lon}) : '');
+  }catch(e){ toast('Dispersion: ' + e.message, 8000); }
+  btn.disabled = false; btn.textContent = orig;
+}
+if($('aqDisperse')) $('aqDisperse').addEventListener('click', runDispersion);
+if($('aqDisperseClear')) $('aqDisperseClear').addEventListener('click', clearDispersion);
+
 /* ---------- Live Air Quality (multi-provider) ---------- */
 const AQ_PROVIDERS = [
   ['open-meteo', 'Open-Meteo (CAMS)', 'keyless'],
@@ -2656,7 +2717,7 @@ async function aqGeocode(){
       fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer)
       .bindPopup(j[0].display_name.split(',').slice(0, 3).join(',')).openPopup();
     $('aqRun').disabled = false;
-    $('aqApportion').disabled = false;
+    $('aqApportion').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false;
     $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
       ' \u2014 or tap the map to adjust';
   }catch(e){ toast('Search failed'); }
