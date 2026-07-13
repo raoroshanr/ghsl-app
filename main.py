@@ -26,6 +26,7 @@ import re
 import json
 import time
 import math
+import numpy as np
 import struct
 import zipfile
 import xml.etree.ElementTree as ET
@@ -59,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v64"
+APP_VERSION = "deepseego-v65"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -2573,6 +2574,207 @@ def _classify_source(tags):
              "service": 0.2}.get(hw, 0.3)
         return "traffic", w
     return None, 0.0
+
+
+
+# ===================== Gaussian plume dispersion =========================
+# A steady-state Gaussian plume evaluated on a grid. This is a SCREENING model:
+# it assumes flat terrain and steady, uniform wind, and does NOT resolve
+# individual buildings (street-canyon effects are a separate, future step).
+# Emission strengths are RELATIVE (from source potency weights), so the spatial
+# PATTERN is meaningful while absolute concentrations are only indicative.
+
+def _sigma_urban(x, stab):
+    """Urban Briggs (McElroy-Pooler) dispersion coefficients (metres)."""
+    x = np.maximum(x, 1.0)
+    if stab in ("A", "B"):
+        sy = 0.32 * x * (1 + 0.0004 * x) ** -0.5
+        sz = 0.24 * x * (1 + 0.001 * x) ** 0.5
+    elif stab == "C":
+        sy = 0.22 * x * (1 + 0.0004 * x) ** -0.5
+        sz = 0.20 * x
+    elif stab == "D":
+        sy = 0.16 * x * (1 + 0.0004 * x) ** -0.5
+        sz = 0.14 * x * (1 + 0.0003 * x) ** -0.5
+    else:                                    # E / F (stable)
+        sy = 0.11 * x * (1 + 0.0004 * x) ** -0.5
+        sz = 0.08 * x * (1 + 0.00015 * x) ** -0.5
+    return sy, sz
+
+
+def _plume(gx, gy, sx, sy_src, Q, H, u, wind_from_deg, stab, z=1.5):
+    """Concentration on grid (gx=east, gy=north metres) from a point source."""
+    th = math.radians(wind_from_deg)
+    wx, wy = -math.sin(th), -math.cos(th)     # downwind unit vector
+    dx, dy = gx - sx, gy - sy_src
+    xp = dx * wx + dy * wy                     # downwind distance
+    yp = -dx * wy + dy * wx                    # crosswind distance
+    valid = xp > 1.0
+    xpv = np.where(valid, xp, 1.0)
+    sy, sz = _sigma_urban(xpv, stab)
+    u = max(u, 0.5)
+    C = (Q / (2 * np.pi * u * sy * sz)) * np.exp(-(yp ** 2) / (2 * sy ** 2)) * (
+        np.exp(-((z - H) ** 2) / (2 * sz ** 2)) +
+        np.exp(-((z + H) ** 2) / (2 * sz ** 2)))
+    return np.where(valid, C, 0.0)
+
+
+def _stability_from_era5(solar_w_m2, u):
+    """Pasquill-Gifford stability class from mean insolation + wind speed.
+    solar_w_m2: mean downward shortwave (W/m2); u: wind speed (m/s)."""
+    # insolation category
+    if solar_w_m2 is None:
+        return "D"
+    if solar_w_m2 > 300:
+        ins = "strong"
+    elif solar_w_m2 > 150:
+        ins = "moderate"
+    elif solar_w_m2 > 30:
+        ins = "slight"
+    else:
+        return "E" if u < 3 else "D"          # night-ish
+    table = {
+        "strong":   [("A", 2), ("B", 3), ("B", 5), ("C", 6), ("C", 99)],
+        "moderate": [("B", 2), ("B", 3), ("C", 5), ("D", 6), ("D", 99)],
+        "slight":   [("B", 2), ("C", 3), ("C", 5), ("D", 6), ("D", 99)],
+    }
+    for cls, lim in table[ins]:
+        if u < lim:
+            return cls
+    return "D"
+
+
+_PLUME_CMAP = np.array([
+    [0.00, 11, 90, 73], [0.30, 0, 180, 216],
+    [0.60, 233, 196, 106], [1.00, 228, 87, 46]], dtype=float)
+
+
+def _plume_png(grid, pmax):
+    from PIL import Image
+    g = np.clip(grid / (pmax if pmax > 0 else 1.0), 0, 1)
+    xp = _PLUME_CMAP[:, 0]
+    r = np.interp(g, xp, _PLUME_CMAP[:, 1])
+    gg = np.interp(g, xp, _PLUME_CMAP[:, 2])
+    b = np.interp(g, xp, _PLUME_CMAP[:, 3])
+    a = np.clip(g * 1.6, 0, 1) * 205
+    rgba = np.flipud(np.dstack([r, gg, b, a]).astype(np.uint8))
+    buf = io.BytesIO()
+    Image.fromarray(rgba, "RGBA").save(buf, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+class DispersionQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: int = 800
+    stability: Optional[str] = None            # override A..F, else from ERA5
+
+
+# effective release heights (m) and grid resolution
+_SRC_H = {"traffic": 1.0, "industry": 12.0, "power": 25.0,
+          "waste": 5.0, "construction": 3.0}
+
+
+@app.post("/dispersion")
+@ee_errors
+def dispersion(q: DispersionQuery):
+    """Gaussian-plume concentration field over the scan area, from OSM sources
+    and ERA5 wind. Returns a PNG overlay + bounds. Screening model only."""
+    ensure_ee()
+    R = max(300, min(1500, int(q.radius_m or 800)))
+    lat0, lon0 = q.lat, q.lon
+
+    # --- wind + solar from ERA5-Land (monthly resultant, like the AQ model) ---
+    wind_from, u_ms, solar = None, None, None
+    try:
+        pt6 = ee.Geometry.Point([lon0, lat0]).buffer(6000)
+        coll = (ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
+                .filterDate("2019-01-01", "2025-01-01"))
+        w = coll.select(["u_component_of_wind_10m", "v_component_of_wind_10m",
+                         "surface_solar_radiation_downwards_sum"]).mean()
+        rr = w.reduceRegion(ee.Reducer.mean(), pt6, 9000,
+                            bestEffort=True).getInfo()
+        uc = rr.get("u_component_of_wind_10m")
+        vc = rr.get("v_component_of_wind_10m")
+        srad = rr.get("surface_solar_radiation_downwards_sum")
+        if uc is not None and vc is not None:
+            u_ms = float((uc * uc + vc * vc) ** 0.5)
+            wind_from = (math.degrees(math.atan2(-uc, -vc))) % 360
+        if srad is not None:
+            solar = float(srad) / 86400.0      # J/m2/day -> W/m2 mean
+    except Exception:
+        pass
+    if wind_from is None:
+        wind_from, u_ms = 270.0, 2.0           # fallback: light westerly
+    stab = (q.stability or _stability_from_era5(solar, u_ms or 2.0)).upper()
+
+    # --- sources from OSM (reuse the proximity scan) ---
+    osm = _overpass_sources(lat0, lon0, R)
+    if osm is None:
+        return {"ok": False,
+                "note": "OpenStreetMap (Overpass) is busy; try again shortly."}
+
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat0))
+
+    def to_xy(la, lo):
+        return (lo - lon0) * mlon, (la - lat0) * mlat
+
+    sources = []                                # (sx, sy, Q, H)
+    for el in osm.get("elements", []):
+        tags = el.get("tags", {})
+        cat, w = _classify_source(tags)
+        if not cat or w <= 0:
+            continue
+        H = _SRC_H.get(cat, 5.0)
+        geom = el.get("geometry")
+        if geom and tags.get("highway"):
+            # discretise a road into segment-midpoint point sources
+            pts = [(p["lat"], p["lon"]) for p in geom]
+            for a, b in zip(pts[:-1], pts[1:]):
+                mlat_, mlon_ = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+                seg = _haversine_m(a[0], a[1], b[0], b[1])
+                sx, sy = to_xy(mlat_, mlon_)
+                sources.append((sx, sy, w * max(seg, 5) / 50.0, H))
+        else:
+            c = el.get("center") or ({"lat": el.get("lat"), "lon": el.get("lon")}
+                                     if el.get("lat") is not None else None)
+            if c and c.get("lat") is not None:
+                sx, sy = to_xy(c["lat"], c["lon"])
+                sources.append((sx, sy, w * 3.0, H))
+    if not sources:
+        return {"ok": False, "note": "No mapped sources within the radius."}
+    if len(sources) > 4000:
+        sources = sources[:4000]
+
+    # --- evaluate the plume grid ---
+    N = 90
+    xs = np.linspace(-R, R, N)
+    X, Y = np.meshgrid(xs, xs)
+    grid = np.zeros_like(X)
+    for (sx, sy, Q, H) in sources:
+        grid += _plume(X, Y, sx, sy, Q, H, u_ms or 2.0, wind_from, stab)
+
+    pos = grid[grid > 0]
+    pmax = float(np.percentile(pos, 98)) if pos.size else 1.0
+    png = _plume_png(grid, pmax)
+
+    # geographic bounds of the grid
+    south = lat0 - R / mlat
+    north = lat0 + R / mlat
+    west = lon0 - R / mlon
+    east = lon0 + R / mlon
+
+    return {"ok": True, "lat": lat0, "lon": lon0, "radius_m": R,
+            "image": png, "bounds": [[south, west], [north, east]],
+            "wind_from_deg": None if wind_from is None else round(wind_from, 1),
+            "wind_speed_ms": None if u_ms is None else round(u_ms, 2),
+            "stability": stab, "n_sources": len(sources),
+            "note": ("Gaussian-plume screening model. Relative concentrations "
+                     "(emission strengths are source potency weights, not "
+                     "measured emission factors) - the spatial pattern is "
+                     "meaningful, absolute values indicative. Flat terrain, "
+                     "steady ERA5 wind; individual buildings not resolved.")}
 
 
 @app.post("/source_apportion")
