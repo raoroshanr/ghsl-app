@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v67"
+APP_VERSION = "deepseego-v69"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
