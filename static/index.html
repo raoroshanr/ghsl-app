@@ -856,7 +856,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v79</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v81</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -883,7 +883,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v79";
+const DSG_VERSION = "deepseego-v81";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -2243,23 +2243,34 @@ $('strip').addEventListener('click', async ev => {
   const frame = ev.target.closest('.frame');
   if(!frame || !lastAnalysis || !frame.querySelector('img')) return;
   const year = frame.dataset.year === 'ctx' ? null : +frame.dataset.year;
-  toast('Preparing high-resolution image\u2026', 8000);
+  Progress.start('High-resolution image',
+    'Rendering, then adding scale, north arrow and legend\u2026', 0);
   try{
-    const j = await api('/hires', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+    const _tok = await authToken();
+    const r = await fetch(BACKEND_URL + '/hires', {method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'},
+        _tok ? {Authorization: 'Bearer ' + _tok} : {}),
       body: JSON.stringify({dataset: lastAnalysis.dataset, year,
                             region: lastAnalysis.region})});
-    try{
-      const r = await fetch(j.url);
-      const b = await r.blob();
+    if(!r.ok){
+      let d = ''; try{ d = (await r.json()).detail || ''; }catch(e){}
+      throw new Error(d || ('HTTP ' + r.status));
+    }
+    const ct = r.headers.get('content-type') || '';
+    if(ct.indexOf('image/png') >= 0){
+      const b = await r.blob();                    // annotated PNG
       const a = document.createElement('a');
       a.href = URL.createObjectURL(b);
       a.download = `DeepSeeGo_${lastAnalysis.dataset}_${year == null ? 'satellite' : year}.png`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 4000);
       toast('High-resolution image downloaded');
-    }catch(x){ window.open(j.url, '_blank'); }
+    } else {
+      const j = await r.json();                    // fallback: plain EE image
+      window.open(j.url, '_blank');
+    }
   }catch(e){ toast('High-res: ' + e.message, 7000); }
+  finally { Progress.done(); }
 });
 
 /* ---------- Advanced Analysis: guided zone wizard ---------- */
@@ -2588,7 +2599,7 @@ function resetFragments(){
   if(zc){
     zc.hidden = true;
     $('drawerActions').hidden = true;
-    $('zwyBtn').disabled = true;
+    $('zwyBtn').disabled = false;   // available as soon as zones are confirmed
     $('pdfBtn').hidden = true;
     $('advZoneConfirm').disabled = true; $('advZoneNew').disabled = true;
     $('advZonesPreview').disabled = true;
@@ -2811,7 +2822,7 @@ $('advZonesConfirm').addEventListener('click', () => {
   $('advCalcSec').hidden = false;
   $('advCalcSec').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   $('drawerActions').hidden = false;
-  $('zwyBtn').disabled = true;             // unlocks after the year calculation
+  $('zwyBtn').disabled = false;            // no need to run Calculate first
   $('drawer').classList.add('open');
   toast('Zones confirmed \u2014 run \u201c' + $('advCalcOne').textContent +
         '\u201d in the analysis pane.');
@@ -2846,7 +2857,7 @@ function runZoneAnalysis(zones){
   $('advCalcSec').hidden = false;
   $('advCalcSec').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   $('drawerActions').hidden = false;
-  $('zwyBtn').disabled = true;
+  $('zwyBtn').disabled = false;
   $('drawer').classList.add('open');
   toast('Zones confirmed \u2014 run \u201c' + $('advCalcOne').textContent +
         '\u201d in the analysis pane.');
