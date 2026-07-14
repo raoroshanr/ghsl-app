@@ -482,6 +482,7 @@ label.chk input{width:auto}
       <button class="active" data-tab="explore">Explore</button>
       <button data-tab="site">Site Brief</button>
       <button data-tab="adv">Zonal Analysis</button>
+      <button data-tab="slope">Slope Analysis</button>
       <button data-tab="weather">Weather</button>
       <button data-tab="aq">Air</button>
       <button data-tab="thermal">Heat</button>
@@ -567,6 +568,30 @@ label.chk input{width:auto}
       <div id="dsInfo">Loading…</div>
     </section>
     </div><!-- /tab-explore -->
+
+    <div id="tab-slope" hidden>
+    <section>
+      <h2>Slope Analysis</h2>
+      <p class="hint">Pick two points on the map. You get the elevation at each, the slope between them, and the full terrain profile along the line.</p>
+      <label class="fld" for="slopeDem">Elevation model (DEM)</label>
+      <select id="slopeDem">
+        <option value="cop30" selected>Copernicus GLO-30 &middot; 30 m (best global)</option>
+        <option value="nasadem">NASADEM &middot; 30 m</option>
+        <option value="alos">ALOS AW3D30 &middot; 30 m</option>
+        <option value="srtm">SRTM &middot; 30 m</option>
+      </select>
+      <label class="fld" for="slopeSearch">Search a location</label>
+      <div class="searchGoRow">
+        <input type="text" id="slopeSearch" placeholder="Type a place & press Enter">
+        <button id="slopeSearchGo" class="ghost">Go</button>
+      </div>
+      <button id="slopePickA" style="width:100%;margin-top:6px">1 &middot; Pick point A</button>
+      <button id="slopePickB" style="width:100%;margin-top:6px" disabled>2 &middot; Pick point B</button>
+      <div id="slopeStatus" class="hint" style="min-height:20px">No points selected.</div>
+      <button id="slopeRun" class="primary" style="margin-top:8px" disabled>Compute slope</button>
+      <button id="slopeClear" class="ghost" style="width:100%;margin-top:6px">Clear points</button>
+    </section>
+    </div><!-- /tab-slope -->
 
     <div id="tab-adv" hidden>
     <section>
@@ -798,6 +823,42 @@ label.chk input{width:auto}
       <button id="suPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="suStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="suRun" class="primary" style="margin-top:8px" disabled>Analyse sunlight</button>
+
+      <div class="stepH" style="margin-top:14px">Sun path on the map</div>
+      <p class="hint">The 3D sun dome, projected onto the ground at your point &mdash; so azimuths line up with real compass directions on the map.</p>
+      <label class="fld" for="spDate">Date</label>
+      <input type="date" id="spDate">
+      <label class="fld" for="spTime">Time (local solar) &mdash; <span id="spTimeLbl">12:00</span></label>
+      <input type="range" id="spTime" min="0" max="1439" step="5" value="720">
+      <label class="fld" for="spRadius">Dome radius on the map</label>
+      <select id="spRadius">
+        <option value="150">150 m</option>
+        <option value="300" selected>300 m</option>
+        <option value="600">600 m</option>
+        <option value="1200">1.2 km</option>
+      </select>
+      <label class="fld" for="spObjH">Shadow of an object this tall</label>
+      <select id="spObjH">
+        <option value="0">no shadow</option>
+        <option value="3">3 m</option>
+        <option value="10" selected>10 m</option>
+        <option value="30">30 m</option>
+      </select>
+      <button id="spDraw" class="primary" style="margin-top:8px" disabled>Draw sun path</button>
+      <button id="spClear" class="ghost" style="width:100%;margin-top:6px">Clear sun path</button>
+      <div id="spInfo" class="hint" style="min-height:20px"></div>
+
+      <div class="stepH" style="margin-top:14px">Building shadows</div>
+      <p class="hint">Casts the real shadow of every mapped building around your point, using its actual height, for the date &amp; time above.</p>
+      <label class="fld" for="shRadius">Buildings within</label>
+      <select id="shRadius">
+        <option value="200">200 m</option>
+        <option value="400" selected>400 m</option>
+        <option value="700">700 m</option>
+      </select>
+      <button id="shDraw" class="primary" style="margin-top:8px" disabled>Cast building shadows</button>
+      <button id="shClear" class="ghost" style="width:100%;margin-top:6px">Clear shadows</button>
+      <div id="shInfo" class="hint" style="min-height:20px"></div>
     </section>
     </div><!-- /tab-sunlight -->
 
@@ -856,7 +917,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v81</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v84</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -883,7 +944,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v81";
+const DSG_VERSION = "deepseego-v84";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1718,6 +1779,7 @@ function drawingActive(){
          mapClickMode === 'advCircle' || mapClickMode === 'sitePick' ||
          mapClickMode === 'routeA' || mapClickMode === 'routeB' ||
          mapClickMode === 'aqPick' || mapClickMode === 'thPick' || mapClickMode === 'wePick' ||
+         mapClickMode === 'slopeA' || mapClickMode === 'slopeB' ||
          mapClickMode === 'suPick' || mapClickMode === 'noPick' || mapClickMode === 'siteRoiR1' ||
          mapClickMode === 'siteRoiR2' || mapClickMode === 'siteRoiC' ||
          !!(mapClickMode && mapClickMode.circleRow);
@@ -1756,6 +1818,10 @@ map.on('click', ev => {
       `Rectangle  N ${b.getNorth().toFixed(4)}  S ${b.getSouth().toFixed(4)}  W ${b.getWest().toFixed(4)}  E ${b.getEast().toFixed(4)}`);
     return;
   }
+  if(mapClickMode === 'slopeA'){ mapClickMode = null;
+    slopeState.a = {lat, lon: lng}; slopeDraw(); return; }
+  if(mapClickMode === 'slopeB'){ mapClickMode = null;
+    slopeState.b = {lat, lon: lng}; slopeDraw(); return; }
   if(mapClickMode === 'wePick'){ mapClickMode = null; _weatherTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'thPick'){ mapClickMode = null; _thermalTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'suPick'){ mapClickMode = null; _sunlightTab.setPoint(lat, lng); return; }
@@ -2273,20 +2339,407 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
+/* ---------- Sun path (3D solar dome, projected onto the map) ----------
+   The sun's track IS a 3D dome over the point. A Leaflet map is top-down, so
+   we project that dome vertically onto the ground - which is exactly what a
+   standard sun-path diagram is, and it keeps azimuths aligned with real
+   compass directions on the map. Altitude becomes distance from the centre:
+   the horizon is the outer ring, the zenith is the centre.
+   Solar geometry is the NOAA algorithm - no satellite data needed.
+--------------------------------------------------------------------------- */
+const sunPathLayer = L.featureGroup().addTo(map);
+
+function solarPos(date, lat, lon){
+  const rad = Math.PI/180, deg = 180/Math.PI;
+  const jd = date.getTime()/86400000 + 2440587.5;
+  const t  = (jd - 2451545)/36525;
+  const L0 = (280.46646 + t*(36000.76983 + t*0.0003032)) % 360;
+  const M  = 357.52911 + t*(35999.05029 - 0.0001537*t);
+  const e  = 0.016708634 - t*(0.000042037 + 0.0000001267*t);
+  const C  = Math.sin(M*rad)*(1.914602 - t*(0.004817 + 0.000014*t))
+           + Math.sin(2*M*rad)*(0.019993 - 0.000101*t)
+           + Math.sin(3*M*rad)*0.000289;
+  const omega  = 125.04 - 1934.136*t;
+  const lambda = (L0 + C) - 0.00569 - 0.00478*Math.sin(omega*rad);
+  const e0 = 23 + (26 + ((21.448 - t*(46.815 + t*(0.00059 - t*0.001813))))/60)/60;
+  const ec = e0 + 0.00256*Math.cos(omega*rad);
+  const decl = Math.asin(Math.sin(ec*rad)*Math.sin(lambda*rad))*deg;
+  const y = Math.pow(Math.tan(ec/2*rad), 2);
+  const eqTime = 4*deg*(y*Math.sin(2*L0*rad) - 2*e*Math.sin(M*rad)
+    + 4*e*y*Math.sin(M*rad)*Math.cos(2*L0*rad)
+    - 0.5*y*y*Math.sin(4*L0*rad) - 1.25*e*e*Math.sin(2*M*rad));
+  const mins = date.getUTCHours()*60 + date.getUTCMinutes() + date.getUTCSeconds()/60;
+  const tst = ((mins + eqTime + 4*lon) % 1440 + 1440) % 1440;
+  let ha = tst/4 - 180; if(ha < -180) ha += 360;
+  const zen = Math.acos(Math.sin(lat*rad)*Math.sin(decl*rad)
+            + Math.cos(lat*rad)*Math.cos(decl*rad)*Math.cos(ha*rad))*deg;
+  let az = Math.atan2(Math.sin(ha*rad),
+        Math.cos(ha*rad)*Math.sin(lat*rad) - Math.tan(decl*rad)*Math.cos(lat*rad))*deg;
+  return {alt: 90 - zen, az: (az + 180) % 360, decl};
+}
+// project (altitude, azimuth) onto the ground: horizon = outer ring, zenith = centre
+function sunProject(lat, lon, alt, az, R){
+  const r = R * (90 - alt) / 90;                       // equidistant projection
+  const b = az * Math.PI/180;
+  const dLat = (r * Math.cos(b)) / 110540;
+  const dLon = (r * Math.sin(b)) / (111320 * Math.cos(lat*Math.PI/180));
+  return [lat + dLat, lon + dLon];
+}
+// a UTC Date whose *solar* time at this longitude is the given minutes
+function solarDate(dateStr, minutes, lon){
+  const [Y,M,D] = dateStr.split('-').map(Number);
+  const utcMin = minutes - 4*lon;                      // undo the solar offset
+  return new Date(Date.UTC(Y, M-1, D, 0, utcMin, 0));
+}
+function dayArc(dateStr, lat, lon, R){
+  const pts = [];
+  for(let m = 0; m <= 1439; m += 4){
+    const p = solarPos(solarDate(dateStr, m, lon), lat, lon);
+    if(p.alt > 0) pts.push(sunProject(lat, lon, p.alt, p.az, R));
+  }
+  return pts;
+}
+function clearSunPath(){ sunPathLayer.clearLayers(); $('spInfo').textContent = ''; }
+
+function drawSunPath(){
+  const st = _sunlightTab.state;
+  if(st.lat == null) return toast('Pick a point in the Sun tab first');
+  const lat = st.lat, lon = st.lon;
+  const R = +$('spRadius').value;
+  const dateStr = $('spDate').value || new Date().toISOString().slice(0,10);
+  const mins = +$('spTime').value;
+  const objH = +$('spObjH').value;
+  sunPathLayer.clearLayers();
+
+  // --- dome grid: altitude rings + compass spokes ---
+  [0, 30, 60].forEach(a => {
+    const ring = [];
+    for(let az = 0; az <= 360; az += 5) ring.push(sunProject(lat, lon, a, az, R));
+    L.polyline(ring, {color:'#7FD0BC', weight: a===0?1.6:0.8, opacity:.55,
+      dashArray: a===0?null:'3 5'}).addTo(sunPathLayer)
+      .bindTooltip(a + '\u00b0 altitude', {sticky:true});
+  });
+  [['N',0],['E',90],['S',180],['W',270]].forEach(([lab,az]) => {
+    L.polyline([[lat,lon], sunProject(lat,lon,0,az,R)],
+      {color:'#7FD0BC', weight:.7, opacity:.45}).addTo(sunPathLayer);
+    const p = sunProject(lat, lon, -6, az, R);
+    L.marker(p, {icon: L.divIcon({className:'distLbl',
+      html:`<span>${lab}</span>`, iconSize:[18,16], iconAnchor:[9,8]})})
+      .addTo(sunPathLayer);
+  });
+
+  // --- day arcs: solstices, equinox, and the chosen date ---
+  const Y = dateStr.slice(0,4);
+  [[`${Y}-06-21`, '#E4572E', 'June solstice'],
+   [`${Y}-03-20`, '#E9C46A', 'Equinox'],
+   [`${Y}-12-21`, '#00B4D8', 'December solstice']].forEach(([ds, col, nm]) => {
+    const arc = dayArc(ds, lat, lon, R);
+    if(arc.length > 1)
+      L.polyline(arc, {color: col, weight: 2.2, opacity: .9})
+        .addTo(sunPathLayer).bindTooltip(nm);
+  });
+  const today = dayArc(dateStr, lat, lon, R);
+  if(today.length > 1)
+    L.polyline(today, {color:'#fff', weight: 2.6, opacity: .95, dashArray:'5 4'})
+      .addTo(sunPathLayer).bindTooltip('Selected date: ' + dateStr);
+
+  // --- hour marks along the chosen day ---
+  for(let h = 4; h <= 20; h += 2){
+    const p = solarPos(solarDate(dateStr, h*60, lon), lat, lon);
+    if(p.alt <= 0) continue;
+    const xy = sunProject(lat, lon, p.alt, p.az, R);
+    L.circleMarker(xy, {radius:2.5, color:'#fff', weight:1,
+      fillColor:'#fff', fillOpacity:.9}).addTo(sunPathLayer)
+      .bindTooltip(h + ':00');
+  }
+
+  // --- the sun right now (chosen time) + the shadow it casts ---
+  const now = solarPos(solarDate(dateStr, mins, lon), lat, lon);
+  const hh = String(Math.floor(mins/60)).padStart(2,'0'),
+        mm = String(mins%60).padStart(2,'0');
+  if(now.alt > 0){
+    const sp = sunProject(lat, lon, now.alt, now.az, R);
+    L.polyline([[lat,lon], sp], {color:'#E9C46A', weight:1.5, dashArray:'4 4'})
+      .addTo(sunPathLayer);
+    L.circleMarker(sp, {radius:8, color:'#fff', weight:2,
+      fillColor:'#FFE01B', fillOpacity:1}).addTo(sunPathLayer)
+      .bindTooltip(`Sun ${hh}:${mm} \u00b7 alt ${now.alt.toFixed(1)}\u00b0 \u00b7 az ${now.az.toFixed(1)}\u00b0`,
+                   {permanent:false});
+    // shadow: opposite bearing, length = h / tan(altitude)
+    if(objH > 0){
+      const len = objH / Math.tan(now.alt*Math.PI/180);
+      const b = ((now.az + 180) % 360) * Math.PI/180;
+      const eLat = lat + (len*Math.cos(b))/110540;
+      const eLon = lon + (len*Math.sin(b))/(111320*Math.cos(lat*Math.PI/180));
+      L.polyline([[lat,lon],[eLat,eLon]], {color:'#22313A', weight:6,
+        opacity:.75, lineCap:'round'}).addTo(sunPathLayer)
+        .bindTooltip(`Shadow of a ${objH} m object: ${len.toFixed(1)} m`);
+    }
+  }
+  addCrosshair(sunPathLayer, lat, lon, '#E4572E');
+  map.fitBounds(sunPathLayer.getBounds().pad(0.15));
+
+  // --- sunrise / sunset / noon for the chosen date ---
+  let rise=null, set=null, best={alt:-99};
+  for(let m=0;m<1440;m+=2){
+    const p = solarPos(solarDate(dateStr, m, lon), lat, lon);
+    if(p.alt > best.alt) best = {...p, m};
+    if(rise===null && p.alt > 0) rise = m;
+    if(rise!==null && p.alt > 0) set = m;
+  }
+  const fmt = m => m==null ? '\u2014' :
+    String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+  const dayLen = (rise!=null && set!=null) ? ((set-rise)/60).toFixed(1)+' h' : '\u2014';
+  $('spInfo').innerHTML =
+    `<b>${dateStr}</b> \u00b7 sunrise ${fmt(rise)} \u00b7 solar noon ${fmt(best.m)} ` +
+    `(alt ${best.alt.toFixed(1)}\u00b0) \u00b7 sunset ${fmt(set)} \u00b7 day ${dayLen}<br>` +
+    `At ${hh}:${mm}: ` + (now.alt > 0
+      ? `altitude <b>${now.alt.toFixed(1)}\u00b0</b>, azimuth <b>${now.az.toFixed(1)}\u00b0</b>`
+      : `<b>sun is below the horizon</b>`) +
+    `<br><span class="per">Times are LOCAL SOLAR time (noon = sun at its highest), not clock time.</span>`;
+}
+
+/* ---------- Building shadows (real footprints x real heights x real sun) ----
+   Each building's shadow is the area swept as the footprint is projected away
+   from the sun: length = height / tan(altitude), bearing = azimuth + 180.
+   The shadow polygon is the convex hull of the footprint UNION the translated
+   footprint - the standard construction, exact for convex footprints and a
+   close approximation otherwise.
+--------------------------------------------------------------------------- */
+const shadowLayer = L.featureGroup().addTo(map);
+let SH_BUILDINGS = null;          // cached footprints+heights for the point
+
+function convexHull(pts){
+  const p = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if(p.length < 3) return p;
+  const cross = (o,a,b) => (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]);
+  const lo = [];
+  for(const q of p){ while(lo.length>=2 && cross(lo[lo.length-2],lo[lo.length-1],q)<=0) lo.pop(); lo.push(q); }
+  const up = [];
+  for(const q of p.slice().reverse()){ while(up.length>=2 && cross(up[up.length-2],up[up.length-1],q)<=0) up.pop(); up.push(q); }
+  lo.pop(); up.pop();
+  return lo.concat(up);
+}
+function pointInPoly(pt, poly){
+  let c = false;
+  for(let i = 0, j = poly.length - 1; i < poly.length; j = i++){
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if(((yi > pt[1]) !== (yj > pt[1])) &&
+       (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi)) c = !c;
+  }
+  return c;
+}
+
+async function castShadows(){
+  const st = _sunlightTab.state;
+  if(st.lat == null) return toast('Pick a point in the Sun tab first');
+  const btn = $('shDraw'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Fetching buildings\u2026';
+  Progress.start('Building shadows',
+    'Fetching footprints and heights (Open Buildings)\u2026', 0);
+  try{
+    const R = +$('shRadius').value;
+    const j = await api('/building_heights', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: st.lat, lon: st.lon, radius_m: R})});
+    if(!j.buildings || !j.buildings.length){
+      toast('No buildings with height data here'); return;
+    }
+    SH_BUILDINGS = j;
+    renderShadows();
+  }catch(e){ toast('Shadows: ' + e.message, 9000); }
+  finally { Progress.done(); btn.disabled = false; btn.textContent = orig; }
+}
+
+function renderShadows(){
+  shadowLayer.clearLayers();
+  if(!SH_BUILDINGS) return;
+  const st = _sunlightTab.state;
+  const lat0 = st.lat, lon0 = st.lon;
+  const dateStr = $('spDate').value || new Date().toISOString().slice(0,10);
+  const mins = +$('spTime').value;
+  const sun = solarPos(solarDate(dateStr, mins, lon0), lat0, lon0);
+  const hh = String(Math.floor(mins/60)).padStart(2,'0'),
+        mm = String(mins%60).padStart(2,'0');
+
+  if(sun.alt <= 0){
+    $('shInfo').innerHTML =
+      `<b>${hh}:${mm}</b> \u2014 the sun is below the horizon: everything is in shade.`;
+    return;
+  }
+  // metres-per-degree at this latitude
+  const mLat = 110540, mLon = 111320 * Math.cos(lat0 * Math.PI/180);
+  const bearing = ((sun.az + 180) % 360) * Math.PI/180;   // shadow points away
+  const cosB = Math.cos(bearing), sinB = Math.sin(bearing);
+  const tanA = Math.tan(sun.alt * Math.PI/180);
+
+  let shaded = 0, maxLen = 0;
+  const shadowPolys = [];
+  SH_BUILDINGS.buildings.forEach(b => {
+    const len = b.h / tanA;                       // shadow length in metres
+    if(len > maxLen) maxLen = len;
+    const dLat = (len * cosB) / mLat;
+    const dLon = (len * sinB) / mLon;
+    // footprint + translated footprint, in [lon,lat] for the hull maths
+    const base = b.ring.map(([la, lo]) => [lo, la]);
+    const tip  = b.ring.map(([la, lo]) => [lo + dLon, la + dLat]);
+    const hull = convexHull(base.concat(tip));
+    if(hull.length < 3) return;
+    shadowPolys.push(hull);
+    L.polygon(hull.map(([lo, la]) => [la, lo]),
+      {stroke:false, fillColor:'#16232B', fillOpacity:0.42})
+      .addTo(shadowLayer)
+      .bindPopup(`Building ${b.h} m tall<br>shadow ${len.toFixed(1)} m long<br>` +
+                 `sun alt ${sun.alt.toFixed(1)}\u00b0, az ${sun.az.toFixed(1)}\u00b0`);
+    // the building itself on top of its shadow
+    L.polygon(b.ring, {color:'#E9C46A', weight:0.8,
+      fillColor:'#E9C46A', fillOpacity:0.55}).addTo(shadowLayer);
+  });
+
+  // is the picked point itself in shade?
+  const me = [lon0, lat0];
+  const inShade = shadowPolys.some(p => pointInPoly(me, p));
+  addCrosshair(shadowLayer, lat0, lon0, inShade ? '#22313A' : '#FFE01B',
+               inShade ? 'IN SHADE' : 'IN SUN');
+
+  $('shInfo').innerHTML =
+    `<b>${dateStr} ${hh}:${mm}</b> \u00b7 sun altitude ${sun.alt.toFixed(1)}\u00b0, ` +
+    `azimuth ${sun.az.toFixed(1)}\u00b0<br>` +
+    `${SH_BUILDINGS.buildings.length} buildings \u00b7 longest shadow ` +
+    `${maxLen.toFixed(0)} m<br>` +
+    `Your point is <b style="color:${inShade ? '#9FB0A8' : '#E9C46A'}">` +
+    `${inShade ? 'IN SHADE' : 'IN SUN'}</b> at this moment.` +
+    `<br><span class="per">Heights are Sentinel-2 estimates (~4 m); shadows ` +
+    `assume flat ground and ignore trees. Indicative, not a survey.</span>`;
+}
+function clearShadows(){
+  shadowLayer.clearLayers(); SH_BUILDINGS = null; $('shInfo').textContent = '';
+}
+
+/* ---------- Slope Analysis (two points on a DEM) ---------- */
+const slopeLayer = L.featureGroup().addTo(map);
+const slopeState = {a: null, b: null, inited: false};
+
+function slopeDraw(){
+  slopeLayer.clearLayers();
+  const {a, b} = slopeState;
+  if(a) addCrosshair(slopeLayer, a.lat, a.lon, '#0B5A49', 'A');
+  if(b) addCrosshair(slopeLayer, b.lat, b.lon, '#E4572E', 'B');
+  if(a && b){
+    L.polyline([[a.lat, a.lon], [b.lat, b.lon]],
+      {color: '#E9C46A', weight: 3, dashArray: '6 5'}).addTo(slopeLayer);
+    map.fitBounds(L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon]]).pad(0.35));
+  }
+  $('slopeRun').disabled = !(a && b);
+  $('slopePickB').disabled = !a;
+  $('slopeStatus').textContent =
+    !a ? 'No points selected.' :
+    !b ? 'A: ' + a.lat.toFixed(5) + ', ' + a.lon.toFixed(5) + ' \u2014 now pick B.' :
+    'A: ' + a.lat.toFixed(5) + ', ' + a.lon.toFixed(5) +
+    '   B: ' + b.lat.toFixed(5) + ', ' + b.lon.toFixed(5);
+}
+function slopeInit(){
+  if(slopeState.inited) return; slopeState.inited = true;
+  $('slopePickA').addEventListener('click', () => {
+    mapClickMode = 'slopeA';
+    $('slopeStatus').textContent = 'Tap point A on the map\u2026';
+  });
+  $('slopePickB').addEventListener('click', () => {
+    mapClickMode = 'slopeB';
+    $('slopeStatus').textContent = 'Tap point B on the map\u2026';
+  });
+  $('slopeClear').addEventListener('click', () => {
+    slopeState.a = slopeState.b = null; slopeDraw();
+  });
+  $('slopeSearch').addEventListener('keydown', async ev => {
+    if(ev.key !== 'Enter') return; ev.preventDefault();
+    const q = ev.target.value.trim(); if(!q) return;
+    try{
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+      const j = await r.json();
+      if(j.length) map.setView([+j[0].lat, +j[0].lon], 14);
+      else toast('Place not found');
+    }catch(e){ toast('Search failed'); }
+  });
+  wireGoButton('slopeSearchGo', 'slopeSearch');
+  $('slopeRun').addEventListener('click', runSlope);
+}
+async function runSlope(){
+  const {a, b} = slopeState;
+  if(!a || !b) return;
+  const btn = $('slopeRun'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Sampling the DEM\u2026';
+  Progress.start('Slope analysis', 'Sampling elevations along the line\u2026', 0);
+  try{
+    const j = await api('/slope', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lat1: a.lat, lon1: a.lon, lat2: b.lat, lon2: b.lon,
+                            dem: $('slopeDem').value, samples: 80})});
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Slope \u00b7 ' + j.dem.label;
+    const up = j.rise_m >= 0;
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Slope A \u2192 B</div>` +
+      `<div class="chips">` +
+      `<span class="chip2"><b>${j.slope_pct}%</b><br>gradient</span>` +
+      `<span class="chip2"><b>${j.slope_deg}\u00b0</b><br>angle</span>` +
+      `<span class="chip2"><b>${j.gradient}</b><br>ratio</span></div>` +
+      `<table class="aqTable" style="margin-top:8px">` +
+      `<tr><td>Elevation at A</td><td style="text-align:right">${j.a.elev_m} m</td></tr>` +
+      `<tr><td>Elevation at B</td><td style="text-align:right">${j.b.elev_m} m</td></tr>` +
+      `<tr><td>${up ? 'Rise' : 'Fall'} (B \u2212 A)</td><td style="text-align:right">${j.rise_m} m</td></tr>` +
+      `<tr><td>Horizontal distance</td><td style="text-align:right">${j.distance_m >= 1000 ? (j.distance_m/1000).toFixed(2)+' km' : j.distance_m+' m'}</td></tr>` +
+      `<tr><td>Min / max along path</td><td style="text-align:right">${j.elev_min_m} / ${j.elev_max_m} m</td></tr>` +
+      `<tr><td>Total ascent / descent</td><td style="text-align:right">${j.total_ascent_m} / ${j.total_descent_m} m</td></tr>` +
+      `<tr><td>Steepest section crossed</td><td style="text-align:right">${j.steepest_section.pct}% (${j.steepest_section.deg}\u00b0)</td></tr>` +
+      `</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Terrain profile</div>` +
+      `<div class="chartBox" style="height:170px"><canvas id="cSlope"></canvas></div>` +
+      `<p class="srcNote">${j.note}</p></div>` +
+      (typeof provenanceBlock === 'function'
+        ? provenanceBlock([], {lat: a.lat, lon: a.lon}) : '');
+
+    await ensureChart();
+    siteCharts.forEach(c => c.destroy()); siteCharts = [];
+    const ctx = document.getElementById('cSlope').getContext('2d');
+    siteCharts.push(new Chart(ctx, {
+      type: 'line',
+      data: {labels: j.profile.map(p => (p.d_m/1000).toFixed(2)),
+             datasets: [{data: j.profile.map(p => p.elev_m),
+               borderColor: '#E9C46A', backgroundColor: 'rgba(233,196,106,.18)',
+               fill: true, tension: .25, pointRadius: 0, borderWidth: 2}]},
+      options: {responsive: true, maintainAspectRatio: false,
+        plugins: {legend: {display: false},
+          tooltip: {callbacks: {
+            title: it => 'at ' + it[0].label + ' km',
+            label: it => it.parsed.y.toFixed(1) + ' m'}}},
+        scales: {
+          x: {title: {display: true, text: 'distance (km)', color: '#9FB0A8'},
+              ticks: {color: '#9FB0A8', maxTicksLimit: 6}, grid: {color: '#2A3A33'}},
+          y: {title: {display: true, text: 'elevation (m)', color: '#9FB0A8'},
+              ticks: {color: '#9FB0A8'}, grid: {color: '#2A3A33'}}}}
+    }));
+  }catch(e){ toast('Slope: ' + e.message, 9000); }
+  finally { Progress.done(); }
+  btn.disabled = false; btn.textContent = orig;
+}
+
 /* ---------- Advanced Analysis: guided zone wizard ---------- */
 const BASKETS = {
   sat: {sub: ['explore'], default: 'explore'},
-  urban: {sub: ['site', 'adv'], default: 'site'},
+  urban: {sub: ['site', 'adv', 'slope'], default: 'site'},
   climate: {sub: ['weather', 'aq', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'weather', 'aq', 'thermal', 'sunlight', 'noise'];
+const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'weather', 'aq', 'thermal', 'sunlight', 'noise'];
 function wipeMapAnalysis(){
   // clear ALL analysis overlays so switching tabs leaves a clean map.
   // wrapped in try/catch: this may run at initial load before the layer
   // consts are initialised (temporal dead zone) - harmless to skip then.
   try {
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
-     sourceMarkers, siteLayer, buildingLayer, building3dLayer].forEach(g => {
+     sourceMarkers, siteLayer, buildingLayer, building3dLayer,
+   slopeLayer, sunPathLayer, shadowLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -2315,6 +2768,7 @@ function showTab(tab){
   if(tab === 'sunlight') sunlightInit();
   if(tab === 'noise') noiseInit();
   if(tab === 'site') siteInit();
+  if(tab === 'slope') slopeInit();
 }
 function setBasket(name){
   document.querySelectorAll('#basketBar button').forEach(x =>
@@ -3180,6 +3634,10 @@ function climatePointTab(prefix, mode){
     climatePointMarkers.clearLayers();
     addCrosshair(climatePointMarkers, lat, lon, '#E9C46A', label || null);
     el('Run').disabled = false;
+    if(prefix === 'su'){
+      if($('spDraw')) $('spDraw').disabled = false;
+      if($('shDraw')) $('shDraw').disabled = false;
+    }
     el('Status').textContent = (label ? label + ' \u00b7 ' : '') +
       lat.toFixed(5) + ', ' + lon.toFixed(5);
   }
@@ -3278,7 +3736,28 @@ const _sunlightTab = climatePointTab('su', 'sunlight');
 const _noiseTab = climatePointTab('no', 'noise');
 function thermalInit(){ clearAllClimatePoints(); _thermalTab.init(); }
 function weatherInit(){ clearAllClimatePoints(); _weatherTab.init(); }
-function sunlightInit(){ clearAllClimatePoints(); _sunlightTab.init(); }
+function sunlightInit(){
+  clearAllClimatePoints(); _sunlightTab.init();
+  if(!$('spDate').value) $('spDate').value = new Date().toISOString().slice(0,10);
+  if(!$('spDraw')._wired){
+    $('spDraw')._wired = true;
+    $('spDraw').addEventListener('click', drawSunPath);
+    $('spClear').addEventListener('click', clearSunPath);
+    $('spTime').addEventListener('input', () => {
+      const v = +$('spTime').value;
+      $('spTimeLbl').textContent =
+        String(Math.floor(v/60)).padStart(2,'0') + ':' + String(v%60).padStart(2,'0');
+      if(sunPathLayer.getLayers().length) drawSunPath();   // live update
+      if(SH_BUILDINGS) renderShadows();                    // shadows follow too
+    });
+    $('spDate').addEventListener('change', () => {
+      if(sunPathLayer.getLayers().length) drawSunPath();
+      if(SH_BUILDINGS) renderShadows();
+    });
+    $('shDraw').addEventListener('click', castShadows);
+    $('shClear').addEventListener('click', clearShadows);
+  }
+}
 function noiseInit(){ clearAllClimatePoints(); _noiseTab.init(); }
 
 /* ---------- Gaussian plume dispersion ---------- */
