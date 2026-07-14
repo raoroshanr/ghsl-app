@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v79"
+APP_VERSION = "deepseego-v81"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -1944,6 +1944,117 @@ class HiresQuery(BaseModel):
     region: RegionSpec
 
 
+def _font(sz, bold=False):
+    """A usable font at any size, without depending on system fonts."""
+    try:
+        from PIL import ImageFont
+        for p in ("/usr/share/fonts/truetype/liberation/LiberationSans-"
+                  + ("Bold" if bold else "Regular") + ".ttf",
+                  "/usr/share/fonts/truetype/dejavu/DejaVuSans"
+                  + ("-Bold" if bold else "") + ".ttf"):
+            if os.path.exists(p):
+                return ImageFont.truetype(p, sz)
+        return ImageFont.load_default(size=sz)
+    except Exception:
+        from PIL import ImageFont
+        return ImageFont.load_default()
+
+
+def _annotate_map_png(png, d, dataset, year, ground_km, basemap=None):
+    """Bake the map furniture into a downloadable PNG: OSM underlay, title,
+    colour bar / class legend, scale bar and north arrow - so a downloaded
+    image is self-explanatory, exactly like a report frame."""
+    from PIL import ImageDraw
+    img = PILImage.open(io.BytesIO(png)).convert("RGBA")
+    if basemap is not None:
+        try:
+            bm = basemap if basemap.size == img.size else basemap.resize(img.size)
+            img = PILImage.alpha_composite(bm.convert("RGBA"), img)
+        except Exception:
+            pass
+    W, H = img.size
+    pad = max(12, W // 90)
+    bar_h = max(96, H // 9)                       # bottom furniture strip
+    out = PILImage.new("RGBA", (W, H + bar_h), (255, 255, 255, 255))
+    out.paste(img, (0, 0))
+    dr = ImageDraw.Draw(out)
+
+    f_t = _font(max(18, W // 46), bold=True)
+    f_s = _font(max(13, W // 74))
+
+    # ---- title (top-left, on a translucent plate) ----
+    title = f"{d.get('label', dataset)}" + (f" - {year}" if year else "")
+    tb = dr.textbbox((0, 0), title, font=f_t)
+    dr.rectangle([pad, pad, pad + (tb[2] - tb[0]) + 2 * pad,
+                  pad + (tb[3] - tb[1]) + 2 * pad], fill=(16, 27, 22, 210))
+    dr.text((pad * 2, pad * 2 - 2), title, font=f_t, fill=(255, 255, 255, 255))
+
+    # ---- north arrow (top-right) ----
+    ax, ay = W - pad - 34, pad + 8
+    dr.polygon([(ax, ay), (ax + 15, ay + 46), (ax, ay + 34),
+                (ax - 15, ay + 46)], fill=(255, 255, 255, 255),
+               outline=(20, 20, 20, 255))
+    dr.text((ax - 7, ay + 48), "N", font=f_s, fill=(255, 255, 255, 255),
+            stroke_width=3, stroke_fill=(20, 20, 20, 255))
+
+    # ---- bottom strip: colour bar / classes + scale bar ----
+    y0 = H + 12
+    vis = d.get("vis") or {}
+    classes = d.get("classes") or []
+    if classes:
+        cx = pad
+        for c in classes[:8]:
+            col = c.get("color", "#888")
+            rgb = tuple(int(col.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+            dr.rectangle([cx, y0, cx + 18, y0 + 18], fill=rgb + (255,),
+                         outline=(60, 60, 60, 255))
+            lbl = str(c.get("label", ""))[:16]
+            dr.text((cx + 24, y0 + 1), lbl, font=f_s, fill=(30, 40, 35, 255))
+            cx += 24 + int(dr.textlength(lbl, font=f_s)) + 22
+    elif vis.get("palette"):
+        pal = [p if p.startswith("#") else "#" + p for p in vis["palette"]]
+        bw, bh = min(420, W // 3), 16
+        for i in range(bw):                       # smooth gradient
+            t = i / max(1, bw - 1)
+            seg = t * (len(pal) - 1)
+            k = min(int(seg), len(pal) - 2)
+            f = seg - k
+            c1 = tuple(int(pal[k].lstrip("#")[j:j + 2], 16) for j in (0, 2, 4))
+            c2 = tuple(int(pal[k + 1].lstrip("#")[j:j + 2], 16) for j in (0, 2, 4))
+            col = tuple(int(c1[j] + (c2[j] - c1[j]) * f) for j in range(3))
+            dr.line([(pad + i, y0), (pad + i, y0 + bh)], fill=col + (255,))
+        dr.rectangle([pad, y0, pad + bw, y0 + bh], outline=(60, 60, 60, 255))
+        unit = d.get("unit") or ""
+        dr.text((pad, y0 + bh + 4), _fmt_val(vis.get("min", 0)), font=f_s,
+                fill=(30, 40, 35, 255))
+        rt = _fmt_val(vis.get("max", 0)) + (f"  {unit}" if unit else "")
+        dr.text((pad + bw - int(dr.textlength(rt, font=f_s)), y0 + bh + 4), rt,
+                font=f_s, fill=(30, 40, 35, 255))
+
+    # ---- scale bar (bottom-right), a round number of km ----
+    if ground_km and ground_km > 0:
+        target = W * 0.22
+        km_per_px = ground_km / W
+        raw = target * km_per_px
+        nice = 1
+        for cand in (0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500):
+            if cand <= raw:
+                nice = cand
+        sw = int(nice / km_per_px)
+        sx = W - pad - sw
+        sy = y0 + 26
+        dr.rectangle([sx, sy, sx + sw, sy + 8], fill=(255, 255, 255, 255),
+                     outline=(30, 30, 30, 255))
+        dr.rectangle([sx, sy, sx + sw // 2, sy + 8], fill=(30, 30, 30, 255))
+        lab = (f"{nice:g} km" if nice >= 1 else f"{int(nice * 1000)} m")
+        dr.text((sx + sw - int(dr.textlength(lab, font=f_s)), sy - 20), lab,
+                font=f_s, fill=(30, 40, 35, 255))
+
+    b = io.BytesIO()
+    out.convert("RGB").save(b, "PNG", optimize=True)
+    return b.getvalue()
+
+
 @app.post("/hires")
 @ee_errors
 def hires(q: HiresQuery):
@@ -1959,7 +2070,30 @@ def hires(q: HiresQuery):
     url = _frame(region, data).getThumbURL(
         {"region": bounds, "dimensions": 2048, "format": "png",
          "crs": THUMB_CRS})
-    return {"dataset": q.dataset, "year": q.year, "url": url}
+
+    # Fetch it server-side and BAKE IN the furniture (OSM underlay, title,
+    # colour bar, scale bar, north arrow) so a downloaded image is complete on
+    # its own - the same treatment the report frames get.
+    try:
+        with urlopen(url, timeout=90) as r:
+            raw = r.read()
+        bb = bounds.getInfo()["coordinates"][0]
+        lons = [c[0] for c in bb]
+        lats = [c[1] for c in bb]
+        mid = (min(lats) + max(lats)) / 2
+        ground_km = _haversine_m(mid, min(lons), mid, max(lons)) / 1000.0
+        px = PILImage.open(io.BytesIO(raw)).size
+        basemap = _osm_basemap_png(min(lons), min(lats), max(lons), max(lats),
+                                   px[0], px[1], 0.20)
+        out = _annotate_map_png(raw, d, q.dataset, q.year, ground_km, basemap)
+        yr = str(q.year) if q.year else "context"
+        fn = f"DeepSeeGo_{q.dataset}_{yr}.png"
+        return Response(content=out, media_type="image/png",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{fn}"'})
+    except Exception:
+        # if anything fails, fall back to the plain Earth Engine image
+        return {"dataset": q.dataset, "year": q.year, "url": url}
 
 
 # ----------------------------------------------------------------------------
@@ -2522,7 +2656,26 @@ def _build_report(q: ReportQuery, progress=None):
         raise HTTPException(status_code=400, detail="At most 14 years per report.")
 
     region = build_region(q.region)
-    bounds = region.bounds(1)
+
+    # Frame tightly on the ZONES themselves. The analysis region can be a large
+    # boundary polygon (a district / NCR outline) while the zones are small
+    # circles inside it - framing on the region then wastes most of the image on
+    # empty surroundings. Union the zone geometries and add a small margin so
+    # nothing touches the edge.
+    try:
+        zunion = ee.FeatureCollection(
+            [ee.Feature(build_region(z.spec)) for z in q.zones]).geometry()
+        zb = zunion.bounds(1).getInfo()["coordinates"][0]
+        zlons = [c[0] for c in zb]
+        zlats = [c[1] for c in zb]
+        w0, e0 = min(zlons), max(zlons)
+        s0, n0 = min(zlats), max(zlats)
+        span = max(e0 - w0, n0 - s0)
+        mar = max(span * 0.06, 0.002)          # 6% margin, with a floor
+        bounds = ee.Geometry.Rectangle(
+            [w0 - mar, s0 - mar, e0 + mar, n0 + mar], None, False)
+    except Exception:
+        bounds = region.bounds(1)              # fall back to the old framing
 
     # ground width for the scale bar (WGS84 geodesic across the bbox middle)
     bb = bounds.getInfo()["coordinates"][0]
@@ -2569,20 +2722,10 @@ def _build_report(q: ReportQuery, progress=None):
                        "area_km2": None, "lat": None, "lon": None}
                       for z in q.zones]
 
-    # Adaptive resolution. The render cost scales with (years x pixels), and a
-    # heavy report is exactly what trips the 60 s proxy timeout - so the more
-    # epochs and zones there are, the smaller each frame is rendered.
-    n_years = len(years)
-    n_zones = len(q.zones)
-    dim = 1100
-    if ground_km > 120:
-        dim = 950
-    if n_years >= 8 or n_zones > 12:
-        dim = 800
-    if n_years >= 12 or n_zones > 30:
-        dim = 640
-    if n_years >= 16 or n_zones > 60:
-        dim = 520
+    # HIGH RESOLUTION. The report now builds as a background job, so the 60 s
+    # proxy limit no longer applies and there is no reason to shrink the maps.
+    # 2048 px across ~180 mm of page is ~290 dpi - properly crisp in print.
+    dim = 2048
     tp = {"region": bounds, "dimensions": dim, "format": "png",
           "crs": THUMB_CRS}
 
