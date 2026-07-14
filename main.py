@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v71"
+APP_VERSION = "deepseego-v72"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2179,16 +2179,84 @@ def _build_report_pdf(meta, frames, table, ground_km):
     pdf.cell(0, 6, meta["subtitle"], new_x="LMARGIN", new_y="NEXT")
     y = pdf.get_y() + 3
     pdf.set_font("Helvetica", "", 9)
-    for label, color in meta["zones"]:
-        r, g, b = _hex_rgb(color)
+    # ---- dataset information ----
+    dm = meta.get("dataset_meta") or {}
+    pdf.set_xy(15, y)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(20, 33, 28)
+    pdf.cell(0, 6, "Dataset", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(60, 70, 65)
+    for k, v in [("Product", dm.get("label")),
+                 ("Statistic", (meta.get("stat") or "").upper()),
+                 ("Unit", dm.get("unit")),
+                 ("Resolution", (str(dm.get("scale")) + " m")
+                  if dm.get("scale") else None),
+                 ("Source", dm.get("source") or dm.get("collection")),
+                 ("About", dm.get("info"))]:
+        if not v:
+            continue
+        pdf.set_x(15)
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.cell(24, 5, str(k))
+        pdf.set_font("Helvetica", "", 8.5)
+        pdf.multi_cell(MW - 24, 5, str(v)[:220], new_x="LMARGIN", new_y="NEXT")
+    y = pdf.get_y() + 3
+
+    # ---- zones: colour, name, centroid lat/lon, area ----
+    stats = meta.get("zone_stats") or [
+        {"label": l, "color": c, "area_km2": None, "lat": None, "lon": None}
+        for l, c in meta["zones"]]
+    pdf.set_xy(15, y)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(20, 33, 28)
+    pdf.cell(0, 6, f"Zones analysed ({len(stats)})", new_x="LMARGIN", new_y="NEXT")
+    y = pdf.get_y() + 1
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(240, 243, 240)
+    pdf.set_text_color(60, 70, 65)
+    pdf.set_xy(15, y)
+    pdf.cell(8, 5.6, "", border=1, fill=True)
+    pdf.cell(72, 5.6, "Zone", border=1, fill=True)
+    pdf.cell(30, 5.6, "Latitude", border=1, fill=True, align="R")
+    pdf.cell(30, 5.6, "Longitude", border=1, fill=True, align="R")
+    pdf.cell(40, 5.6, "Area (km2)", border=1, fill=True, align="R")
+    pdf.ln(5.6)
+    pdf.set_font("Helvetica", "", 8)
+    total_area = 0.0
+    for s in stats:
+        if pdf.get_y() > 250:
+            break                       # keep the cover to one page
+        r, g, b = _hex_rgb(s["color"])
+        pdf.set_x(15)
         pdf.set_fill_color(r, g, b)
-        pdf.rect(15, y + 0.7, 4, 4, "F")
+        pdf.cell(8, 5.4, "", border=1, fill=True)
         pdf.set_text_color(40, 50, 45)
-        pdf.set_xy(21, y)
-        pdf.cell(80, 5.4, label)
-        y += 5.6
+        pdf.cell(72, 5.4, str(s["label"])[:46], border=1)
+        pdf.cell(30, 5.4, ("%.5f" % s["lat"]) if s.get("lat") is not None
+                 else "-", border=1, align="R")
+        pdf.cell(30, 5.4, ("%.5f" % s["lon"]) if s.get("lon") is not None
+                 else "-", border=1, align="R")
+        a = s.get("area_km2")
+        if isinstance(a, (int, float)):
+            total_area += a
+        pdf.cell(40, 5.4, ("%.3f" % a) if isinstance(a, (int, float))
+                 else "-", border=1, align="R")
+        pdf.ln(5.4)
+    if total_area:
+        pdf.set_x(15)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(248, 250, 249)
+        pdf.cell(140, 5.4, "Total", border=1, fill=True)
+        pdf.cell(40, 5.4, "%.3f" % total_area, border=1, fill=True, align="R")
+        pdf.ln(5.4)
+    y = pdf.get_y() + 2
+
     if frames:
         title, png = frames[0]
+        if y > 190:                     # not enough room -> give it a page
+            pdf.add_page()
+            y = 20
         pdf.set_xy(15, y + 3)
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(20, 33, 28)
@@ -2211,71 +2279,93 @@ def _build_report_pdf(meta, frames, table, ground_km):
         _draw_scale_north(pdf, 15, ly, MW * 0.5, ground_km)
         _draw_legend(pdf, meta["dataset_meta"], 15 + MW * 0.55, ly, MW * 0.45)
 
-    # ---- table page(s) ----
+    # ---- landscape line chart: one line per zone, x = years ----
     years, zones, matrix = table
-    pdf.add_page()
+    pdf.add_page(orientation="L")
     pdf.set_font("Helvetica", "B", 14)
     pdf.set_text_color(20, 33, 28)
-    pdf.cell(0, 10, "Zone-wise year-wise values", new_x="LMARGIN", new_y="NEXT")
-    row_h = 6.5
+    pdf.cell(0, 9, "Zone-wise year-wise trend", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(90, 100, 95)
+    unit = (meta.get("dataset_meta") or {}).get("unit") or ""
+    pdf.cell(0, 5, f"{meta.get('stat','').upper()}  {('(' + unit + ')') if unit else ''}",
+             new_x="LMARGIN", new_y="NEXT")
 
-    # A column per zone only fits for a handful of zones. Beyond that we
-    # TRANSPOSE: zones become rows, years become columns - which stays legible
-    # for the many named zones that point-mode analyses produce.
-    transpose = len(zones) > 6
+    # plot frame (A4 landscape = 297 x 210 mm)
+    x0, y0 = 24.0, 34.0            # top-left of the axes
+    pw, ph = 200.0, 140.0          # plot width / height
+    vals = [v for row in matrix for v in row if isinstance(v, (int, float))]
+    if not vals:
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 8, "No numeric values to plot.", new_x="LMARGIN", new_y="NEXT")
+        return bytes(pdf.output())
+    vmin, vmax = min(vals), max(vals)
+    if vmax == vmin:
+        vmax = vmin + (abs(vmin) * 0.05 + 1.0)
+    pad = (vmax - vmin) * 0.08
+    vmin, vmax = vmin - pad, vmax + pad
 
-    if not transpose:
-        cw = min(34.0, (MW - 20) / max(1, len(zones)))
-        pdf.set_font("Helvetica", "B", 8)
-        pdf.set_fill_color(240, 243, 240)
-        pdf.cell(20, row_h, "Year", border=1, fill=True)
-        for label, color in zones:
-            r, g, b = _hex_rgb(color)
-            pdf.set_text_color(r, g, b)
-            pdf.cell(cw, row_h, label[:16], border=1, fill=True, align="R")
-        pdf.ln(row_h)
-        pdf.set_font("Helvetica", "", 8)
-        pdf.set_text_color(40, 50, 45)
-        for yi, year in enumerate(years):
-            if pdf.get_y() > 262:
-                pdf.add_page()
-            pdf.cell(20, row_h, str(year), border=1)
-            for zi in range(len(zones)):
-                pdf.cell(cw, row_h, _fmt_val(matrix[yi][zi]), border=1,
-                         align="R")
-            pdf.ln(row_h)
-    else:
-        lw = 46.0                                   # zone-label column
-        cw = max(11.0, min(22.0, (MW - lw) / max(1, len(years))))
-        fs = 7 if len(years) <= 10 else 6
-        pdf.set_font("Helvetica", "B", fs)
-        pdf.set_fill_color(240, 243, 240)
-        pdf.set_text_color(40, 50, 45)
-        pdf.cell(lw, row_h, "Zone", border=1, fill=True)
-        for year in years:
-            pdf.cell(cw, row_h, str(year), border=1, fill=True, align="R")
-        pdf.ln(row_h)
-        pdf.set_font("Helvetica", "", fs)
-        for zi, (label, color) in enumerate(zones):
-            if pdf.get_y() > 262:
-                pdf.add_page()
-                pdf.set_font("Helvetica", "B", fs)
-                pdf.set_fill_color(240, 243, 240)
-                pdf.set_text_color(40, 50, 45)
-                pdf.cell(lw, row_h, "Zone", border=1, fill=True)
-                for year in years:
-                    pdf.cell(cw, row_h, str(year), border=1, fill=True,
-                             align="R")
-                pdf.ln(row_h)
-                pdf.set_font("Helvetica", "", fs)
-            r, g, b = _hex_rgb(color)
-            pdf.set_text_color(r, g, b)
-            pdf.cell(lw, row_h, label[:34], border=1)
-            pdf.set_text_color(40, 50, 45)
-            for yi in range(len(years)):
-                pdf.cell(cw, row_h, _fmt_val(matrix[yi][zi]), border=1,
-                         align="R")
-            pdf.ln(row_h)
+    def px(i):
+        return x0 + (pw * i / max(1, len(years) - 1)) if len(years) > 1 else x0 + pw / 2
+
+    def py(v):
+        return y0 + ph - ph * (v - vmin) / (vmax - vmin)
+
+    # gridlines + y labels
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_draw_color(224, 230, 226)
+    pdf.set_line_width(0.2)
+    for k in range(6):
+        v = vmin + (vmax - vmin) * k / 5.0
+        yy = py(v)
+        pdf.line(x0, yy, x0 + pw, yy)
+        pdf.set_text_color(130, 140, 135)
+        pdf.set_xy(x0 - 22, yy - 2.2)
+        pdf.cell(20, 4.4, _fmt_val(v), align="R")
+    # axes
+    pdf.set_draw_color(90, 100, 95)
+    pdf.set_line_width(0.4)
+    pdf.line(x0, y0, x0, y0 + ph)
+    pdf.line(x0, y0 + ph, x0 + pw, y0 + ph)
+    # x labels
+    pdf.set_text_color(90, 100, 95)
+    for i, yr in enumerate(years):
+        pdf.set_xy(px(i) - 8, y0 + ph + 1.5)
+        pdf.cell(16, 4.5, str(yr), align="C")
+
+    # one polyline per zone
+    pdf.set_line_width(0.7)
+    for zi, (label, color) in enumerate(zones):
+        r, g, b = _hex_rgb(color)
+        pdf.set_draw_color(r, g, b)
+        prev = None
+        for i in range(len(years)):
+            v = matrix[i][zi] if zi < len(matrix[i]) else None
+            if not isinstance(v, (int, float)):
+                prev = None
+                continue
+            cur = (px(i), py(v))
+            if prev:
+                pdf.line(prev[0], prev[1], cur[0], cur[1])
+            pdf.set_fill_color(r, g, b)
+            pdf.circle(cur[0] - 0.6, cur[1] - 0.6, 1.2, style="F")
+            prev = cur
+
+    # legend under the plot, wrapped across the page
+    pdf.set_font("Helvetica", "", 7)
+    lx, ly = x0, y0 + ph + 9.0
+    for label, color in zones:
+        if lx > 250:
+            lx = x0
+            ly += 5.0
+        r, g, b = _hex_rgb(color)
+        pdf.set_fill_color(r, g, b)
+        pdf.rect(lx, ly + 1.0, 2.6, 2.6, style="F")
+        pdf.set_text_color(60, 70, 65)
+        pdf.set_xy(lx + 3.6, ly)
+        w = min(46.0, 4.0 + 1.7 * len(label[:26]))
+        pdf.cell(w, 4.6, label[:26])
+        lx += w + 5.0
     return bytes(pdf.output())
 
 
@@ -2311,11 +2401,39 @@ def report(q: ReportQuery):
     zone_paint = ee.Image().paint(ee.FeatureCollection([]), 0, 1).visualize(
         palette=["000000"]).updateMask(ee.Image.constant(0))
     zone_layers = []
+    zone_geoms = []
     for z in q.zones:
         zg = build_region(z.spec)
+        zone_geoms.append(zg)
         zone_layers.append(ee.Image().paint(
             ee.FeatureCollection([ee.Feature(zg)]), 0, 3
         ).visualize(palette=[z.color.lstrip("#")]))
+
+    # per-zone centroid + area, fetched in a single call for the report cover
+    zone_stats = []
+    try:
+        fc = ee.FeatureCollection([
+            ee.Feature(g).set({"i": i}) for i, g in enumerate(zone_geoms)])
+        info = fc.map(lambda f: ee.Feature(None, {
+            "i": f.get("i"),
+            "area_km2": f.geometry().area(50).divide(1e6),
+            "lon": f.geometry().centroid(50).coordinates().get(0),
+            "lat": f.geometry().centroid(50).coordinates().get(1),
+        })).getInfo()
+        by_i = {}
+        for feat in info.get("features", []):
+            p = feat.get("properties", {})
+            by_i[p.get("i")] = p
+        for i, z in enumerate(q.zones):
+            p = by_i.get(i, {})
+            zone_stats.append({
+                "label": z.label, "color": z.color,
+                "area_km2": p.get("area_km2"),
+                "lat": p.get("lat"), "lon": p.get("lon")})
+    except Exception:
+        zone_stats = [{"label": z.label, "color": z.color,
+                       "area_km2": None, "lat": None, "lon": None}
+                      for z in q.zones]
 
     # adaptive resolution: very wide regions render the satellite backdrop
     # at slightly lower resolution to keep report builds fast
@@ -2366,6 +2484,8 @@ def report(q: ReportQuery):
                     f"{len(q.zones)} zones  -  DeepSeeGo",
         "dataset_meta": d,
         "zones": [(z.label, z.color) for z in q.zones],
+        "zone_stats": zone_stats,
+        "stat": q.stat,
     }
     pdf = _build_report_pdf(meta, frames,
                             (years, meta["zones"], matrix), ground_km)
