@@ -358,11 +358,49 @@ label.chk input{width:auto}
 }
 #loginBtn:hover{background:#f4f7f5}
 #loginBtn:disabled{opacity:.6;cursor:default}
+#loginEmail,#loginPass{
+  width:100%;padding:11px 12px;margin-bottom:8px;box-sizing:border-box;
+  border:1px solid #d0d7d3;border-radius:8px;font-size:14px;
+  font-family:Arial,Helvetica,sans-serif;background:#fff;color:#1f2d27;
+}
+#loginEmail:focus,#loginPass:focus{outline:none;border-color:#0B5A49}
+#loginEmailBtn.primaryLogin{
+  width:100%;padding:11px 14px;border:none;border-radius:8px;
+  background:#0B5A49;color:#fff;font-size:14px;font-weight:600;cursor:pointer;
+  font-family:Arial,Helvetica,sans-serif;
+}
+#loginEmailBtn.primaryLogin:hover{background:#0d6b57}
+#loginEmailBtn:disabled{opacity:.6;cursor:default}
+.linkBtn{
+  background:none;border:none;color:#5c6b64;font-size:11px;cursor:pointer;
+  margin-top:8px;text-decoration:underline;font-family:Arial,Helvetica,sans-serif;
+}
+.loginOr{position:relative;margin:16px 0 12px;text-align:center}
+.loginOr:before{content:"";position:absolute;top:50%;left:0;right:0;
+  height:1px;background:#e6ebe8}
+.loginOr span{position:relative;background:#fff;padding:0 10px;
+  font-size:11px;color:#8a968f}
 #loginMsg{margin-top:12px;font-size:12px;min-height:18px;color:#E4572E}
 #loginFoot{margin-top:18px;font-size:9px;letter-spacing:.5px;color:#8a968f}
+#userChip{
+  position:fixed;top:10px;right:12px;z-index:1200;
+  display:flex;align-items:center;gap:8px;
+  padding:5px 6px 5px 12px;border-radius:20px;
+  background:rgba(255,255,255,.94);border:1px solid #e0e6e2;
+  box-shadow:0 2px 10px rgba(0,0,0,.14);
+  font-family:Arial,Helvetica,sans-serif;
+}
+#userEmail{font-size:12px;color:#1f2d27;max-width:200px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #signOutBtn{
-  margin-left:8px;padding:4px 10px;font-size:11px;border:1px solid #d0d7d3;
-  border-radius:6px;background:#fff;cursor:pointer;font-family:Arial,Helvetica,sans-serif;
+  padding:4px 12px;font-size:11px;font-weight:600;border:1px solid #d0d7d3;
+  border-radius:14px;background:#fff;color:#1f2d27;cursor:pointer;
+  font-family:Arial,Helvetica,sans-serif;
+}
+#signOutBtn:hover{background:#f4f7f5}
+@media (max-width:640px){
+  #userEmail{max-width:110px}
+  #userChip{top:8px;right:8px}
 }
 </style>
 </head>
@@ -754,7 +792,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v67</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v69</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -768,7 +806,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v67";
+const DSG_VERSION = "deepseego-v69";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -785,12 +823,12 @@ const DSG_VERSION = "deepseego-v67";
    would be bypassable; this one is not.
    ===================================================================== */
 const FIREBASE_CONFIG = {
-  apiKey:            "AIzaSyBJbVPEM9N15xrYxtJj3uDOVX7vikgQuIc",
+  apiKey:            "PASTE_API_KEY",
   authDomain:        "deepseegoa.firebaseapp.com",
   projectId:         "deepseegoa",
   storageBucket:     "deepseegoa.appspot.com",
   messagingSenderId: "605614825130",
-  appId:             "1:605614825130:web:7e0351c0bdefed324fbad3"
+  appId:             "PASTE_APP_ID"
 };
 
 let AUTH_TOKEN = null;      // current Firebase ID token
@@ -804,18 +842,19 @@ function loginMsg(t, ok){
 function showApp(email){
   AUTH_EMAIL = email;
   document.getElementById('loginGate').classList.add('hidden');
-  // show who is signed in, with a sign-out button, in the footer
-  const foot = document.querySelector('#brandFoot') || document.body;
-  if(!document.getElementById('signOutBtn')){
-    const b = document.createElement('button');
-    b.id = 'signOutBtn'; b.textContent = 'Sign out';
-    b.onclick = () => { if(_fbAuth) _fbAuth.signOut(); location.reload(); };
-    const tag = document.createElement('span');
-    tag.style.cssText = 'font-size:11px;color:#5c6b64;margin-left:10px';
-    tag.textContent = email;
-    tag.appendChild(b);
-    foot.appendChild(tag);
-  }
+  if(document.getElementById('userChip')) return;
+  const chip = document.createElement('div');
+  chip.id = 'userChip';
+  const who = document.createElement('span');
+  who.id = 'userEmail'; who.textContent = email;
+  const b = document.createElement('button');
+  b.id = 'signOutBtn'; b.textContent = 'Sign out';
+  b.onclick = async () => {
+    try { if(_fbAuth) await _fbAuth.signOut(); } catch(e){}
+    location.reload();
+  };
+  chip.appendChild(who); chip.appendChild(b);
+  document.body.appendChild(chip);
 }
 function initAuth(){
   const btn = document.getElementById('loginBtn');
@@ -850,8 +889,69 @@ function initAuth(){
       btn.disabled = false;
     }
   });
+  // ---------------- email + password sign-in ----------------
+  const eBtn = document.getElementById('loginEmailBtn');
+  const fBtn = document.getElementById('loginForgot');
+  const eIn  = document.getElementById('loginEmail');
+  const pIn  = document.getElementById('loginPass');
+
+  async function emailSignIn(){
+    const email = (eIn.value || '').trim();
+    const pass  = pIn.value || '';
+    if(!email || !pass) return loginMsg('Enter your email and password.');
+    eBtn.disabled = true; loginMsg('Signing in\u2026', true);
+    try{
+      const cred = await _fbAuth.signInWithEmailAndPassword(email, pass);
+      // SECURITY: an email/password account is only trusted once the address
+      // has been verified - this is what stops anyone creating an account with
+      // someone else's email address. The backend also rejects unverified ones.
+      if(cred.user && !cred.user.emailVerified){
+        try{ await cred.user.sendEmailVerification(); }catch(e){}
+        await _fbAuth.signOut();
+        loginMsg('Verify your email first \u2014 we just sent you a link. ' +
+                 'Click it, then sign in again.');
+        eBtn.disabled = false;
+        return;
+      }
+      // verified: onAuthStateChanged takes over and checks the allowlist
+    }catch(e){
+      const c = (e && e.code) || '';
+      let m = e.message || 'Sign-in failed.';
+      if(c === 'auth/invalid-credential' || c === 'auth/wrong-password' ||
+         c === 'auth/user-not-found')
+        m = 'Incorrect email or password.';
+      else if(c === 'auth/invalid-email') m = 'That email address is not valid.';
+      else if(c === 'auth/too-many-requests')
+        m = 'Too many attempts \u2014 wait a moment and try again.';
+      else if(c === 'auth/operation-not-allowed')
+        m = 'Email/password sign-in is not enabled in Firebase \u2192 ' +
+            'Authentication \u2192 Sign-in method.';
+      loginMsg(m);
+      eBtn.disabled = false;
+    }
+  }
+  if(eBtn) eBtn.addEventListener('click', emailSignIn);
+  [eIn, pIn].forEach(el => el && el.addEventListener('keydown', ev => {
+    if(ev.key === 'Enter'){ ev.preventDefault(); emailSignIn(); }
+  }));
+  if(fBtn) fBtn.addEventListener('click', async () => {
+    const email = (eIn.value || '').trim();
+    if(!email) return loginMsg('Type your email address first, then click this.');
+    try{
+      await _fbAuth.sendPasswordResetEmail(email);
+      loginMsg('Password reset link sent \u2014 check your inbox.', true);
+    }catch(e){ loginMsg(e.message || 'Could not send reset email.'); }
+  });
+
   _fbAuth.onAuthStateChanged(async (user) => {
     if(!user){ AUTH_TOKEN = null; return; }
+    if(!user.emailVerified){
+      // never hand an unverified account a session (the backend rejects it too)
+      AUTH_TOKEN = null;
+      loginMsg('Please verify your email address, then sign in again.');
+      try{ await _fbAuth.signOut(); }catch(e){}
+      return;
+    }
     try{
       AUTH_TOKEN = await user.getIdToken();
       // ask the backend whether this account is authorised
@@ -3544,6 +3644,13 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <div id="loginWordmark"><span class="ds">DeepSee</span><span class="go">Go</span></div>
       <div id="loginSub">Earth observation explorer and analysis</div>
       <div id="loginTag">map the big picture</div>
+      <input id="loginEmail" type="email" autocomplete="username"
+             placeholder="Email address">
+      <input id="loginPass" type="password" autocomplete="current-password"
+             placeholder="Password">
+      <button id="loginEmailBtn" class="primaryLogin">Sign in</button>
+      <button id="loginForgot" class="linkBtn">Forgot password?</button>
+      <div class="loginOr"><span>or</span></div>
       <button id="loginBtn">Sign in with Google</button>
       <div id="loginMsg"></div>
       <div id="loginFoot">built by VINAMRAVIGYAN TECHNOLOGIES PRIVATE LIMITED</div>
