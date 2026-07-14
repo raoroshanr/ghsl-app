@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v72"
+APP_VERSION = "deepseego-v73"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2161,6 +2161,29 @@ def _place_map(pdf, png, x, y, w, h):
              align="C")
 
 
+_PDF_SUBS = {
+    "\u2014": "-", "\u2013": "-", "\u2212": "-",      # dashes / minus
+    "\u2018": "'", "\u2019": "'",                     # smart quotes
+    "\u201c": '"', "\u201d": '"',
+    "\u2026": "...", "\u2192": "->", "\u2265": ">=", "\u2264": "<=",
+    "\u00b7": "-", "\u2022": "-", "\u00a0": " ", "\u202f": " ",
+    "\u2080": "0", "\u2081": "1", "\u2082": "2", "\u2083": "3",
+    "\u2084": "4", "\u2085": "5", "\u2086": "6", "\u2087": "7",
+    "\u2088": "8", "\u2089": "9",                     # subscripts (NO2, CO2)
+    "\u00b2": "2", "\u00b3": "3",                     # keep superscripts safe
+}
+
+
+def _pdf_txt(s):
+    """Make any string safe for fpdf2's latin-1 core fonts."""
+    if s is None:
+        return ""
+    s = str(s)
+    for k, v in _PDF_SUBS.items():
+        s = s.replace(k, v)
+    return s.encode("latin-1", "replace").decode("latin-1")
+
+
 def _build_report_pdf(meta, frames, table, ground_km):
     """meta: {heading, subtitle, dataset_meta, zones:[(label,color)]}
     frames: [(title, png_bytes)] - context first; table: (years, matrix)."""
@@ -2173,10 +2196,10 @@ def _build_report_pdf(meta, frames, table, ground_km):
     _brand_header(pdf)
     pdf.set_font("Helvetica", "B", 20)
     pdf.set_text_color(20, 33, 28)
-    pdf.cell(0, 12, meta["heading"], new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 12, _pdf_txt(meta["heading"]), new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(90, 100, 95)
-    pdf.cell(0, 6, meta["subtitle"], new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _pdf_txt(meta["subtitle"]), new_x="LMARGIN", new_y="NEXT")
     y = pdf.get_y() + 3
     pdf.set_font("Helvetica", "", 9)
     # ---- dataset information ----
@@ -2198,9 +2221,9 @@ def _build_report_pdf(meta, frames, table, ground_km):
             continue
         pdf.set_x(15)
         pdf.set_font("Helvetica", "B", 8.5)
-        pdf.cell(24, 5, str(k))
+        pdf.cell(24, 5, _pdf_txt(str(k)))
         pdf.set_font("Helvetica", "", 8.5)
-        pdf.multi_cell(MW - 24, 5, str(v)[:220], new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(MW - 24, 5, _pdf_txt(str(v)[:220]), new_x="LMARGIN", new_y="NEXT")
     y = pdf.get_y() + 3
 
     # ---- zones: colour, name, centroid lat/lon, area ----
@@ -2210,7 +2233,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
     pdf.set_xy(15, y)
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_text_color(20, 33, 28)
-    pdf.cell(0, 6, f"Zones analysed ({len(stats)})", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _pdf_txt(f"Zones analysed ({len(stats)})"), new_x="LMARGIN", new_y="NEXT")
     y = pdf.get_y() + 1
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_fill_color(240, 243, 240)
@@ -2232,7 +2255,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
         pdf.set_fill_color(r, g, b)
         pdf.cell(8, 5.4, "", border=1, fill=True)
         pdf.set_text_color(40, 50, 45)
-        pdf.cell(72, 5.4, str(s["label"])[:46], border=1)
+        pdf.cell(72, 5.4, _pdf_txt(str(s["label"])[:46]), border=1)
         pdf.cell(30, 5.4, ("%.5f" % s["lat"]) if s.get("lat") is not None
                  else "-", border=1, align="R")
         pdf.cell(30, 5.4, ("%.5f" % s["lon"]) if s.get("lon") is not None
@@ -2260,7 +2283,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
         pdf.set_xy(15, y + 3)
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(20, 33, 28)
-        pdf.cell(0, 7, title, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 7, _pdf_txt(title), new_x="LMARGIN", new_y="NEXT")
         iy = pdf.get_y() + 1
         ih = min(150, 275 - iy)
         _place_map(pdf, png, 15, iy, MW, ih)
@@ -2271,7 +2294,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 18)
         pdf.set_text_color(20, 33, 28)
-        pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(0, 10, _pdf_txt(title), new_x="LMARGIN", new_y="NEXT")
         iy = pdf.get_y() + 1
         ih = 195
         _place_map(pdf, png, 15, iy, MW, ih)
@@ -2288,7 +2311,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(90, 100, 95)
     unit = (meta.get("dataset_meta") or {}).get("unit") or ""
-    pdf.cell(0, 5, f"{meta.get('stat','').upper()}  {('(' + unit + ')') if unit else ''}",
+    pdf.cell(0, 5, _pdf_txt(f"{meta.get('stat','').upper()}  {('(' + unit + ')') if unit else ''}"),
              new_x="LMARGIN", new_y="NEXT")
 
     # plot frame (A4 landscape = 297 x 210 mm)
@@ -2321,7 +2344,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
         pdf.line(x0, yy, x0 + pw, yy)
         pdf.set_text_color(130, 140, 135)
         pdf.set_xy(x0 - 22, yy - 2.2)
-        pdf.cell(20, 4.4, _fmt_val(v), align="R")
+        pdf.cell(20, 4.4, _pdf_txt(_fmt_val(v)), align="R")
     # axes
     pdf.set_draw_color(90, 100, 95)
     pdf.set_line_width(0.4)
@@ -2331,7 +2354,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
     pdf.set_text_color(90, 100, 95)
     for i, yr in enumerate(years):
         pdf.set_xy(px(i) - 8, y0 + ph + 1.5)
-        pdf.cell(16, 4.5, str(yr), align="C")
+        pdf.cell(16, 4.5, _pdf_txt(str(yr)), align="C")
 
     # one polyline per zone
     pdf.set_line_width(0.7)
@@ -2364,7 +2387,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
         pdf.set_text_color(60, 70, 65)
         pdf.set_xy(lx + 3.6, ly)
         w = min(46.0, 4.0 + 1.7 * len(label[:26]))
-        pdf.cell(w, 4.6, label[:26])
+        pdf.cell(w, 4.6, _pdf_txt(label[:26]))
         lx += w + 5.0
     return bytes(pdf.output())
 
@@ -2487,8 +2510,14 @@ def report(q: ReportQuery):
         "zone_stats": zone_stats,
         "stat": q.stat,
     }
-    pdf = _build_report_pdf(meta, frames,
-                            (years, meta["zones"], matrix), ground_km)
+    try:
+        pdf = _build_report_pdf(meta, frames,
+                                (years, meta["zones"], matrix), ground_km)
+    except HTTPException:
+        raise
+    except Exception as exc:                     # never return a bare 500
+        raise HTTPException(status_code=500,
+                            detail=f"Report build failed: {exc}")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition":
                              'attachment; filename="DeepSeeGo_Zonal_Report.pdf"'})
