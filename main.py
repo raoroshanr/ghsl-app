@@ -25,6 +25,7 @@ import io
 import re
 import json
 import time
+import uuid
 import math
 import numpy as np
 import struct
@@ -60,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v76"
+APP_VERSION = "deepseego-v79"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2501,8 +2502,7 @@ def _build_report_pdf(meta, frames, table, ground_km):
     return bytes(pdf.output())
 
 
-@app.post("/report")
-def report(q: ReportQuery):
+def _build_report(q: ReportQuery, progress=None):
     """A4 PDF: Zonal Multi-Year Analysis - per-year satellite-composited maps
     with zone outlines, legend, scale + north, and the zones x years table."""
     if not _PDF_OK:
@@ -2542,6 +2542,8 @@ def report(q: ReportQuery):
         ).visualize(palette=[z.color.lstrip("#")]))
 
     # per-zone centroid + area, fetched in a single call for the report cover
+    if progress:
+        progress(5, "Measuring zone areas and centroids\u2026")
     zone_stats = []
     try:
         fc = ee.FeatureCollection([
@@ -2567,9 +2569,20 @@ def report(q: ReportQuery):
                        "area_km2": None, "lat": None, "lon": None}
                       for z in q.zones]
 
-    # adaptive resolution: very wide regions render the satellite backdrop
-    # at slightly lower resolution to keep report builds fast
-    dim = 950 if ground_km > 120 else 1100
+    # Adaptive resolution. The render cost scales with (years x pixels), and a
+    # heavy report is exactly what trips the 60 s proxy timeout - so the more
+    # epochs and zones there are, the smaller each frame is rendered.
+    n_years = len(years)
+    n_zones = len(q.zones)
+    dim = 1100
+    if ground_km > 120:
+        dim = 950
+    if n_years >= 8 or n_zones > 12:
+        dim = 800
+    if n_years >= 12 or n_zones > 30:
+        dim = 640
+    if n_years >= 16 or n_zones > 60:
+        dim = 520
     tp = {"region": bounds, "dimensions": dim, "format": "png",
           "crs": THUMB_CRS}
 
@@ -2578,7 +2591,7 @@ def report(q: ReportQuery):
         for i in range(attempts):
             try:
                 url = make_img().getThumbURL(tp)
-                with urlopen(url, timeout=110) as r:
+                with urlopen(url, timeout=60) as r:
                     return r.read()
             except Exception:
                 if i < attempts - 1:
@@ -2594,16 +2607,30 @@ def report(q: ReportQuery):
             base = base.blend(zl)
         return base
 
+    if progress:
+        progress(12, "Rendering the satellite backdrop\u2026")
     bg_png = fetch_png(bg_img)
     if bg_png is None:
         raise HTTPException(status_code=502, detail=(
             "Satellite backdrop rendering failed - Earth Engine may be "
             "under load; please try again."))
 
-    def data_png(year):
-        return fetch_png(lambda: _data_rgb(q.dataset, year, region, d))
+    _done = {"n": 0}
+    _lock = threading.Lock()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+    def data_png(year):
+        png = fetch_png(lambda: _data_rgb(q.dataset, year, region, d))
+        if progress:
+            with _lock:
+                _done["n"] += 1
+                # years occupy 25% -> 80% of the bar
+                pct = 25 + int(55 * _done["n"] / max(1, len(years)))
+                progress(pct, f"Rendered {_done['n']} of {len(years)} epochs\u2026")
+        return png
+
+    if progress:
+        progress(25, f"Rendering {len(years)} epochs\u2026")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         data = dict(zip(years, ex.map(data_png, years)))
 
     # OSM public-transport basemap under the frames, clipped to the same
@@ -2620,6 +2647,8 @@ def report(q: ReportQuery):
     except Exception:
         basemap = None
 
+    if progress:
+        progress(85, "Compositing map frames\u2026")
     frames = _compose_report_frames(bg_png, years, data, basemap)
 
     matrix = [[(z.series[yi].get("value") if yi < len(z.series) else None)
@@ -2633,6 +2662,8 @@ def report(q: ReportQuery):
         "zone_stats": zone_stats,
         "stat": q.stat,
     }
+    if progress:
+        progress(92, "Laying out the PDF\u2026")
     try:
         pdf = _build_report_pdf(meta, frames,
                                 (years, meta["zones"], matrix), ground_km)
@@ -2641,7 +2672,111 @@ def report(q: ReportQuery):
     except Exception as exc:                     # never return a bare 500
         raise HTTPException(status_code=500,
                             detail=f"Report build failed: {exc}")
-    return Response(content=pdf, media_type="application/pdf",
+    return pdf
+
+
+# ============================================================================
+# ASYNC REPORT JOBS
+# A large report can take minutes - far longer than the 60 s Firebase Hosting
+# proxy limit, and longer than a comfortable HTTP request. So: the client POSTs
+# /report_start (returns immediately with a job id), a background thread builds
+# the PDF, and the client polls /report_status for REAL progress. The finished
+# PDF is stored in GCS and streamed back by /report_file.
+#
+# Job state lives in GCS (not memory) so that any Cloud Run instance can answer
+# the poll, even if a different instance is doing the work.
+#
+# IMPORTANT: Cloud Run must be set to "CPU always allocated", otherwise the
+# background thread is throttled to ~zero as soon as the response is sent.
+# ============================================================================
+_JOB_PREFIX = "reportjobs/"
+_job_mem = {}                       # local fast-path cache
+
+
+def _job_write(job_id, payload):
+    _job_mem[job_id] = payload
+    try:
+        b = _bucket().blob(f"{_JOB_PREFIX}{job_id}.json")
+        b.cache_control = "no-store"
+        b.upload_from_string(json.dumps(payload), content_type="application/json")
+    except Exception:
+        pass                        # memory copy still serves same-instance polls
+
+
+def _job_read(job_id):
+    try:
+        b = _bucket().blob(f"{_JOB_PREFIX}{job_id}.json")
+        if b.exists():
+            return json.loads(b.download_as_bytes())
+    except Exception:
+        pass
+    return _job_mem.get(job_id)
+
+
+def _job_worker(job_id, q: ReportQuery):
+    def progress(pct, stage):
+        _job_write(job_id, {"state": "running", "percent": int(pct),
+                            "stage": stage, "started": _job_mem.get(
+                                job_id, {}).get("started", time.time())})
+    try:
+        progress(2, "Starting\u2026")
+        pdf = _build_report(q, progress=progress)
+        _job_write(job_id, {"state": "running", "percent": 97,
+                            "stage": "Saving the report\u2026"})
+        try:
+            blob = _bucket().blob(f"{_JOB_PREFIX}{job_id}.pdf")
+            blob.upload_from_string(pdf, content_type="application/pdf")
+        except Exception as e:
+            raise RuntimeError(f"could not store the report: {e}")
+        _job_write(job_id, {"state": "done", "percent": 100,
+                            "stage": "Ready", "size": len(pdf)})
+    except HTTPException as e:
+        _job_write(job_id, {"state": "error", "percent": 0,
+                            "stage": "Failed", "error": str(e.detail)})
+    except Exception as e:
+        _job_write(job_id, {"state": "error", "percent": 0,
+                            "stage": "Failed", "error": f"{type(e).__name__}: {e}"})
+
+
+@app.post("/report_start")
+def report_start(q: ReportQuery):
+    """Kick off a background PDF build; returns a job id immediately."""
+    if not _PDF_OK:
+        raise HTTPException(status_code=500, detail=(
+            "PDF libraries are not installed on this revision."))
+    if not q.zones:
+        raise HTTPException(status_code=400, detail="No zones supplied.")
+    if len(q.zones) > 200:
+        raise HTTPException(status_code=400, detail=(
+            f"{len(q.zones)} zones is too many for one report (max 200)."))
+    job_id = uuid.uuid4().hex[:16]
+    _job_write(job_id, {"state": "queued", "percent": 0,
+                        "stage": "Queued\u2026", "started": time.time()})
+    threading.Thread(target=_job_worker, args=(job_id, q), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.get("/report_status")
+def report_status(job_id: str):
+    st = _job_read(job_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Unknown report job.")
+    return st
+
+
+@app.get("/report_file")
+def report_file(job_id: str):
+    st = _job_read(job_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Unknown report job.")
+    if st.get("state") != "done":
+        raise HTTPException(status_code=409, detail="Report is not ready yet.")
+    try:
+        data = _bucket().blob(f"{_JOB_PREFIX}{job_id}.pdf").download_as_bytes()
+    except Exception as e:
+        raise HTTPException(status_code=500,
+                            detail=f"Could not read the stored report: {e}")
+    return Response(content=data, media_type="application/pdf",
                     headers={"Content-Disposition":
                              'attachment; filename="DeepSeeGo_Zonal_Report.pdf"'})
 
