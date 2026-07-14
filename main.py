@@ -45,7 +45,7 @@ from google.cloud import storage as gcs
 import base64
 import datetime as _dt
 import concurrent.futures
-from urllib.request import urlopen, Request
+from urllib.request import urlopen, Request as UrlRequest
 from fastapi import FastAPI, HTTPException, Response, Request
 
 # PDF reporting needs fpdf2 + Pillow. If requirements.txt was not redeployed
@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v75"
+APP_VERSION = "deepseego-v76"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -751,7 +751,11 @@ ALLOWED_EMAILS = {
 AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "true").lower() != "false"
 
 # Paths that never need a token (the app shell, health, and static assets).
-_OPEN_PATHS = {"/health", "/api", "/favicon.ico", "/__/auth/handler"}
+# Open without sign-in: the app shell, health, and the read-only DIAGNOSTICS
+# (they take no user data and reveal nothing sensitive - they exist so you can
+# open them straight in a browser, which cannot send a bearer token).
+_OPEN_PATHS = {"/health", "/api", "/favicon.ico", "/__/auth/handler",
+               "/basemap_test"}
 
 
 def _verify_bearer(token: str):
@@ -2180,7 +2184,7 @@ def _osm_basemap_png(w, s, e, n_, out_w, out_h, opacity=0.20):
                 for iy in range(rows):
                     url = tmpl.format(z=z, x=tx0 + ix, y=ty0 + iy)
                     try:
-                        req = Request(url, headers={
+                        req = UrlRequest(url, headers={
                             "User-Agent": _UA,
                             "Referer": "https://www.deepseego.app/"})
                         with urlopen(req, timeout=10) as r:
