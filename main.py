@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v69"
+APP_VERSION = "deepseego-v71"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2217,25 +2217,65 @@ def _build_report_pdf(meta, frames, table, ground_km):
     pdf.set_font("Helvetica", "B", 14)
     pdf.set_text_color(20, 33, 28)
     pdf.cell(0, 10, "Zone-wise year-wise values", new_x="LMARGIN", new_y="NEXT")
-    cw = min(34.0, (MW - 20) / max(1, len(zones)))
     row_h = 6.5
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_fill_color(240, 243, 240)
-    pdf.cell(20, row_h, "Year", border=1, fill=True)
-    for label, color in zones:
-        r, g, b = _hex_rgb(color)
-        pdf.set_text_color(r, g, b)
-        pdf.cell(cw, row_h, label[:16], border=1, fill=True, align="R")
-    pdf.ln(row_h)
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_text_color(40, 50, 45)
-    for yi, year in enumerate(years):
-        if pdf.get_y() > 262:
-            pdf.add_page()
-        pdf.cell(20, row_h, str(year), border=1)
-        for zi in range(len(zones)):
-            pdf.cell(cw, row_h, _fmt_val(matrix[yi][zi]), border=1, align="R")
+
+    # A column per zone only fits for a handful of zones. Beyond that we
+    # TRANSPOSE: zones become rows, years become columns - which stays legible
+    # for the many named zones that point-mode analyses produce.
+    transpose = len(zones) > 6
+
+    if not transpose:
+        cw = min(34.0, (MW - 20) / max(1, len(zones)))
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(240, 243, 240)
+        pdf.cell(20, row_h, "Year", border=1, fill=True)
+        for label, color in zones:
+            r, g, b = _hex_rgb(color)
+            pdf.set_text_color(r, g, b)
+            pdf.cell(cw, row_h, label[:16], border=1, fill=True, align="R")
         pdf.ln(row_h)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(40, 50, 45)
+        for yi, year in enumerate(years):
+            if pdf.get_y() > 262:
+                pdf.add_page()
+            pdf.cell(20, row_h, str(year), border=1)
+            for zi in range(len(zones)):
+                pdf.cell(cw, row_h, _fmt_val(matrix[yi][zi]), border=1,
+                         align="R")
+            pdf.ln(row_h)
+    else:
+        lw = 46.0                                   # zone-label column
+        cw = max(11.0, min(22.0, (MW - lw) / max(1, len(years))))
+        fs = 7 if len(years) <= 10 else 6
+        pdf.set_font("Helvetica", "B", fs)
+        pdf.set_fill_color(240, 243, 240)
+        pdf.set_text_color(40, 50, 45)
+        pdf.cell(lw, row_h, "Zone", border=1, fill=True)
+        for year in years:
+            pdf.cell(cw, row_h, str(year), border=1, fill=True, align="R")
+        pdf.ln(row_h)
+        pdf.set_font("Helvetica", "", fs)
+        for zi, (label, color) in enumerate(zones):
+            if pdf.get_y() > 262:
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", fs)
+                pdf.set_fill_color(240, 243, 240)
+                pdf.set_text_color(40, 50, 45)
+                pdf.cell(lw, row_h, "Zone", border=1, fill=True)
+                for year in years:
+                    pdf.cell(cw, row_h, str(year), border=1, fill=True,
+                             align="R")
+                pdf.ln(row_h)
+                pdf.set_font("Helvetica", "", fs)
+            r, g, b = _hex_rgb(color)
+            pdf.set_text_color(r, g, b)
+            pdf.cell(lw, row_h, label[:34], border=1)
+            pdf.set_text_color(40, 50, 45)
+            for yi in range(len(years)):
+                pdf.cell(cw, row_h, _fmt_val(matrix[yi][zi]), border=1,
+                         align="R")
+            pdf.ln(row_h)
     return bytes(pdf.output())
 
 
@@ -2251,8 +2291,10 @@ def report(q: ReportQuery):
     d = _dataset(q.dataset)
     if not q.zones:
         raise HTTPException(status_code=400, detail="No zones supplied.")
-    if len(q.zones) > 8:
-        raise HTTPException(status_code=400, detail="At most 8 zones per report.")
+    if len(q.zones) > 40:
+        raise HTTPException(status_code=400, detail=(
+            f"{len(q.zones)} zones is too many for one report (max 40). "
+            "Exclude some zones with the x button, or split the run."))
     years = [p["year"] for p in q.zones[0].series]
     if len(years) > 14:
         raise HTTPException(status_code=400, detail="At most 14 years per report.")
