@@ -838,7 +838,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v74</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v75</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -852,7 +852,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v74";
+const DSG_VERSION = "deepseego-v75";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1192,17 +1192,27 @@ let currentDs = null;
 // thumbnails cover, faded to 20%. We paint it behind each frame so the area
 // outside the analysis region shows streets/transit instead of blank fill.
 function applyBasemap(url){
+  LAST_BASEMAP = url || null;
   document.querySelectorAll('#strip .frame .imgbox').forEach(box => {
-    if(url){
-      box.style.backgroundImage = `url("${url}")`;
-      box.style.backgroundSize = '100% 100%';
-      box.style.backgroundRepeat = 'no-repeat';
-      box.style.backgroundColor = '#fff';
-    } else {
-      box.style.backgroundImage = '';
+    const img = box.querySelector('img');
+    if(img){
+      if(url){
+        // paint it on the IMG: the img element is exactly the rendered bbox,
+        // and the EE thumbnail is transparent outside the analysis region,
+        // so the transport map shows through precisely where it should.
+        img.style.backgroundImage = `url("${url}")`;
+        img.style.backgroundSize = '100% 100%';
+        img.style.backgroundRepeat = 'no-repeat';
+      } else {
+        img.style.backgroundImage = '';
+        img.style.backgroundColor = '#fff';   // never leave it black
+      }
     }
+    // the surrounding letterbox area: plain, not the dark checkerboard
+    box.style.background = '#f2f5f3';
   });
 }
+let LAST_BASEMAP = null;
 
 /* ---------- epoch viewer (fixed frame + slider) ---------- */
 // The strip holds every frame, but only one is visible at a time; the slider
@@ -1894,12 +1904,12 @@ $('runAnalysis').addEventListener('click', async () => {
     if(th.context){
       const cb = strip.querySelector('.frame[data-year="ctx"] .imgbox');
       if(cb) cb.innerHTML = NORTH_SVG + `<img src="${th.context.url}" alt="Satellite view of region" title="Click to download high-res" loading="lazy">`;
-      applyBasemap(th.basemap);
     }
     th.thumbnails.forEach(t => {
       const box = strip.querySelector(`.frame[data-year="${t.year}"] .imgbox`);
       if(box) box.innerHTML = NORTH_SVG + `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
     });
+    applyBasemap(th.basemap);      // after ALL images exist
   }catch(e){
     toast('Analysis: ' + e.message, 6000);
   }
