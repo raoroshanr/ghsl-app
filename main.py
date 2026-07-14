@@ -46,7 +46,7 @@ import base64
 import datetime as _dt
 import concurrent.futures
 from urllib.request import urlopen
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Request
 
 # PDF reporting needs fpdf2 + Pillow. If requirements.txt was not redeployed
 # alongside main.py, the service must still boot and say so plainly instead of
@@ -60,10 +60,10 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v65"
+APP_VERSION = "deepseego-v66"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -733,6 +733,69 @@ app = FastAPI(title="DeepSeeGo API",
 
 # Once your site is live, replace "*" with the exact origin,
 # e.g. ["https://deepseegoa.netlify.app"], to stop other sites using your quota.
+# ---------------------------------------------------------------------------
+# AUTHENTICATION
+# The frontend signs in with Firebase (Google Sign-In) and sends the resulting
+# ID token as `Authorization: Bearer <token>`. We VERIFY that token server-side
+# (signature + issuer + audience) and then check the email against an allowlist.
+# This is what makes the login real: a browser-only gate could be bypassed by
+# calling the API directly, but these endpoints reject unverified callers.
+# ---------------------------------------------------------------------------
+ALLOWED_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ALLOWED_EMAILS",
+                            "rao.roshan.r@gmail.com").split(",")
+    if e.strip()
+}
+# Set AUTH_REQUIRED=false to disable the gate (e.g. local development).
+AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "true").lower() != "false"
+
+# Paths that never need a token (the app shell, health, and static assets).
+_OPEN_PATHS = {"/health", "/api", "/favicon.ico", "/__/auth/handler"}
+
+
+def _verify_bearer(token: str):
+    """Verify a Firebase ID token. Returns the email, or None if invalid."""
+    try:
+        from google.oauth2 import id_token as g_id_token
+        from google.auth.transport import requests as g_requests
+        info = g_id_token.verify_firebase_token(
+            token, g_requests.Request(), audience=EE_PROJECT)
+        if not info:
+            return None
+        if not info.get("email_verified", False):
+            return None
+        return (info.get("email") or "").lower()
+    except Exception:
+        return None
+
+
+@app.middleware("http")
+async def auth_gate(request, call_next):
+    if not AUTH_REQUIRED:
+        return await call_next(request)
+    path = request.url.path
+    # allow the app shell + static assets + health through; the DATA endpoints
+    # are what we protect.
+    if (request.method == "OPTIONS" or path in _OPEN_PATHS or path == "/"
+            or "." in path.rsplit("/", 1)[-1]):
+        return await call_next(request)
+    hdr = request.headers.get("authorization", "")
+    if not hdr.lower().startswith("bearer "):
+        return JSONResponse(status_code=401,
+                            content={"detail": "Sign-in required."})
+    email = _verify_bearer(hdr.split(" ", 1)[1].strip())
+    if not email:
+        return JSONResponse(status_code=401,
+                            content={"detail": "Invalid or expired sign-in."})
+    if email not in ALLOWED_EMAILS:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": f"{email} is not authorised for this app."})
+    request.state.user_email = email
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -768,6 +831,14 @@ def _health_payload():
             "frontend_bundled": _STATIC_DIR is not None,
             "serving_mode": "single-service (app at /)" if _STATIC_DIR
                             else "API-only (no static/index.html found)"}
+
+
+@app.get("/whoami")
+def whoami(request: Request):
+    """The frontend calls this right after Google sign-in. Reaching this at all
+    means the middleware verified the token AND the email is on the allowlist."""
+    return {"email": getattr(request.state, "user_email", None),
+            "authorised": True}
 
 
 @app.get("/health")
