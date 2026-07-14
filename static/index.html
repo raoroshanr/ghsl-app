@@ -225,6 +225,24 @@ a.dsgNew{
   text-decoration:none;
 }
 a.dsgNew:hover{background:#f4f7f5}
+#progWrap{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(14px);
+  z-index:4000;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
+#progWrap.on{opacity:1;transform:translateX(-50%) translateY(0)}
+#progCard{min-width:290px;max-width:min(460px,92vw);padding:12px 14px;
+  background:rgba(16,27,22,.96);border:1px solid #2E3E37;border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.4);font-family:Arial,Helvetica,sans-serif}
+#progTitle{font-size:13px;font-weight:700;color:#E7EDE8;margin-bottom:8px}
+#progTrack{height:6px;border-radius:4px;background:#22322B;overflow:hidden}
+#progFill{height:100%;width:0;border-radius:4px;background:#0B5A49;
+  transition:width .25s ease}
+#progFill.indet{
+  background:repeating-linear-gradient(90deg,#0B5A49 0 12px,#15806a 12px 24px);
+  background-size:24px 100%;animation:progSlide 0.9s linear infinite}
+@keyframes progSlide{from{background-position:0 0}to{background-position:24px 0}}
+#progFoot{display:flex;justify-content:space-between;gap:10px;margin-top:6px;
+  font-size:11px;color:#9FB0A8}
+#progTime{font-variant-numeric:tabular-nums}
+@media (prefers-reduced-motion:reduce){#progFill.indet{animation:none}}
 .frame .fBarLbl{display:flex;justify-content:space-between;font-family:var(--mono);
   font-size:9px;color:#9FB0A8;margin-top:1px}
 .frame .fScale{display:flex;flex-wrap:wrap;gap:3px 7px;margin-top:3px;justify-content:center}
@@ -838,7 +856,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v76</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v79</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -852,7 +870,20 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v76";
+
+/* Firebase Hosting enforces a HARD 60-second request timeout on anything it
+   proxies to Cloud Run. A big PDF (many years x many zones) legitimately takes
+   longer than that, and gets killed at the proxy -> HTTP 502/504.
+   So heavy, long-running calls are sent STRAIGHT to Cloud Run, which has its
+   own (much larger) timeout. Everything else keeps going through the domain. */
+const HEAVY_BACKEND_URL =
+  "https://ghsl-app-605614825130.asia-south1.run.app";
+function heavyUrl(path){
+  // if we are already on the Cloud Run host, no need to switch
+  return (location.hostname.endsWith('.run.app') ? BACKEND_URL
+                                                 : HEAVY_BACKEND_URL) + path;
+}
+const DSG_VERSION = "deepseego-v79";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1061,6 +1092,84 @@ function fmtVal(v){
   if(Math.abs(v) < 10 && !Number.isInteger(v)) return v.toFixed(3);
   return fmtCompact.format(v);
 }
+
+/* ---------- progress indicator ----------------------------------------
+   Two honest modes:
+     - DETERMINATE: used only where we genuinely know the steps (client-side
+       multi-request flows). The bar reflects real completed steps.
+     - INDETERMINATE: a single long server call whose internal progress we
+       cannot see. We animate, name the current stage, and count elapsed
+       seconds - but we do NOT invent a percentage.
+--------------------------------------------------------------------- */
+const Progress = (function(){
+  let el = null, t0 = 0, timer = null, steps = 0, done = 0, indet = true;
+  function ensure(){
+    if(el) return el;
+    el = document.createElement('div');
+    el.id = 'progWrap';
+    el.innerHTML =
+      '<div id="progCard">' +
+        '<div id="progTitle"></div>' +
+        '<div id="progTrack"><div id="progFill"></div></div>' +
+        '<div id="progFoot"><span id="progStage"></span>' +
+        '<span id="progTime"></span></div>' +
+      '</div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function tick(){
+    const s = ((Date.now() - t0) / 1000);
+    const el2 = document.getElementById('progTime');
+    if(el2) el2.textContent = s.toFixed(0) + 's';
+  }
+  return {
+    // totalSteps > 0 -> determinate; 0 -> indeterminate
+    start(title, stage, totalSteps){
+      ensure();
+      steps = totalSteps || 0; done = 0; indet = !steps;
+      t0 = Date.now();
+      const _t = document.getElementById('progTitle');
+      _t.dataset.base = title || 'Working';
+      _t.textContent = title || 'Working\u2026';
+      document.getElementById('progStage').textContent = stage || '';
+      const fill = document.getElementById('progFill');
+      fill.classList.toggle('indet', indet);
+      fill.style.width = indet ? '100%' : '0%';
+      el.classList.add('on');
+      clearInterval(timer); timer = setInterval(tick, 250); tick();
+    },
+    stage(text){
+      const s = document.getElementById('progStage');
+      if(s) s.textContent = text || '';
+    },
+    // set a real percentage reported by the SERVER (async jobs)
+    percent(pct, text){
+      indet = false;
+      if(text) this.stage(text);
+      const fill = document.getElementById('progFill');
+      if(fill){
+        fill.classList.remove('indet');
+        fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      }
+      const t = document.getElementById('progTitle');
+      if(t && !t.dataset.base) t.dataset.base = t.textContent;
+      if(t) t.textContent = (t.dataset.base || 'Working') +
+                            '  ' + Math.round(pct) + '%';
+    },
+    // advance one real step (determinate mode only)
+    step(text){
+      if(text) this.stage(text);
+      if(indet) return;
+      done = Math.min(steps, done + 1);
+      const fill = document.getElementById('progFill');
+      if(fill) fill.style.width = (100 * done / steps).toFixed(0) + '%';
+    },
+    done(){
+      clearInterval(timer);
+      if(el) el.classList.remove('on');
+    }
+  };
+})();
 
 function toast(msg, ms = 3500){
   const t = $('toast');
@@ -1875,7 +1984,10 @@ $('runAnalysis').addEventListener('click', async () => {
 
   try{
     // 1) time series -> chart + per-frame values
+    Progress.start('Analysing temporal change',
+                   'Computing the time series\u2026', 2);
     const ts = await api('/timeseries', opts);
+    Progress.step('Rendering maps for each epoch\u2026');
     lastSeries = ts.series; lastMeta = currentDs;
     lastRuns = {title: currentDs.label, file: ds,
                 zones: [{label: currentDs.label, color: '#E4572E', series: ts.series}]};
@@ -1901,6 +2013,7 @@ $('runAnalysis').addEventListener('click', async () => {
 
     // 2) clipped thumbnails -> filmstrip
     const th = await api('/thumbnails', opts);
+    Progress.step('Done');
     if(th.context){
       const cb = strip.querySelector('.frame[data-year="ctx"] .imgbox');
       if(cb) cb.innerHTML = NORTH_SVG + `<img src="${th.context.url}" alt="Satellite view of region" title="Click to download high-res" loading="lazy">`;
@@ -1913,6 +2026,7 @@ $('runAnalysis').addEventListener('click', async () => {
   }catch(e){
     toast('Analysis: ' + e.message, 6000);
   }
+  finally { Progress.done(); }
   btn.disabled = false; btn.textContent = 'Analyse Temporal Change';
 });
 
@@ -2079,17 +2193,35 @@ $('pdfBtn').addEventListener('click', async () => {
   if(!lastRuns || !lastRuns.dsKey || !lastRuns.zones[0].spec) return;
   const btn = $('pdfBtn');
   btn.disabled = true; btn.textContent = 'Building report\u2026';
-  toast('Building the PDF \u2014 each year is rendered at high resolution; this can take a minute\u2026', 20000);
+  // ASYNC JOB: the server starts a background build and we poll for REAL
+  // progress. No request stays open, so the 60 s proxy limit cannot bite and
+  // arbitrarily large reports are fine.
+  Progress.start('Building PDF report', 'Queued\u2026', 100);
   try{
-    await AUTH_READY;
-    const _tok = await authToken();      // /report returns a PDF blob, so it
-    const r = await fetch(BACKEND_URL + '/report', {method: 'POST',   // can't go through api()
-      headers: Object.assign({'Content-Type': 'application/json'},
-        _tok ? {Authorization: 'Bearer ' + _tok} : {}),
+    const started = await api('/report_start', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({dataset: lastRuns.dsKey, stat: lastRuns.stat,
         region: lastRuns.regionSpec,
         zones: lastRuns.zones.map(z => ({label: z.label, color: z.color,
                                          spec: z.spec, series: z.series}))})});
+    const jid = started.job_id;
+
+    // poll until done / error (generous ceiling: ~20 min)
+    let st = null;
+    for(let i = 0; i < 800; i++){
+      await new Promise(r => setTimeout(r, 1500));
+      st = await api('/report_status?job_id=' + encodeURIComponent(jid));
+      Progress.percent(st.percent || 0, st.stage || '');
+      if(st.state === 'done' || st.state === 'error') break;
+    }
+    if(!st || st.state !== 'done')
+      throw new Error((st && st.error) || 'Report timed out.');
+
+    Progress.percent(100, 'Downloading\u2026');
+    const _tok = await authToken();           // the file comes back as a blob
+    const r = await fetch(BACKEND_URL + '/report_file?job_id=' +
+                          encodeURIComponent(jid),
+      {headers: _tok ? {Authorization: 'Bearer ' + _tok} : {}});
     if(!r.ok){
       let d = ''; try{ d = (await r.json()).detail || ''; }catch(e){}
       throw new Error(d || ('HTTP ' + r.status));
@@ -2102,6 +2234,7 @@ $('pdfBtn').addEventListener('click', async () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     toast('Report downloaded');
   }catch(e){ toast('Report: ' + e.message, 12000); }
+  finally { Progress.done(); }
   btn.disabled = false; btn.textContent = '\u2913 PDF report';
 });
 
@@ -2738,9 +2871,18 @@ async function runAdvanced(allYears, tableOnly){
   const body = z => JSON.stringify({dataset: ds, region: z.spec, stat,
                                     year: allYears ? null : yr, all_years: allYears});
   try{
+    Progress.start('Zone-wise analysis',
+      `Calculating ${runs.length} zone${runs.length > 1 ? 's' : ''}\u2026`,
+      runs.length + 1);
+    let _zdone = 0;
     const results = await Promise.all(runs.map(z =>
       api('/calc', {method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: body(z)})));
+                    body: body(z)})
+        .then(r => {                       // count each zone as it really lands
+          _zdone++;
+          Progress.step(`Calculated ${_zdone} of ${runs.length} zones\u2026`);
+          return r;
+        })));
     const single = runs.length === 1;
     lastRuns = {title: meta.label + ' \u00b7 ' + stat.toUpperCase(),
                 file: ds + '_' + stat + '_zones',
@@ -2793,6 +2935,7 @@ async function runAdvanced(allYears, tableOnly){
         if(f) f.textContent = classLabel(metaClone, p.value) ?? fmtVal(p.value);
       });
     }
+    Progress.stage('Rendering maps for each epoch\u2026');
     const th = await api('/thumbnails', {method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({dataset: ds, region: regionSpec,
@@ -2806,9 +2949,11 @@ async function runAdvanced(allYears, tableOnly){
       if(box) box.innerHTML = NORTH_SVG + `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
     });
     applyBasemap(th.basemap);
+    Progress.step('Done');
     if(!allYears) $('zwyBtn').disabled = false;   // year calc done -> unlock
     if(allYears) $('pdfBtn').hidden = false;      // report ready to build
   }catch(e){ toast('Advanced analysis: ' + e.message, 8000); }
+  finally { Progress.done(); }
   b1.disabled = false; b2.disabled = $('zwyBtn').disabled;
 }
 $('advCalcOne').addEventListener('click', () => runAdvanced(false));$('advCalcOne').addEventListener('click', () => runAdvanced(false, false));
@@ -3135,6 +3280,8 @@ async function runDispersion(){
   if(aqState.lat == null) return toast('Pick a point in the Air tab first');
   const btn = $('aqDisperse'); const orig = btn.textContent;
   btn.disabled = true; btn.textContent = 'Modelling plume\u2026';
+  Progress.start('Plume dispersion model',
+    'Scanning sources, fetching ERA5 wind, evaluating the grid\u2026', 0);
   try{
     const j = await api('/dispersion', {method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -3168,6 +3315,7 @@ async function runDispersion(){
       (typeof provenanceBlock === 'function'
         ? provenanceBlock(['osm','era5_wind'], {lat: aqState.lat, lon: aqState.lon}) : '');
   }catch(e){ toast('Dispersion: ' + e.message, 8000); }
+  finally { Progress.done(); }
   btn.disabled = false; btn.textContent = orig;
 }
 if($('aqDisperse')) $('aqDisperse').addEventListener('click', runDispersion);
@@ -3474,11 +3622,14 @@ if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async 
   if(siteState.lat == null) return toast('Pick a site first');
   const btn = $('siteBuildingsBtn');
   btn.disabled = true; btn.textContent = 'Mapping buildings\u2026';
+  Progress.start('Mapping building types',
+    'Reading OpenStreetMap buildings in the radius\u2026', 0);
   // make sure the analysis pane is open to show the table
   $('drawer').classList.add('open');
   if(typeof paneMode === 'function') paneMode('site');
   $('siteWrap').hidden = false;
   await loadBuildings(siteState.lat, siteState.lon, +$('siteRadius').value);
+  Progress.done();
   btn.disabled = false; btn.textContent = 'Map building types';
 });
 function heightColor(h, hmax){
@@ -3506,6 +3657,8 @@ async function open3DView(){
   if(_building3dOn){ building3dLayer.clearLayers(); _building3dOn = false;
     btn.textContent = '3D building view (extruded)'; return; }
   btn.disabled = true; btn.textContent = 'Building massing\u2026';
+  Progress.start('3D building massing',
+    'Joining Open Buildings footprints with 2.5D heights\u2026', 0);
   try{
     const j = await api('/building_heights', {method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -3517,6 +3670,7 @@ async function open3DView(){
     btn.textContent = 'Hide 3D massing';
     toast(`${j.count} buildings extruded on the map \u00b7 ${j.h_min}\u2013${j.h_max} m`, 6000);
   }catch(e){ toast('3D view: ' + e.message, 8000); }
+  finally { Progress.done(); }
   btn.disabled = false;
 }
 // Oblique 2.5D extrusion drawn as real Leaflet polygons (pans/zooms natively).
