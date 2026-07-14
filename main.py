@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v74"
+APP_VERSION = "deepseego-v75"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2126,8 +2126,17 @@ def _draw_scale_north(pdf, x, y, w, ground_km):
 # Public OSM tile servers are rate-limited and are NOT meant to be hammered by
 # a server. We fetch a modest number of tiles, cache the result, and fall back
 # silently to no-basemap if anything fails.
-_OSM_TILE_URL = "https://tile.memomaps.de/tilegen/{z}/{x}/{y}.png"   # transport
+# Ordered by preference. OSM's own servers often refuse data-centre IPs
+# (Cloud Run), so a CDN-backed basemap is kept as a reliable fallback.
+_OSM_TILE_SERVERS = [
+    "https://tile.memomaps.de/tilegen/{z}/{x}/{y}.png",          # transport
+    "https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",       # humanitarian
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",            # standard OSM
+    "https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png",
+    "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+]
 _BASEMAP_CACHE = {}
+_LAST_BASEMAP_DIAG = {}
 
 
 def _deg2tile(lat, lon, z):
@@ -2163,17 +2172,30 @@ def _osm_basemap_png(w, s, e, n_, out_w, out_h, opacity=0.20):
             return None
         canvas = PILImage.new("RGB", (cols * 256, rows * 256), (255, 255, 255))
         got = 0
-        for ix in range(cols):
-            for iy in range(rows):
-                url = _OSM_TILE_URL.format(z=z, x=tx0 + ix, y=ty0 + iy)
-                try:
-                    req = Request(url, headers={"User-Agent": _UA})
-                    with urlopen(req, timeout=8) as r:
-                        t = PILImage.open(io.BytesIO(r.read())).convert("RGB")
-                    canvas.paste(t, (ix * 256, iy * 256))
-                    got += 1
-                except Exception:
-                    continue
+        used = None
+        last_err = None
+        for tmpl in _OSM_TILE_SERVERS:
+            got = 0
+            for ix in range(cols):
+                for iy in range(rows):
+                    url = tmpl.format(z=z, x=tx0 + ix, y=ty0 + iy)
+                    try:
+                        req = Request(url, headers={
+                            "User-Agent": _UA,
+                            "Referer": "https://www.deepseego.app/"})
+                        with urlopen(req, timeout=10) as r:
+                            t = PILImage.open(io.BytesIO(r.read())).convert("RGB")
+                        canvas.paste(t, (ix * 256, iy * 256))
+                        got += 1
+                    except Exception as te:
+                        last_err = f"{type(te).__name__}: {te}"
+                        continue
+            if got:
+                used = tmpl
+                break                                  # this server worked
+        _LAST_BASEMAP_DIAG.update({
+            "zoom": z, "tiles_expected": cols * rows, "tiles_fetched": got,
+            "server": used, "last_error": last_err})
         if not got:
             return None
         # crop the canvas to the exact bbox
@@ -4207,6 +4229,21 @@ def timeseries(q: RegionQuery):
     return {"dataset": q.dataset,
             "value_label": _dataset(q.dataset)["value_label"],
             "series": _series(q.dataset, region)}
+
+
+@app.get("/basemap_test")
+def basemap_test(lat: float = 12.8138, lon: float = 74.8614, d: float = 0.05):
+    """Open /basemap_test in a browser to see whether the Cloud Run container
+    can actually reach the OSM tile servers."""
+    img = _osm_basemap_png(lon - d, lat - d, lon + d, lat + d, 240, 240, 0.20)
+    out = dict(_LAST_BASEMAP_DIAG)
+    out["basemap_built"] = img is not None
+    if img is not None:
+        b = io.BytesIO()
+        img.convert("RGB").save(b, "PNG")
+        out["png_bytes"] = len(b.getvalue())
+    out["servers_tried"] = _OSM_TILE_SERVERS
+    return out
 
 
 @app.post("/thumbnails")
