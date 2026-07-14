@@ -45,7 +45,7 @@ from google.cloud import storage as gcs
 import base64
 import datetime as _dt
 import concurrent.futures
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
 from fastapi import FastAPI, HTTPException, Response, Request
 
 # PDF reporting needs fpdf2 + Pillow. If requirements.txt was not redeployed
@@ -60,7 +60,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v73"
+APP_VERSION = "deepseego-v74"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2123,10 +2123,93 @@ def _draw_scale_north(pdf, x, y, w, ground_km):
     pdf.cell(6, 3.5, "N", align="C")
 
 
-def _compose_report_frames(bg_png, years, data_pngs):
+# Public OSM tile servers are rate-limited and are NOT meant to be hammered by
+# a server. We fetch a modest number of tiles, cache the result, and fall back
+# silently to no-basemap if anything fails.
+_OSM_TILE_URL = "https://tile.memomaps.de/tilegen/{z}/{x}/{y}.png"   # transport
+_BASEMAP_CACHE = {}
+
+
+def _deg2tile(lat, lon, z):
+    n = 2 ** z
+    xt = (lon + 180.0) / 360.0 * n
+    la = math.radians(lat)
+    yt = (1.0 - math.asinh(math.tan(la)) / math.pi) / 2.0 * n
+    return xt, yt
+
+
+def _osm_basemap_png(w, s, e, n_, out_w, out_h, opacity=0.20):
+    """Stitch OSM public-transport tiles covering the bbox, crop to it, resize
+    to (out_w,out_h) and fade to `opacity` over white. Returns an RGBA PIL
+    image, or None if tiles could not be fetched."""
+    key = (round(w, 4), round(s, 4), round(e, 4), round(n_, 4), out_w, out_h)
+    if key in _BASEMAP_CACHE:
+        return _BASEMAP_CACHE[key].copy()
+    try:
+        # choose a zoom that needs a reasonable number of tiles
+        z = 12
+        for cand in range(16, 4, -1):
+            x0, y0 = _deg2tile(n_, w, cand)
+            x1, y1 = _deg2tile(s, e, cand)
+            if (abs(x1 - x0) + 1) * (abs(y1 - y0) + 1) <= 30:
+                z = cand
+                break
+        x0f, y0f = _deg2tile(n_, w, z)
+        x1f, y1f = _deg2tile(s, e, z)
+        tx0, ty0 = int(math.floor(x0f)), int(math.floor(y0f))
+        tx1, ty1 = int(math.floor(x1f)), int(math.floor(y1f))
+        cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
+        if cols <= 0 or rows <= 0 or cols * rows > 40:
+            return None
+        canvas = PILImage.new("RGB", (cols * 256, rows * 256), (255, 255, 255))
+        got = 0
+        for ix in range(cols):
+            for iy in range(rows):
+                url = _OSM_TILE_URL.format(z=z, x=tx0 + ix, y=ty0 + iy)
+                try:
+                    req = Request(url, headers={"User-Agent": _UA})
+                    with urlopen(req, timeout=8) as r:
+                        t = PILImage.open(io.BytesIO(r.read())).convert("RGB")
+                    canvas.paste(t, (ix * 256, iy * 256))
+                    got += 1
+                except Exception:
+                    continue
+        if not got:
+            return None
+        # crop the canvas to the exact bbox
+        left = (x0f - tx0) * 256
+        top = (y0f - ty0) * 256
+        right = (x1f - tx0) * 256
+        bottom = (y1f - ty0) * 256
+        if right - left < 2 or bottom - top < 2:
+            return None
+        crop = canvas.crop((int(left), int(top), int(right), int(bottom)))
+        crop = crop.resize((out_w, out_h), PILImage.LANCZOS)
+        # fade toward white so it reads as a faint 20% underlay
+        white = PILImage.new("RGB", crop.size, (255, 255, 255))
+        faded = PILImage.blend(white, crop, opacity)
+        out = faded.convert("RGBA")
+        _BASEMAP_CACHE[key] = out.copy()
+        return out
+    except Exception:
+        return None
+
+
+def _compose_report_frames(bg_png, years, data_pngs, basemap=None):
     """[(title, png)]: satellite context first, then per-year frames made by
-    alpha-compositing the data overlay (78% opacity) onto the one backdrop."""
+    alpha-compositing the data overlay (78% opacity) onto the one backdrop.
+    `basemap` (PIL RGBA, already faded) is laid UNDER everything so the area
+    outside the analysis region shows the transport map instead of blank."""
     bg = PILImage.open(io.BytesIO(bg_png)).convert("RGBA")
+    if basemap is not None:
+        try:
+            bm = basemap if basemap.size == bg.size else basemap.resize(bg.size)
+            bg = PILImage.alpha_composite(bm.convert("RGBA"), bg)
+            b0 = io.BytesIO()
+            bg.convert("RGB").save(b0, "PNG")
+            bg_png = b0.getvalue()
+        except Exception:
+            pass
     frames = [("Zones - satellite context", bg_png)]
     for y in years:
         raw = data_pngs.get(y)
@@ -2404,9 +2487,9 @@ def report(q: ReportQuery):
     d = _dataset(q.dataset)
     if not q.zones:
         raise HTTPException(status_code=400, detail="No zones supplied.")
-    if len(q.zones) > 40:
+    if len(q.zones) > 200:
         raise HTTPException(status_code=400, detail=(
-            f"{len(q.zones)} zones is too many for one report (max 40). "
+            f"{len(q.zones)} zones is too many for one report (max 200). "
             "Exclude some zones with the x button, or split the run."))
     years = [p["year"] for p in q.zones[0].series]
     if len(years) > 14:
@@ -2497,7 +2580,21 @@ def report(q: ReportQuery):
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
         data = dict(zip(years, ex.map(data_png, years)))
 
-    frames = _compose_report_frames(bg_png, years, data)
+    # OSM public-transport basemap under the frames, clipped to the same
+    # rectangle. Faded to 20% so it reads as context, not as the data.
+    basemap = None
+    try:
+        bb = bounds.getInfo()["coordinates"][0]
+        lons = [c[0] for c in bb]
+        lats = [c[1] for c in bb]
+        bw, be = min(lons), max(lons)
+        bs, bn = min(lats), max(lats)
+        px = PILImage.open(io.BytesIO(bg_png)).size
+        basemap = _osm_basemap_png(bw, bs, be, bn, px[0], px[1], 0.20)
+    except Exception:
+        basemap = None
+
+    frames = _compose_report_frames(bg_png, years, data, basemap)
 
     matrix = [[(z.series[yi].get("value") if yi < len(z.series) else None)
                for z in q.zones] for yi in range(len(years))]
@@ -4135,7 +4232,25 @@ def thumbnails(q: RegionQuery):
     for year in years:
         url = _frame(region, _data_rgb(q.dataset, year, region, d)).getThumbURL(tp)
         out.append({"year": year, "url": url})
-    return {"dataset": q.dataset, "context": context, "thumbnails": out}
+    # OSM public-transport basemap for the SAME rectangle, as a faint underlay
+    # behind every frame (so the area outside the region is map, not blank).
+    basemap_url = None
+    try:
+        bb = bounds.getInfo()["coordinates"][0]
+        lons = [c[0] for c in bb]
+        lats = [c[1] for c in bb]
+        bm = _osm_basemap_png(min(lons), min(lats), max(lons), max(lats),
+                              480, 480, 0.20)
+        if bm is not None:
+            b = io.BytesIO()
+            bm.convert("RGB").save(b, "PNG", optimize=True)
+            basemap_url = ("data:image/png;base64," +
+                           base64.b64encode(b.getvalue()).decode())
+    except Exception:
+        basemap_url = None
+
+    return {"dataset": q.dataset, "context": context, "thumbnails": out,
+            "basemap": basemap_url}
 
 
 # ----------------------------------------------------------------------------
