@@ -199,6 +199,26 @@ button.ghost.active{border-color:var(--deep);color:var(--deep);font-weight:700}
 }
 .frame .yr{font-family:var(--mono);font-size:12px;font-weight:700;text-align:center;color:#E7EDE8}
 .frame .val{font-family:var(--mono);font-size:10px;color:#9FB0A8;text-align:center}
+.frame .fBar{height:8px;border-radius:3px;border:1px solid #2E3E37;margin-top:2px}
+a.dsgNew{
+  display:flex!important;align-items:center;justify-content:center;
+  width:auto!important;min-width:34px;height:30px!important;padding:0 8px;
+  font:700 12px/1 Arial,Helvetica,sans-serif;color:#0B5A49;background:#fff;
+  text-decoration:none;
+}
+a.dsgNew:hover{background:#f4f7f5}
+.frame .fBarLbl{display:flex;justify-content:space-between;font-family:var(--mono);
+  font-size:9px;color:#9FB0A8;margin-top:1px}
+.frame .fScale{display:flex;flex-wrap:wrap;gap:3px 7px;margin-top:3px;justify-content:center}
+.frame .fSw{display:flex;align-items:center;gap:3px;font-family:var(--mono);
+  font-size:9px;color:#9FB0A8}
+.frame .fSw i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.frame .imgbox .fNorth{position:absolute;top:4px;left:5px;z-index:2;
+  filter:drop-shadow(0 1px 2px rgba(0,0,0,.6));pointer-events:none}
+.frame .ttl{font-family:var(--mono);font-size:11px;font-weight:700;
+  text-align:center;color:#E7EDE8;line-height:1.25}
+.frame .ttl .dsName{display:block;font-weight:400;font-size:9px;color:#9FB0A8;
+  text-transform:uppercase;letter-spacing:.05em}
 
 /* footer */
 footer{
@@ -792,7 +812,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v70</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v71</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -806,7 +826,7 @@ label.chk input{width:auto}
 // so API calls go to the same host. To point at a remote backend during
 // local testing, set this to the full https URL instead of "".
 const BACKEND_URL = "";
-const DSG_VERSION = "deepseego-v70";
+const DSG_VERSION = "deepseego-v71";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1080,6 +1100,52 @@ L.control.layers(
   null, {position: 'topleft', collapsed: true}).addTo(map);
 
 L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
+// "New" button - clears every overlay so a fresh analysis can start.
+// Placed topleft and added BEFORE the zoom control renders, so it sits above +/-.
+const NewBtn = L.Control.extend({
+  onAdd: function(){
+    const a = L.DomUtil.create('a', 'leaflet-bar dsgNew');
+    a.href = '#'; a.title = 'Clear the map and start a new analysis';
+    a.innerHTML = 'New';
+    L.DomEvent.on(a, 'click', L.DomEvent.stop)
+              .on(a, 'click', () => resetForNewAnalysis());
+    return a;
+  }
+});
+const _newBtn = new NewBtn({position: 'topleft'}).addTo(map);
+// Leaflet stacks controls in the order added, so the zoom control (created with
+// the map) would sit above ours. Move ours to the TOP of the top-left corner.
+(function(){
+  const corner = map._controlCorners && map._controlCorners['topleft'];
+  const el = _newBtn.getContainer();
+  if(corner && el) corner.insertBefore(el, corner.firstChild);
+})();
+
+function resetForNewAnalysis(){
+  // wipe every analysis overlay + any picked points/regions
+  try { wipeMapAnalysis(); } catch(e){}
+  try { if(typeof regionLayers !== 'undefined') regionLayers.clearLayers(); } catch(e){}
+  try { if(typeof advLineLayer !== 'undefined') advLineLayer.clearLayers(); } catch(e){}
+  try { if(typeof advBufLayer !== 'undefined') advBufLayer.clearLayers(); } catch(e){}
+  try { if(typeof advBndLayer !== 'undefined') advBndLayer.clearLayers(); } catch(e){}
+  try { if(typeof advDrawLayer !== 'undefined') advDrawLayer.clearLayers(); } catch(e){}
+  try { if(typeof fragLayerG !== 'undefined') fragLayerG.clearLayers(); } catch(e){}
+  try { if(typeof csvPointLayer !== 'undefined') csvPointLayer.clearLayers(); } catch(e){}
+  try { if(typeof searchPin !== 'undefined' && searchPin){ map.removeLayer(searchPin); searchPin = null; } } catch(e){}
+  try { if(ghslLayer){ map.removeLayer(ghslLayer); ghslLayer = null; } } catch(e){}
+  try { if(typeof resetFragments === 'function') resetFragments(); } catch(e){}
+  try { if(typeof clearDispersion === 'function') clearDispersion(); } catch(e){}
+  // reset the wizard + close the analysis pane
+  try { if(typeof wiz !== 'undefined'){ wiz.lines = []; wiz.buffer = null;
+        wiz.reach = null; wiz.zoneRuns = null; } } catch(e){}
+  try { setRegion(null, '', false); } catch(e){}
+  try { $('drawer').classList.remove('open'); } catch(e){}
+  try { $('strip').innerHTML = ''; } catch(e){}
+  try { $('csvBtn').hidden = true; $('drawerActions').hidden = true; } catch(e){}
+  mapClickMode = null;
+  toast('Map cleared \u2014 ready for a new analysis', 3000);
+}
+
 const MapMeta = L.Control.extend({
   onAdd: () => {
     const el = L.DomUtil.create('div', 'mapmeta');
@@ -1093,6 +1159,32 @@ new MapMeta({position:'bottomleft'}).addTo(map);
 let ghslLayer = null;
 const DS = {};              // key -> full dataset meta from /datasets
 let currentDs = null;
+
+/* ---------- per-image scale bar + north arrow (filmstrip) ---------- */
+// A small colour scale drawn under each thumbnail, so every exported image
+// carries its own key rather than relying on the sidebar legend.
+function frameScale(d){
+  if(!d) return '';
+  if(d.classes && d.classes.length){
+    return '<div class="fScale">' + d.classes.slice(0, 6).map(c =>
+      `<span class="fSw"><i style="background:${c.color}"></i>${c.label}</span>`
+    ).join('') + '</div>';
+  }
+  if(d.vis && d.vis.palette){
+    const colors = d.vis.palette.map(c => c.startsWith('#') ? c : '#' + c);
+    return `<div class="fBar" style="background:linear-gradient(to right,${colors.join(',')})"></div>` +
+      `<div class="fBarLbl"><span>${fmtIN.format(d.vis.min)}</span>` +
+      `<span>${d.unit || ''}</span>` +
+      `<span>${fmtIN.format(d.vis.max)}</span></div>`;
+  }
+  return '';
+}
+// north arrow, drawn as an overlay in the corner of each image
+const NORTH_SVG =
+  '<svg class="fNorth" viewBox="0 0 24 34" width="16" height="23">' +
+  '<polygon points="12,1 18,20 12,15 6,20" fill="#fff" stroke="#111" stroke-width="1"/>' +
+  '<text x="12" y="32" text-anchor="middle" font-size="11" font-weight="700"' +
+  ' fill="#fff" stroke="#111" stroke-width="0.6" font-family="Arial">N</text></svg>';
 
 /* ---------- legend + info window ---------- */
 function updateLegend(d){
@@ -1666,15 +1758,20 @@ $('runAnalysis').addEventListener('click', async () => {
   // filmstrip placeholders from this dataset's analysis epochs
   const ay = currentDs.analysis_years || currentDs.years;
   const strip = $('strip');
+  const dsName = currentDs.label;
+  const scaleHtml = frameScale(currentDs);
   strip.innerHTML =
     `<div class="frame" data-year="ctx">
-       <div class="imgbox"><span style="font-family:var(--mono);font-size:10px;color:#9FB0A8">\u2026</span></div>
-       <div class="yr">Satellite \u00b7 region</div><div class="val"></div>
+       <div class="imgbox">${NORTH_SVG}<span style="font-family:var(--mono);font-size:10px;color:#9FB0A8">\u2026</span></div>
+       <div class="ttl">Satellite context<span class="dsName">region overview</span></div>
+       <div class="val"></div>
      </div>` +
     ay.map(y =>
     `<div class="frame" data-year="${y}">
-       <div class="imgbox"><span style="font-family:var(--mono);font-size:10px;color:var(--dim)">…</span></div>
-       <div class="yr">${y}</div><div class="val"></div>
+       <div class="imgbox">${NORTH_SVG}<span style="font-family:var(--mono);font-size:10px;color:var(--dim)">…</span></div>
+       <div class="ttl">${y}<span class="dsName">${dsName}</span></div>
+       ${scaleHtml}
+       <div class="val"></div>
      </div>`).join('');
 
   const body = JSON.stringify({dataset: ds, region: regionSpec});
@@ -1710,11 +1807,11 @@ $('runAnalysis').addEventListener('click', async () => {
     const th = await api('/thumbnails', opts);
     if(th.context){
       const cb = strip.querySelector('.frame[data-year="ctx"] .imgbox');
-      if(cb) cb.innerHTML = `<img src="${th.context.url}" alt="Satellite view of region" title="Click to download high-res" loading="lazy">`;
+      if(cb) cb.innerHTML = NORTH_SVG + `<img src="${th.context.url}" alt="Satellite view of region" title="Click to download high-res" loading="lazy">`;
     }
     th.thumbnails.forEach(t => {
       const box = strip.querySelector(`.frame[data-year="${t.year}"] .imgbox`);
-      if(box) box.innerHTML = `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
+      if(box) box.innerHTML = NORTH_SVG + `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
     });
   }catch(e){
     toast('Analysis: ' + e.message, 6000);
@@ -2599,11 +2696,11 @@ async function runAdvanced(allYears, tableOnly){
                             years: series.map(p => p.year)})});
     if(th.context){
       const cb = strip.querySelector('.frame[data-year="ctx"] .imgbox');
-      if(cb) cb.innerHTML = `<img src="${th.context.url}" alt="Satellite view of zones" title="Click to download high-res" loading="lazy">`;
+      if(cb) cb.innerHTML = NORTH_SVG + `<img src="${th.context.url}" alt="Satellite view of zones" title="Click to download high-res" loading="lazy">`;
     }
     th.thumbnails.forEach(t => {
       const box = strip.querySelector(`.frame[data-year="${t.year}"] .imgbox`);
-      if(box) box.innerHTML = `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
+      if(box) box.innerHTML = NORTH_SVG + `<img src="${t.url}" alt="Map ${t.year}" title="Click to download high-res" loading="lazy">`;
     });
     if(!allYears) $('zwyBtn').disabled = false;   // year calc done -> unlock
     if(allYears) $('pdfBtn').hidden = false;      // report ready to build
