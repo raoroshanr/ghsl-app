@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v81"
+APP_VERSION = "deepseego-v84"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2053,6 +2053,151 @@ def _annotate_map_png(png, d, dataset, year, ground_km, basemap=None):
     b = io.BytesIO()
     out.convert("RGB").save(b, "PNG", optimize=True)
     return b.getvalue()
+
+
+# ============================================================================
+# SLOPE / TERRAIN PROFILE between two points
+# The DEMs below are the best-resolution ELEVATION data that is openly
+# available worldwide. All are ~30 m native. There is NO free global DEM at
+# 1-5 m: sub-10 m data exists only for some countries (e.g. USGS 3DEP for the
+# US) or is commercial. We therefore state the DEM's real resolution and the
+# resulting uncertainty honestly rather than implying survey accuracy.
+# ============================================================================
+DEMS = {
+    "cop30": {
+        "label": "Copernicus GLO-30", "res_m": 30, "kind": "DSM",
+        "note": "Best-quality global 30 m DSM (surface, includes buildings/canopy).",
+        "get": lambda: ee.ImageCollection("COPERNICUS/DEM/GLO30")
+                         .select("DEM").mosaic(),
+    },
+    "nasadem": {
+        "label": "NASADEM", "res_m": 30, "kind": "DSM",
+        "note": "Reprocessed SRTM with voids filled; 30 m.",
+        "get": lambda: ee.Image("NASA/NASADEM_HGT/001").select("elevation"),
+    },
+    "alos": {
+        "label": "ALOS AW3D30", "res_m": 30, "kind": "DSM",
+        "note": "JAXA 30 m global surface model.",
+        "get": lambda: ee.ImageCollection("JAXA/ALOS/AW3D30/V3_2")
+                         .select("DSM").mosaic(),
+    },
+    "srtm": {
+        "label": "SRTM", "res_m": 30, "kind": "DSM",
+        "note": "Classic 30 m SRTM (2000).",
+        "get": lambda: ee.Image("USGS/SRTMGL1_003").select("elevation"),
+    },
+}
+
+
+class SlopeQuery(BaseModel):
+    lat1: float
+    lon1: float
+    lat2: float
+    lon2: float
+    dem: str = "cop30"
+    samples: int = 64          # points along the line (profile resolution)
+
+
+@app.post("/slope")
+@ee_errors
+def slope(q: SlopeQuery):
+    """Elevation at two points + the terrain profile between them, and the
+    slope. Straight-line ('as the crow flies') slope plus the steepest section
+    actually crossed along the path."""
+    ensure_ee()
+    key = q.dem if q.dem in DEMS else "cop30"
+    dem = DEMS[key]
+    img = dem["get"]()
+
+    n = max(8, min(200, int(q.samples or 64)))
+    # sample evenly along the straight line between the two points
+    pts, fracs = [], []
+    for i in range(n):
+        t = i / (n - 1)
+        la = q.lat1 + (q.lat2 - q.lat1) * t
+        lo = q.lon1 + (q.lon2 - q.lon1) * t
+        pts.append(ee.Feature(ee.Geometry.Point([lo, la]), {"i": i}))
+        fracs.append((t, la, lo))
+
+    fc = ee.FeatureCollection(pts)
+    sampled = img.sampleRegions(collection=fc, scale=dem["res_m"],
+                                geometries=False).getInfo()
+    band = list(sampled["features"][0]["properties"].keys())
+    band = [b for b in band if b != "i"][0] if sampled["features"] else None
+
+    elev = {}
+    for f in sampled.get("features", []):
+        p = f["properties"]
+        if p.get(band) is not None:
+            elev[int(p["i"])] = float(p[band])
+    if len(elev) < 2:
+        raise HTTPException(status_code=400, detail=(
+            "The DEM has no data at these points (they may be over water)."))
+
+    total_m = _haversine_m(q.lat1, q.lon1, q.lat2, q.lon2)
+    profile = []
+    for i, (t, la, lo) in enumerate(fracs):
+        if i in elev:
+            profile.append({"d_m": round(total_m * t, 1),
+                            "elev_m": round(elev[i], 2),
+                            "lat": round(la, 6), "lon": round(lo, 6)})
+
+    z1, z2 = profile[0]["elev_m"], profile[-1]["elev_m"]
+    dz = z2 - z1
+    run = max(total_m, 0.001)
+    slope_pct = 100.0 * dz / run
+    slope_deg = math.degrees(math.atan2(dz, run))
+
+    # steepest section actually crossed (not just endpoint-to-endpoint)
+    steepest = {"pct": 0.0, "deg": 0.0, "from_m": None, "to_m": None}
+    gain = loss = 0.0
+    for a, b in zip(profile[:-1], profile[1:]):
+        dd = b["d_m"] - a["d_m"]
+        dh = b["elev_m"] - a["elev_m"]
+        if dh > 0:
+            gain += dh
+        else:
+            loss -= dh
+        if dd > 0.5:
+            p = 100.0 * dh / dd
+            if abs(p) > abs(steepest["pct"]):
+                steepest = {"pct": round(p, 2),
+                            "deg": round(math.degrees(math.atan2(dh, dd)), 2),
+                            "from_m": a["d_m"], "to_m": b["d_m"]}
+
+    elevs = [p["elev_m"] for p in profile]
+    return {
+        "dem": {"key": key, "label": dem["label"], "res_m": dem["res_m"],
+                "kind": dem["kind"], "note": dem["note"]},
+        "a": {"lat": q.lat1, "lon": q.lon1, "elev_m": round(z1, 2)},
+        "b": {"lat": q.lat2, "lon": q.lon2, "elev_m": round(z2, 2)},
+        "distance_m": round(total_m, 1),
+        "rise_m": round(dz, 2),
+        "slope_pct": round(slope_pct, 2),
+        "slope_deg": round(slope_deg, 2),
+        "gradient": ("1 in " + str(round(run / abs(dz), 1))) if abs(dz) > 0.01
+                    else "flat",
+        "steepest_section": steepest,
+        "elev_min_m": round(min(elevs), 2),
+        "elev_max_m": round(max(elevs), 2),
+        "total_ascent_m": round(gain, 2),
+        "total_descent_m": round(loss, 2),
+        "profile": profile,
+        "samples": len(profile),
+        "note": (f"{dem['label']} is a {dem['res_m']} m {dem['kind']}. "
+                 "Elevation is interpolated from ~30 m cells, so slope over "
+                 "short distances carries real uncertainty - a vertical error "
+                 "of a few metres dominates when the two points are close. "
+                 "It is also a SURFACE model: buildings and tree canopy are "
+                 "included, not bare ground."),
+    }
+
+
+@app.get("/dems")
+def dems():
+    return {"dems": [{"key": k, "label": v["label"], "res_m": v["res_m"],
+                      "kind": v["kind"], "note": v["note"]}
+                     for k, v in DEMS.items()]}
 
 
 @app.post("/hires")
