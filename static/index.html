@@ -225,6 +225,19 @@ a.dsgNew{
   text-decoration:none;
 }
 a.dsgNew:hover{background:#f4f7f5}
+.geoResults{position:absolute;top:100%;left:0;right:0;z-index:5000;
+  background:#12201B;border:1px solid #2E3E37;border-top:none;
+  border-radius:0 0 8px 8px;max-height:230px;overflow-y:auto;
+  box-shadow:0 8px 22px rgba(0,0,0,.4)}
+.geoItem{padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;
+  color:#E7EDE8;cursor:pointer;border-bottom:1px solid #22322B}
+.geoItem:hover{background:#1D2D26}
+.geoItem:last-child{border-bottom:none}
+.llRow{display:flex;gap:5px;margin-top:5px}
+.llRow .llLat,.llRow .llLon{flex:1;min-width:0;padding:7px 8px;font-size:12px;
+  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;border-radius:6px;
+  background:#12201B;color:#E7EDE8}
+.llRow .llGo{flex:0 0 auto;padding:7px 12px}
 #progWrap{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(14px);
   z-index:4000;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
 #progWrap.on{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -513,6 +526,7 @@ label.chk input{width:auto}
         <button class="ghost" data-mode="circles">Circles</button>
         <button class="ghost" data-mode="admin">Boundary</button>
         <button class="ghost" data-mode="shape">Shapefile</button>
+        <button class="ghost" data-mode="create">Create</button>
       </div>
 
       <div class="modepane show" id="pane-draw">
@@ -547,6 +561,28 @@ label.chk input{width:auto}
         <label class="fld" for="districtSel">District</label>
         <select id="districtSel"><option value="">Entire state</option></select>
         <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
+      </div>
+
+      <div class="modepane" id="pane-create">
+        <p class="hint">Draw your own geometry, use it as the region, and download it as a shapefile (.zip containing .shp/.shx/.dbf/.prj).</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button id="crPoly" class="ghost" style="flex:1">&#9648; Polygon</button>
+          <button id="crLine" class="ghost" style="flex:1">&#9585; Line</button>
+          <button id="crPoint" class="ghost" style="flex:1">&#9679; Point</button>
+        </div>
+        <div id="crHint" class="hint" style="min-height:18px;margin-top:6px">Pick a geometry type, then tap the map.</div>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button id="crUndo" class="ghost" style="flex:1">Undo point</button>
+          <button id="crFinish" class="ghost" style="flex:1" disabled>Finish</button>
+        </div>
+        <div id="crList" class="hint" style="margin-top:6px"></div>
+        <label class="fld" for="crName" style="margin-top:6px">Layer name</label>
+        <input type="text" id="crName" placeholder="my_shapes" style="width:100%">
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button id="crUseRegion" style="flex:1" disabled>Use as region</button>
+          <button id="crExport" class="primary" style="flex:1" disabled>&#10515; Shapefile</button>
+        </div>
+        <button id="crClear" class="ghost" style="width:100%;margin-top:6px">Clear drawings</button>
       </div>
 
       <div class="modepane" id="pane-shape">
@@ -917,7 +953,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v84</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v85</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -944,7 +980,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v84";
+const DSG_VERSION = "deepseego-v85";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1552,31 +1588,149 @@ loadDatasets();
 
 /* ---------- place search (Nominatim): drops a pin at building zoom ------ */
 let searchPin = null;
+/* ---------- robust location search (Nominatim, tuned) ----------------------
+   Improvements over the old "limit=1, first hit wins":
+     - returns up to 8 candidates and shows them in a dropdown to choose from
+     - biases toward India and toward the current map view (viewbox), so
+       "Ullal" finds the one near Mangaluru rather than a namesake elsewhere
+     - uses addressdetails + a readable label; falls back gracefully
+     - debounced structured lookup, with a sensible zoom per result type
+   It is still Nominatim, so not Google-grade, but far more usable.
+--------------------------------------------------------------------------- */
+async function geocode(query, {limit = 8, biasView = true} = {}){
+  const p = new URLSearchParams({
+    format: 'jsonv2', q: query, limit: String(limit),
+    addressdetails: '1', 'accept-language': 'en',
+    countrycodes: 'in'                       // India-first
+  });
+  if(biasView && typeof map !== 'undefined'){
+    const b = map.getBounds();
+    p.set('viewbox', [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()].join(','));
+    p.set('bounded', '0');                    // prefer the view, don't restrict
+  }
+  let res = [];
+  try{
+    const r = await fetch('https://nominatim.openstreetmap.org/search?' + p.toString(),
+      {headers: {'Accept': 'application/json'}});
+    res = await r.json();
+  }catch(e){ return []; }
+  // if India-restricted found nothing, retry worldwide
+  if(!res.length){
+    p.delete('countrycodes');
+    try{
+      const r = await fetch('https://nominatim.openstreetmap.org/search?' + p.toString());
+      res = await r.json();
+    }catch(e){ return []; }
+  }
+  return (res || []).map(x => ({
+    lat: +x.lat, lon: +x.lon,
+    label: _shortPlace(x),
+    type: x.type, cls: x.category || x.class,
+    importance: x.importance || 0,
+    zoom: _zoomForType(x.type)
+  }));
+}
+function _shortPlace(x){
+  const a = x.address || {};
+  const bits = [a.neighbourhood || a.suburb || a.village || a.town ||
+                a.city_district || a.hamlet,
+                a.city || a.county, a.state];
+  const head = (x.name || (x.display_name || '').split(',')[0]);
+  const tail = bits.filter(Boolean).filter(b => b !== head).slice(0, 2).join(', ');
+  return tail ? head + ' \u2014 ' + tail : (x.display_name || head);
+}
+function _zoomForType(t){
+  if(['country','state'].includes(t)) return 7;
+  if(['county','state_district'].includes(t)) return 9;
+  if(['city','town','municipality'].includes(t)) return 12;
+  if(['suburb','village','neighbourhood'].includes(t)) return 14;
+  return 17;                                   // building / address / POI
+}
+// wire an input + dropdown so multiple candidates can be chosen
+function attachSearch(inputId, onPick, {dropdown = true} = {}){
+  const inp = $(inputId); if(!inp) return;
+  let box = null;
+  function closeBox(){ if(box){ box.remove(); box = null; } }
+  async function run(){
+    const q = inp.value.trim(); if(!q) return;
+    inp.dataset.loading = '1';
+    const cands = await geocode(q);
+    inp.dataset.loading = '';
+    if(!cands.length){ toast('Place not found'); return; }
+    if(!dropdown || cands.length === 1){ closeBox(); onPick(cands[0]); return; }
+    closeBox();
+    box = document.createElement('div');
+    box.className = 'geoResults';
+    cands.slice(0, 8).forEach(c => {
+      const it = document.createElement('div');
+      it.className = 'geoItem';
+      it.textContent = c.label;
+      it.addEventListener('click', () => { closeBox(); inp.value = c.label.split(' \u2014 ')[0]; onPick(c); });
+      box.appendChild(it);
+    });
+    inp.parentNode.style.position = 'relative';
+    inp.parentNode.appendChild(box);
+  }
+  inp.addEventListener('keydown', ev => {
+    if(ev.key === 'Enter'){ ev.preventDefault(); run(); }
+    if(ev.key === 'Escape') closeBox();
+  });
+  inp.addEventListener('blur', () => setTimeout(closeBox, 200));
+  inp._runSearch = run;
+}
+
+// Inject a manual "lat, lon" entry row right after a search box. onGo receives
+// parsed coordinates. Accepts "12.81, 74.86", "12.81 74.86", or the two-field
+// form. Validates ranges and gives a clear error otherwise.
+function attachLatLon(afterEl, onGo){
+  if(!afterEl || afterEl._llAttached) return;
+  afterEl._llAttached = true;
+  const row = document.createElement('div');
+  row.className = 'llRow';
+  row.innerHTML =
+    '<input type="text" class="llLat" placeholder="latitude" inputmode="decimal">' +
+    '<input type="text" class="llLon" placeholder="longitude" inputmode="decimal">' +
+    '<button class="ghost llGo" type="button">Go</button>';
+  const host = afterEl.closest('.searchGoRow') || afterEl;
+  host.parentNode.insertBefore(row, host.nextSibling);
+  const latI = row.querySelector('.llLat'),
+        lonI = row.querySelector('.llLon'),
+        go   = row.querySelector('.llGo');
+  function parse(){
+    let la = latI.value.trim(), lo = lonI.value.trim();
+    // allow pasting "12.81, 74.86" into the latitude box
+    if(la && !lo && /[ ,]/.test(la)){
+      const parts = la.split(/[ ,]+/).filter(Boolean);
+      if(parts.length === 2){ la = parts[0]; lo = parts[1]; }
+    }
+    const a = parseFloat(la), o = parseFloat(lo);
+    if(!isFinite(a) || !isFinite(o)) return toast('Enter numeric lat and lon');
+    if(a < -90 || a > 90) return toast('Latitude must be between -90 and 90');
+    if(o < -180 || o > 180) return toast('Longitude must be between -180 and 180');
+    onGo(a, o);
+  }
+  go.addEventListener('click', parse);
+  [latI, lonI].forEach(el => el.addEventListener('keydown', ev => {
+    if(ev.key === 'Enter'){ ev.preventDefault(); parse(); }
+  }));
+}
+
 function wireGoButton(goId, inputId){
   const g = $(goId), inp = $(inputId);
   if(g && inp) g.addEventListener('click', () => {
-    inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    if(inp._runSearch) inp._runSearch();
+    else inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
   });
 }
-$('searchInput').addEventListener('keydown', async ev => {
-  if(ev.key !== 'Enter') return;
-  const q = ev.target.value.trim(); if(!q) return;
-  try{
-    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
-    const j = await r.json();
-    if(j.length){
-      const lat = +j[0].lat, lon = +j[0].lon;
-      if(searchPin) map.removeLayer(searchPin);
-      searchPin = L.marker([lat, lon]).addTo(map)
-        .bindPopup(j[0].display_name.split(',').slice(0, 3).join(','));
-      map.setView([lat, lon], 18);       // close enough to pick out a building
-      searchPin.openPopup();
-    }
-    else toast('Place not found');
-  }catch(e){ toast('Search failed'); }
-});
-
+function _goToLatLon(lat, lon){
+  if(searchPin) map.removeLayer(searchPin);
+  searchPin = L.marker([lat, lon]).addTo(map)
+    .bindPopup(lat.toFixed(5) + ', ' + lon.toFixed(5));
+  map.setView([lat, lon], 16); searchPin.openPopup();
+}
+attachSearch('searchInput', c => _goToLatLon(c.lat, c.lon));
 wireGoButton('searchGo', 'searchInput');
+attachLatLon($('searchInput'), _goToLatLon);
 
 /* ---------- region selection ---------- */
 let regionSpec = null;
@@ -1621,6 +1775,7 @@ document.querySelectorAll('.modes button').forEach(b => {
     mapClickMode = null;
     if(b.dataset.mode === 'admin') loadStatesOnce();
     if(b.dataset.mode === 'shape') loadShapesOnce();
+    if(b.dataset.mode === 'create') crInit();
   });
 });
 
@@ -1797,9 +1952,141 @@ map.on('mousemove', ev => {
 map.on('mouseout', () => { $('cursorTip').style.display = 'none'; });
 
 /* map clicks feed whichever mode is armed */
+/* ---------- Create: draw polygon / line / point, export as shapefile -------
+   Vertices are added by tapping the map. Finished features accumulate into a
+   small in-memory GeoJSON FeatureCollection, which can be used as the analysis
+   region and/or downloaded as a real zipped shapefile (built server-side,
+   because a shapefile is 4+ binary files, not one).
+--------------------------------------------------------------------------- */
+const createLayer = L.featureGroup().addTo(map);
+const CR = {kind: null, verts: [], features: [], preview: null, inited: false};
+
+function crRedraw(){
+  createLayer.clearLayers();
+  // finished features
+  CR.features.forEach((f, i) => {
+    const style = {color: '#00B4D8', weight: 2, fillColor: '#00B4D8',
+                   fillOpacity: 0.18};
+    if(f.geometry.type === 'Point'){
+      const [lo, la] = f.geometry.coordinates;
+      L.circleMarker([la, lo], {radius: 6, color: '#00B4D8',
+        fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(createLayer)
+        .bindTooltip(f.properties.name || ('point ' + (i + 1)));
+    } else {
+      L.geoJSON(f.geometry, {style}).addTo(createLayer)
+        .bindTooltip(f.properties.name || ('feature ' + (i + 1)));
+    }
+  });
+  // in-progress vertices
+  CR.verts.forEach((v, i) =>
+    L.circleMarker([v[1], v[0]], {radius: 4, color: '#FFE01B',
+      fillColor: '#FFE01B', fillOpacity: 1}).addTo(createLayer)
+      .bindTooltip('vertex ' + (i + 1)));
+  if(CR.verts.length > 1){
+    const latlngs = CR.verts.map(v => [v[1], v[0]]);
+    if(CR.kind === 'poly')
+      L.polygon(latlngs, {color: '#FFE01B', weight: 2, dashArray: '5 4',
+        fillOpacity: 0.12}).addTo(createLayer);
+    else
+      L.polyline(latlngs, {color: '#FFE01B', weight: 2,
+        dashArray: '5 4'}).addTo(createLayer);
+  }
+  const need = CR.kind === 'poly' ? 3 : (CR.kind === 'line' ? 2 : 1);
+  $('crFinish').disabled = !(CR.kind && CR.verts.length >= need);
+  $('crExport').disabled = CR.features.length === 0;
+  $('crUseRegion').disabled = !CR.features.some(f => f.geometry.type === 'Polygon');
+  $('crList').innerHTML = CR.features.length
+    ? CR.features.map((f, i) =>
+        `<div>${i + 1}. ${f.geometry.type} &middot; ${f.properties.name || ''}</div>`).join('')
+    : '<span class="per">No finished shapes yet.</span>';
+}
+function crStart(kind){
+  CR.kind = kind; CR.verts = [];
+  mapClickMode = 'create';
+  $('crHint').textContent = kind === 'point'
+    ? 'Tap the map to place a point.'
+    : (kind === 'poly'
+        ? 'Tap at least 3 points, then Finish (it closes automatically).'
+        : 'Tap at least 2 points, then Finish.');
+  crRedraw();
+}
+function crFinish(){
+  const k = CR.kind, v = CR.verts.slice();
+  if(!k) return;
+  let geom = null;
+  if(k === 'point' && v.length >= 1) geom = {type: 'Point', coordinates: v[0]};
+  if(k === 'line' && v.length >= 2) geom = {type: 'LineString', coordinates: v};
+  if(k === 'poly' && v.length >= 3){
+    const ring = v.slice();
+    const [f0, l0] = [ring[0], ring[ring.length - 1]];
+    if(f0[0] !== l0[0] || f0[1] !== l0[1]) ring.push([f0[0], f0[1]]);  // close
+    geom = {type: 'Polygon', coordinates: [ring]};
+  }
+  if(!geom) return toast('Not enough points for that geometry');
+  const nm = ($('crName').value.trim() || 'shape') + '_' + (CR.features.length + 1);
+  CR.features.push({type: 'Feature', geometry: geom, properties: {name: nm}});
+  CR.verts = []; CR.kind = null; mapClickMode = null;
+  $('crHint').textContent = 'Saved. Pick a geometry type to draw another.';
+  crRedraw();
+}
+function crInit(){
+  if(CR.inited) return; CR.inited = true;
+  $('crPoly').addEventListener('click', () => crStart('poly'));
+  $('crLine').addEventListener('click', () => crStart('line'));
+  $('crPoint').addEventListener('click', () => crStart('point'));
+  $('crFinish').addEventListener('click', crFinish);
+  $('crUndo').addEventListener('click', () => { CR.verts.pop(); crRedraw(); });
+  $('crClear').addEventListener('click', () => {
+    CR.features = []; CR.verts = []; CR.kind = null; mapClickMode = null;
+    $('crHint').textContent = 'Cleared.'; crRedraw();
+  });
+  $('crUseRegion').addEventListener('click', () => {
+    const poly = CR.features.find(f => f.geometry.type === 'Polygon');
+    if(!poly) return toast('Draw a polygon first');
+    setRegion({type: 'geojson', geometry: poly.geometry},
+              'Drawn polygon \u00b7 ' + (poly.properties.name || ''), true);
+    toast('Region set from your drawing');
+  });
+  $('crExport').addEventListener('click', crExport);
+  crRedraw();
+}
+async function crExport(){
+  if(!CR.features.length) return toast('Nothing to export');
+  const btn = $('crExport'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Building\u2026';
+  try{
+    const name = ($('crName').value.trim() || 'deepseego_shapes')
+                   .replace(/[^A-Za-z0-9_-]/g, '_');
+    const _tok = await authToken();
+    const r = await fetch(BACKEND_URL + '/export_shapefile', {method: 'POST',
+      headers: Object.assign({'Content-Type': 'application/json'},
+        _tok ? {Authorization: 'Bearer ' + _tok} : {}),
+      body: JSON.stringify({name, features: CR.features})});
+    if(!r.ok){
+      let d = ''; try{ d = (await r.json()).detail || ''; }catch(e){}
+      throw new Error(d || ('HTTP ' + r.status));
+    }
+    const b = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = name + '_shapefile.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('Shapefile downloaded');
+  }catch(e){ toast('Shapefile: ' + e.message, 9000); }
+  btn.disabled = false; btn.textContent = orig;
+}
+
 map.on('click', ev => {
   if(!mapClickMode) return;
   const {lat, lng} = ev.latlng;
+
+  if(mapClickMode === 'create'){
+    CR.verts.push([lng, lat]);                 // GeoJSON order: lon, lat
+    if(CR.kind === 'point'){ crFinish(); return; }
+    crRedraw();
+    return;
+  }
 
   if(mapClickMode === 'rect1'){
     rectFirstCorner = ev.latlng;
@@ -2056,8 +2343,12 @@ $('runAnalysis').addEventListener('click', async () => {
     Progress.step('Rendering maps for each epoch\u2026');
     lastSeries = ts.series; lastMeta = currentDs;
     lastRuns = {title: currentDs.label, file: ds,
-                zones: [{label: currentDs.label, color: '#E4572E', series: ts.series}]};
+                dsKey: ds, stat: (currentDs.value_label || 'value'),
+                regionSpec: regionSpec,
+                zones: [{label: (regionDesc || 'Region'), color: '#E4572E',
+                         spec: regionSpec, series: ts.series}]};
     $('csvBtn').hidden = false; $('dlRow').hidden = false;
+    $('pdfBtn').hidden = false;     // Explore can now export a PDF too
     buildChartHead(currentDs, ts.series);
     try{
       await ensureChart();
@@ -2651,17 +2942,15 @@ function slopeInit(){
   $('slopeClear').addEventListener('click', () => {
     slopeState.a = slopeState.b = null; slopeDraw();
   });
-  $('slopeSearch').addEventListener('keydown', async ev => {
-    if(ev.key !== 'Enter') return; ev.preventDefault();
-    const q = ev.target.value.trim(); if(!q) return;
-    try{
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
-      const j = await r.json();
-      if(j.length) map.setView([+j[0].lat, +j[0].lon], 14);
-      else toast('Place not found');
-    }catch(e){ toast('Search failed'); }
-  });
+  attachSearch('slopeSearch', c => map.setView([c.lat, c.lon], c.zoom || 14));
   wireGoButton('slopeSearchGo', 'slopeSearch');
+  attachLatLon($('slopeSearch'), (lat, lon) => {
+    // fill A first, then B
+    if(!slopeState.a){ slopeState.a = {lat, lon}; }
+    else if(!slopeState.b){ slopeState.b = {lat, lon}; }
+    else { slopeState.a = {lat, lon}; slopeState.b = null; }
+    slopeDraw();
+  });
   $('slopeRun').addEventListener('click', runSlope);
 }
 async function runSlope(){
@@ -2739,7 +3028,7 @@ function wipeMapAnalysis(){
   try {
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
-   slopeLayer, sunPathLayer, shadowLayer].forEach(g => {
+   slopeLayer, sunPathLayer, shadowLayer, createLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -3612,16 +3901,13 @@ function climatePointTab(prefix, mode){
     const goBtn = $(prefix + 'SearchGo');
     if(goBtn) goBtn.addEventListener('click', () =>
       el('Search').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})));
-    el('Search').addEventListener('keydown', async ev => {
-      if(ev.key !== 'Enter') return; ev.preventDefault();
-      const q = ev.target.value.trim(); if(!q) return;
-      try{
-        const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
-        const j = await r.json();
-        if(!j.length) return toast('Place not found');
-        setPoint(+j[0].lat, +j[0].lon, j[0].display_name.split(',').slice(0,3).join(','));
-        map.setView([st.lat, st.lon], 15);
-      }catch(e){ toast('Search failed'); }
+    attachSearch(prefix + 'Search', c => {
+      setPoint(c.lat, c.lon, c.label);
+      map.setView([c.lat, c.lon], c.zoom || 15);
+    });
+    attachLatLon(el('Search'), (lat, lon) => {
+      setPoint(lat, lon, lat.toFixed(5) + ', ' + lon.toFixed(5));
+      map.setView([lat, lon], 15);
     });
     el('Pick').addEventListener('click', () => {
       mapClickMode = prefix + 'Pick';
@@ -3849,26 +4135,32 @@ async function aqInit(){
 async function aqGeocode(){
   const q = $('aqSearchInput').value.trim(); if(!q) return;
   try{
-    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
-    const j = await r.json();
-    if(!j.length) return toast('Place not found');
-    const lat = +j[0].lat, lon = +j[0].lon;
-    map.setView([lat, lon], 16);
-    aqState.lat = lat; aqState.lon = lon;
-    aqLayer.clearLayers();
-    L.circleMarker([lat, lon], {radius: 6, color: '#00B4D8',
-      fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer)
-      .bindPopup(j[0].display_name.split(',').slice(0, 3).join(',')).openPopup();
-    $('aqRun').disabled = false;
-    $('aqApportion').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false;
-    $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
-      ' \u2014 or tap the map to adjust';
+    const cands = await geocode(q);
+    if(!cands.length) return toast('Place not found');
+    const lat = cands[0].lat, lon = cands[0].lon;
+    map.setView([lat, lon], cands[0].zoom || 16);
+    aqSetPoint(lat, lon, cands[0].label);
   }catch(e){ toast('Search failed'); }
+}
+function aqSetPoint(lat, lon, label){
+  aqState.lat = lat; aqState.lon = lon;
+  aqLayer.clearLayers();
+  L.circleMarker([lat, lon], {radius: 6, color: '#00B4D8',
+    fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer)
+    .bindPopup(label || (lat.toFixed(5) + ', ' + lon.toFixed(5))).openPopup();
+  $('aqRun').disabled = false;
+  $('aqApportion').disabled = false;
+  if($('aqDisperse')) $('aqDisperse').disabled = false;
+  $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
+    ' \u2014 or tap the map to adjust';
 }
 $('aqSearchInput').addEventListener('keydown', ev => {
   if(ev.key === 'Enter'){ ev.preventDefault(); aqGeocode(); }
 });
 wireGoButton('aqSearchGo', 'aqSearchInput');
+attachLatLon($('aqSearchInput'), (lat, lon) => {
+  map.setView([lat, lon], 16); aqSetPoint(lat, lon);
+});
 $('aqPick').addEventListener('click', () => {
   mapClickMode = 'aqPick';
   $('aqStatus').textContent = 'Tap a location on the map\u2026';
@@ -4272,10 +4564,9 @@ function drawSite(){
 async function siteGeocode(){
   const q = $('siteSearch').value.trim(); if(!q) return;
   try{
-    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
-    const j = await r.json();
-    if(!j.length) return toast('Place not found');
-    const lat = +j[0].lat, lon = +j[0].lon;
+    const cands = await geocode(q);
+    if(!cands.length) return toast('Place not found');
+    const lat = cands[0].lat, lon = cands[0].lon;
     siteState.lat = lat; siteState.lon = lon;
     if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
     drawSite();
@@ -4289,6 +4580,13 @@ $('siteSearch').addEventListener('keydown', ev => {
   if(ev.key === 'Enter'){ ev.preventDefault(); siteGeocode(); }
 });
 wireGoButton('siteSearchGo', 'siteSearch');
+attachLatLon($('siteSearch'), (lat, lon) => {
+  siteState.lat = lat; siteState.lon = lon;
+  if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
+  drawSite();
+  if(typeof enableSiteRun === 'function') enableSiteRun(); else $('siteRun').disabled = false;
+  map.setView([lat, lon], 15);
+});
 $('sitePick').addEventListener('click', () => {
   mapClickMode = 'sitePick';
   $('siteStatus').textContent = 'Tap the building or plot on the map\u2026';
