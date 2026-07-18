@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v84"
+APP_VERSION = "deepseego-v85"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2200,6 +2200,102 @@ def dems():
                      for k, v in DEMS.items()]}
 
 
+class ExportShapefileQuery(BaseModel):
+    name: str = "deepseego_shapes"
+    features: list                       # GeoJSON Features (Point/LineString/Polygon)
+
+
+@app.post("/export_shapefile")
+def export_shapefile(q: ExportShapefileQuery):
+    """Build a real ESRI shapefile from drawn GeoJSON and return it as a .zip.
+
+    A shapefile is not one file: it is .shp (geometry) + .shx (index) +
+    .dbf (attributes), and we add .prj (the coordinate system, WGS84) plus a
+    .cpg so attribute text is read as UTF-8. They must travel together, hence
+    the zip. Shapefiles also cannot mix geometry types in one file, so we emit
+    one shapefile per type present and zip them all.
+    """
+    feats = q.features or []
+    if not feats:
+        raise HTTPException(status_code=400, detail="No features to export.")
+    if len(feats) > 2000:
+        raise HTTPException(status_code=400, detail="Too many features (max 2000).")
+
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", (q.name or "shapes")) or "shapes"
+
+    # group by geometry type - one shapefile per type
+    groups = {"Point": [], "LineString": [], "Polygon": []}
+    for f in feats:
+        g = (f or {}).get("geometry") or {}
+        t = g.get("type")
+        if t in groups:
+            groups[t].append(f)
+        elif t == "MultiPolygon":
+            for poly in g.get("coordinates", []):
+                groups["Polygon"].append(
+                    {"geometry": {"type": "Polygon", "coordinates": poly},
+                     "properties": (f or {}).get("properties", {})})
+    if not any(groups.values()):
+        raise HTTPException(status_code=400, detail=(
+            "No supported geometries (expected Point, LineString or Polygon)."))
+
+    WGS84_PRJ = (
+        'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",'
+        'SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+        'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]')
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for gtype, items in groups.items():
+            if not items:
+                continue
+            shp_i, shx_i, dbf_i = io.BytesIO(), io.BytesIO(), io.BytesIO()
+            w = pyshp.Writer(shp=shp_i, shx=shx_i, dbf=dbf_i)
+            w.autoBalance = 1
+            w.field("name", "C", size=80)
+            w.field("type", "C", size=20)
+            for f in items:
+                g = f["geometry"]
+                props = f.get("properties") or {}
+                nm = str(props.get("name", ""))[:80]
+                if gtype == "Point":
+                    lon, lat = g["coordinates"][0], g["coordinates"][1]
+                    w.point(lon, lat)
+                elif gtype == "LineString":
+                    w.line([[[c[0], c[1]] for c in g["coordinates"]]])
+                else:
+                    # shapefile outer rings must be CLOCKWISE; GeoJSON says
+                    # counter-clockwise. pyshp's .poly() handles the record,
+                    # but we reverse to keep the file spec-correct.
+                    rings = []
+                    for ring in g["coordinates"]:
+                        pts = [[c[0], c[1]] for c in ring]
+                        area2 = 0.0
+                        for i in range(len(pts) - 1):
+                            area2 += (pts[i][0] * pts[i + 1][1]
+                                      - pts[i + 1][0] * pts[i][1])
+                        if area2 > 0:            # counter-clockwise -> reverse
+                            pts = pts[::-1]
+                        rings.append(pts)
+                    w.poly(rings)
+                w.record(nm, gtype)
+            w.close()
+
+            suffix = "" if sum(1 for v in groups.values() if v) == 1 \
+                     else "_" + gtype.lower()
+            base = f"{safe}{suffix}"
+            z.writestr(base + ".shp", shp_i.getvalue())
+            z.writestr(base + ".shx", shx_i.getvalue())
+            z.writestr(base + ".dbf", dbf_i.getvalue())
+            z.writestr(base + ".prj", WGS84_PRJ)
+            z.writestr(base + ".cpg", "UTF-8")
+
+    data = buf.getvalue()
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{safe}_shapefile.zip"'})
+
+
 @app.post("/hires")
 @ee_errors
 def hires(q: HiresQuery):
@@ -2212,16 +2308,44 @@ def hires(q: HiresQuery):
     if d["kind"] == "vector":
         _cap_vector_area(region, d.get("area_cap_km2", VECTOR_AREA_CAP_KM2))
     data = None if q.year is None else _data_rgb(q.dataset, q.year, region, d)
-    url = _frame(region, data).getThumbURL(
-        {"region": bounds, "dimensions": 2048, "format": "png",
-         "crs": THUMB_CRS})
+    frame_img = _frame(region, data)
 
-    # Fetch it server-side and BAKE IN the furniture (OSM underlay, title,
-    # colour bar, scale bar, north arrow) so a downloaded image is complete on
-    # its own - the same treatment the report frames get.
+    # Cap the request to what EE can render in one tile. The native pixel width
+    # of the region at the dataset's own scale is the real ceiling; asking for
+    # more than that just interpolates AND risks the memory limit.
     try:
-        with urlopen(url, timeout=90) as r:
-            raw = r.read()
+        native_px = _region_native_px(bounds, d)
+    except Exception:
+        native_px = 2048
+    want = min(2048, max(768, native_px))
+
+    # retry ladder: if EE says "user memory limit exceeded", step down.
+    raw = None
+    last_err = None
+    for dim in [want, 1600, 1280, 1024, 768, 512]:
+        if dim > want:
+            continue
+        try:
+            url = frame_img.getThumbURL(
+                {"region": bounds, "dimensions": dim, "format": "png",
+                 "crs": THUMB_CRS})
+            with urlopen(url, timeout=90) as r:
+                raw = r.read()
+            break
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            if "memory" in msg or "limit" in msg or "too large" in msg \
+                    or "500" in msg or "400" in msg:
+                continue          # step down and retry
+            raise
+    if raw is None:
+        raise HTTPException(status_code=400, detail=(
+            "This area is too large to export as a single high-resolution "
+            "image (Earth Engine memory limit). Zoom to a smaller region, "
+            "then download."))
+
+    try:
         bb = bounds.getInfo()["coordinates"][0]
         lons = [c[0] for c in bb]
         lats = [c[1] for c in bb]
@@ -4158,6 +4282,24 @@ def _monthly_from(info, lat):
             row["mrt_c"] = round(mrt - 273.15, 1)
         rows.append(row)
     return rows
+
+
+def _region_native_px(bounds, d):
+    """How many pixels wide the region is at the dataset's own resolution.
+    Rendering beyond this only interpolates and wastes EE memory."""
+    bb = bounds.getInfo()["coordinates"][0]
+    lons = [c[0] for c in bb]
+    lats = [c[1] for c in bb]
+    mid = (min(lats) + max(lats)) / 2.0
+    ground_m = _haversine_m(mid, min(lons), mid, max(lons))
+    scale = 30.0
+    try:
+        src = d.get("source") or {}
+        scale = float(d.get("scale") or src.get("scale") or 30.0)
+    except Exception:
+        scale = 30.0
+    scale = max(10.0, scale)          # never assume finer than 10 m
+    return int(max(512, min(2048, ground_m / scale)))
 
 
 def _haversine_m(lat1, lon1, lat2, lon2):
