@@ -899,6 +899,29 @@ label.chk input{width:auto}
       <button id="wePick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="weStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="weRun" class="primary" style="margin-top:8px" disabled>Get live weather</button>
+
+      <div class="stepH" style="margin-top:14px">Live weather map</div>
+      <p class="hint">Samples current conditions across the visible map area. Zoom to the region you want first &mdash; the grid covers whatever is on screen.</p>
+      <label class="fld" for="wgLayer">Show</label>
+      <select id="wgLayer">
+        <option value="wind" selected>Wind flow (arrows)</option>
+        <option value="temp">Temperature</option>
+        <option value="rain">Rainfall (last hour)</option>
+        <option value="humidity">Relative humidity</option>
+        <option value="cloud">Cloud cover</option>
+      </select>
+      <label class="fld" for="wgN">Grid density</label>
+      <select id="wgN">
+        <option value="5">5 &times; 5 (coarse, fastest)</option>
+        <option value="7" selected>7 &times; 7</option>
+        <option value="9">9 &times; 9 (fine)</option>
+      </select>
+      <button id="wgLoad" class="primary" style="width:100%;margin-top:8px">Load weather map</button>
+      <label style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11.5px;color:#C9D3CC">
+        <input type="checkbox" id="wgRadar"> Live rain radar overlay
+      </label>
+      <button id="wgClear" class="ghost" style="width:100%;margin-top:6px">Clear weather map</button>
+      <div id="wgInfo" class="hint" style="min-height:18px"></div>
     </section>
     </div><!-- /tab-weather -->
 
@@ -1045,7 +1068,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v100</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v101</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1072,7 +1095,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v100";
+const DSG_VERSION = "deepseego-v101";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3186,6 +3209,133 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
+/* ---------- live weather map -----------------------------------------------
+   Samples Open-Meteo across the visible extent (one request for the whole
+   grid) and renders it as wind arrows or a coloured field. Keyless.
+--------------------------------------------------------------------------- */
+const weatherGridLayer = L.featureGroup().addTo(map);
+let radarLayer = null, WG_DATA = null;
+
+// blue -> green -> amber -> red, for whichever field is being shown
+function wgColour(t){
+  t = Math.max(0, Math.min(1, t));
+  const stops = [[0,[0,120,200]],[0.35,[42,157,143]],
+                 [0.65,[233,196,106]],[1,[228,87,46]]];
+  for(let i = 0; i < stops.length - 1; i++){
+    const [a, ca] = stops[i], [b, cb] = stops[i + 1];
+    if(t >= a && t <= b){
+      const f = (t - a) / (b - a || 1);
+      const c = ca.map((v, k) => Math.round(v + (cb[k] - v) * f));
+      return `rgb(${c[0]},${c[1]},${c[2]})`;
+    }
+  }
+  return 'rgb(228,87,46)';
+}
+function windArrow(deg, speed, colour){
+  // meteorological convention: direction is where the wind comes FROM, so the
+  // arrow points to deg+180 (the way the air is actually moving).
+  const rot = (deg + 180) % 360;
+  const len = Math.max(12, Math.min(26, 10 + speed));
+  return L.divIcon({className: 'wgArrow', iconSize: [34, 34],
+    iconAnchor: [17, 17],
+    html: `<svg width="34" height="34" viewBox="0 0 34 34"
+             style="transform:rotate(${rot}deg)">
+             <line x1="17" y1="${17 + len / 2}" x2="17" y2="${17 - len / 2}"
+                   stroke="${colour}" stroke-width="2.6" stroke-linecap="round"/>
+             <polygon points="17,${17 - len / 2 - 5} 12.5,${17 - len / 2 + 3} 21.5,${17 - len / 2 + 3}"
+                      fill="${colour}"/>
+           </svg>`});
+}
+function wgRender(){
+  weatherGridLayer.clearLayers();
+  if(!WG_DATA) return;
+  const mode = $('wgLayer').value;
+  const key = {wind: 'wind_ms', temp: 'temp_c', rain: 'precip_mm',
+               humidity: 'rh_pct', cloud: 'cloud_pct'}[mode];
+  const unit = {wind: ' m/s', temp: '\u00b0C', rain: ' mm',
+                humidity: '%', cloud: '%'}[mode];
+  const vals = WG_DATA.points.map(p => p[key]).filter(v => v != null && isFinite(v));
+  if(!vals.length){ $('wgInfo').textContent = 'No values for that field.'; return; }
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if(mode === 'rain'){ lo = 0; hi = Math.max(hi, 1); }
+  if(hi === lo) hi = lo + 1;
+
+  WG_DATA.points.forEach(p => {
+    const v = p[key];
+    if(v == null || !isFinite(v)) return;
+    const col = wgColour((v - lo) / (hi - lo));
+    if(mode === 'wind'){
+      L.marker([p.lat, p.lon],
+               {icon: windArrow(p.wind_from_deg || 0, p.wind_ms || 0, col)})
+        .addTo(weatherGridLayer)
+        .bindTooltip(`${(p.wind_ms ?? 0).toFixed(1)} m/s from ` +
+                     `${Math.round(p.wind_from_deg ?? 0)}\u00b0` +
+                     `<br>${(p.temp_c ?? 0).toFixed(1)}\u00b0C`, {sticky: true});
+    } else {
+      L.circleMarker([p.lat, p.lon], {radius: 13, color: col, weight: 1,
+        fillColor: col, fillOpacity: mode === 'rain' && v === 0 ? 0.12 : 0.62})
+        .addTo(weatherGridLayer)
+        .bindTooltip(`${v}${unit}` +
+                     `<br>wind ${(p.wind_ms ?? 0).toFixed(1)} m/s from ` +
+                     `${Math.round(p.wind_from_deg ?? 0)}\u00b0`, {sticky: true});
+    }
+  });
+  $('wgInfo').innerHTML =
+    `${WG_DATA.count} sample points \u00b7 ${mode} range ` +
+    `${lo.toFixed(1)}\u2013${hi.toFixed(1)}${unit}` +
+    `<br><span class="per">${WG_DATA.source}</span>`;
+}
+async function wgLoad(){
+  const b = map.getBounds();
+  const btn = $('wgLoad'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Sampling\u2026';
+  Progress.start('Live weather map', 'Sampling current conditions across the view\u2026', 0);
+  try{
+    WG_DATA = await api('/weather_grid', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({west: b.getWest(), south: b.getSouth(),
+                            east: b.getEast(), north: b.getNorth(),
+                            n: +$('wgN').value})});
+    wgRender();
+  }catch(e){
+    $('wgInfo').textContent = e.message;
+    toast('Weather map: ' + e.message, 9000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = orig; }
+}
+// RainViewer: free, keyless live radar mosaic. Coverage is good where national
+// radar feeds are shared and patchy elsewhere - India is only partly covered.
+async function wgRadar(on){
+  if(radarLayer){ map.removeLayer(radarLayer); radarLayer = null; }
+  if(!on) return;
+  try{
+    const r = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+    const j = await r.json();
+    const frames = (j.radar && (j.radar.past || [])).concat((j.radar || {}).nowcast || []);
+    if(!frames.length) throw new Error('no radar frames available');
+    const last = frames[frames.length - 1];
+    radarLayer = L.tileLayer(
+      `${j.host}${last.path}/256/{z}/{x}/{y}/4/1_1.png`,
+      {opacity: 0.65, attribution: 'Radar \u00a9 RainViewer'}).addTo(map);
+    toast('Live radar added \u2014 coverage varies by country', 6000);
+  }catch(e){
+    $('wgRadar').checked = false;
+    toast('Radar unavailable: ' + e.message, 7000);
+  }
+}
+function wgInit(){
+  if(wgInit._done) return; wgInit._done = true;
+  $('wgLoad').addEventListener('click', wgLoad);
+  $('wgLayer').addEventListener('change', wgRender);
+  $('wgClear').addEventListener('click', () => {
+    weatherGridLayer.clearLayers(); WG_DATA = null;
+    $('wgInfo').textContent = '';
+    if(radarLayer){ map.removeLayer(radarLayer); radarLayer = null; }
+    $('wgRadar').checked = false;
+  });
+  $('wgRadar').addEventListener('change', ev => wgRadar(ev.target.checked));
+}
+
 /* ---------- Sun path (3D solar dome, projected onto the map) ----------
    The sun's track IS a 3D dome over the point. A Leaflet map is top-down, so
    we project that dome vertically onto the ground - which is exactly what a
@@ -3591,7 +3741,8 @@ function wipeMapAnalysis(){
   try {
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
-   slopeLayer, sunPathLayer, shadowLayer, createLayer].forEach(g => {
+   slopeLayer, sunPathLayer, shadowLayer, createLayer,
+   weatherGridLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -3620,6 +3771,7 @@ function showTab(tab){
   if(tab === 'sunlight') sunlightInit();
   if(tab === 'noise') noiseInit();
   if(tab === 'site') siteInit();
+  if(tab === 'weather') wgInit();
   if(tab === 'slope') slopeInit();
 }
 function setBasket(name){
