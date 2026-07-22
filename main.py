@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v97"
+APP_VERSION = "deepseego-v99"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -4964,8 +4964,8 @@ def _parse_overpass(js, lat, lon):
 # Wall-clock budget for the optional OSM enrichment inside /site_brief.
 # Kept well under the 60 s proxy limit so a slow Overpass can never sink the
 # whole brief.
-OSM_ROAD_TIMEOUT = float(os.environ.get("OSM_ROAD_TIMEOUT", "14"))
-OSM_NOISE_TIMEOUT = float(os.environ.get("OSM_NOISE_TIMEOUT", "18"))
+OSM_ROAD_TIMEOUT = float(os.environ.get("OSM_ROAD_TIMEOUT", "32"))
+OSM_NOISE_TIMEOUT = float(os.environ.get("OSM_NOISE_TIMEOUT", "20"))
 
 
 def _seg_len_inside(p1, p2, clat, clon, R):
@@ -5513,9 +5513,11 @@ def site_brief(q: SiteQuery):
         "lulc": lulc, "green_pct": green_pct,
         # OSM is the primary source (GRIP4 under-maps local streets); the GRIP
         # figure is kept alongside so the two can be compared.
-        "road_km": (round(osm_roads["total_m"] / 1000, 2) if osm_roads
-                    else (None if g("road_m") is None
-                          else round(g("road_m") / 1000, 2))),
+        # GRIP4 reports ~0 for residential streets, which reads as "no roads"
+        # rather than "not mapped". If OSM is unavailable we return null and say
+        # so, instead of publishing a misleadingly precise zero.
+        "road_km": (round(osm_roads["total_m"] / 1000, 2)
+                    if osm_roads else None),
         "road_source": ("OpenStreetMap" if osm_roads else
                         "GRIP4 (OSM lookup timed out - GRIP under-maps local "
                         "streets, so this is likely an undercount)"),
