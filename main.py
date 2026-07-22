@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v93"
+APP_VERSION = "deepseego-v94"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5015,6 +5015,71 @@ def _eval_stats_resiliently(stats: dict):
     return out, failed
 
 
+class RoadCheckQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: int = 500
+    region: Optional[RegionSpec] = None
+
+
+@app.post("/road_check")
+@ee_errors
+def road_check(q: RoadCheckQuery):
+    """Show the WORK behind the road-length figure.
+
+    Returns the road segments actually measured - already clipped to the
+    region - as GeoJSON, each with its own clipped length, plus the total and
+    the resulting density. Draw them on the map and the number is auditable
+    instead of something you have to take on trust.
+    """
+    ensure_ee()
+    region = (build_region(q.region) if q.region
+              else ee.Geometry.Point([q.lon, q.lat]).buffer(q.radius_m))
+    roads = _vector_fc(DATASETS["roads"]).filterBounds(region)
+
+    clipped = roads.map(lambda f: ee.Feature(
+        f.geometry().intersection(region, maxError=10)
+    ).copyProperties(f).set(
+        "clip_len_m", f.geometry().intersection(region, maxError=10)
+                       .length(maxError=10),
+        "full_len_m", f.geometry().length(maxError=10)))
+    clipped = clipped.filter(ee.Filter.gt("clip_len_m", 0))
+
+    # cap what we return so a dense city does not produce a huge payload
+    fc = clipped.limit(400)
+    gj = fc.getInfo()
+    area_km2 = region.area(10).getInfo() / 1e6
+
+    feats, total_clip, total_full = [], 0.0, 0.0
+    for f in gj.get("features", []):
+        p = f.get("properties", {}) or {}
+        cl = float(p.get("clip_len_m") or 0)
+        fl = float(p.get("full_len_m") or 0)
+        total_clip += cl
+        total_full += fl
+        feats.append({"geometry": f.get("geometry"),
+                      "clip_len_m": round(cl, 1),
+                      "full_len_m": round(fl, 1),
+                      "type": p.get("type") or p.get("highway") or ""})
+
+    return {
+        "features": feats,
+        "count": len(feats),
+        "capped": len(feats) >= 400,
+        "area_km2": round(area_km2, 4),
+        "total_clipped_km": round(total_clip / 1000, 3),
+        "total_unclipped_km": round(total_full / 1000, 3),
+        "density_km_per_km2": (round((total_clip / 1000) / area_km2, 2)
+                               if area_km2 else None),
+        "explanation": (
+            "clipped = road length INSIDE the region (what the brief reports). "
+            "unclipped = the full length of every road that merely touches the "
+            "region - this is what the earlier version mistakenly summed, which "
+            "is why a single highway could inflate the total."),
+        "source": DATASETS["roads"].get("info") or "GRIP global roads",
+    }
+
+
 @app.post("/site_brief")
 @ee_errors
 def site_brief(q: SiteQuery):
@@ -5112,7 +5177,8 @@ def site_brief(q: SiteQuery):
     roads_all = _vector_fc(DATASETS["roads"])
     ring_roads = roads_all.filterBounds(ring)
     stats["road_m"] = ring_roads.map(
-        lambda f: f.set("l", f.geometry().length(maxError=10))
+        lambda f: f.set("l", f.geometry().intersection(
+            ring, maxError=10).length(maxError=10))
     ).aggregate_sum("l")
     near = roads_all.filterBounds(pt.buffer(1500)).map(
         lambda f: f.set("d", f.geometry().distance(pt, maxError=10)))
@@ -5366,7 +5432,10 @@ def _series(dataset_key: str, region: ee.Geometry):
         _cap_vector_area(region, d.get("area_cap_km2", VECTOR_AREA_CAP_KM2))
         fc = _vector_fc(d).filterBounds(region)
         if d["reducer"] == "length_km":
-            total_m = (fc.map(lambda f: f.set("l", f.geometry().length(maxError=10)))
+            # clip each feature to the region first - measuring the whole
+            # feature would count road far outside the area of interest
+            total_m = (fc.map(lambda f: f.set("l", f.geometry().intersection(
+                            region, maxError=10).length(maxError=10)))
                          .aggregate_sum("l").getInfo())
             return [{"year": d["years"][0], "value": (total_m or 0) / 1000.0}]
         return [{"year": d["years"][0], "value": fc.size().getInfo()}]
