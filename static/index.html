@@ -1045,7 +1045,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v91</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v92</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1072,7 +1072,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v91";
+const DSG_VERSION = "deepseego-v92";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -5236,9 +5236,25 @@ $('siteRun').addEventListener('click', async () => {
     lastSiteOB = j.open_buildings || null;
     lastSiteBrief = j;                       // grounding data for the AI assessor
     aiRegister('site_brief', 'Site brief (land cover, climate, air, buildings)', j);
-    if(!j.air || !j.periods || !j.noise)
-      throw new Error('older backend version \u2014 deploy the latest main.py ' +
-        '(the health endpoint should report deepseego-v11 or later)');
+    const missing = ['air', 'periods', 'noise', 'monthly', 'lulc']
+      .filter(k => !j[k]);
+    if(missing.length){
+      let extra = '';
+      try{
+        const h = await (await fetch(BACKEND_URL + '/health')).json();
+        if(h.version && h.version !== DSG_VERSION)
+          extra = ' Backend reports ' + h.version + ' but this page is ' +
+                  DSG_VERSION + ' \u2014 deploy the matching main.py.';
+        else if(h.version)
+          extra = ' Backend and page are both ' + h.version +
+                  ', so this is a data problem, not a version mismatch.';
+      }catch(e){}
+      throw new Error('the site brief came back without: ' + missing.join(', ') +
+                      '.' + extra);
+    }
+    if(Array.isArray(j.unavailable) && j.unavailable.length)
+      toast('Some datasets were unavailable here: ' + j.unavailable.join(', ') +
+            ' \u2014 the rest of the brief is still valid.', 8000);
     const mo = j.monthly, L = mo.map(m => m.month), P = j.periods;
     const chips = [];
     if(j.green_pct != null) chips.push(siteChip('Green cover', j.green_pct + '%',
