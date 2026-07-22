@@ -1045,7 +1045,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v99</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v100</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1072,7 +1072,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v99";
+const DSG_VERSION = "deepseego-v100";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4720,6 +4720,10 @@ function aqSetPoint(lat, lon, label){
   $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
     ' \u2014 or tap the map to adjust';
 }
+attachSearch('aqSearchInput', c => {
+  map.setView([c.lat, c.lon], c.zoom || 16);
+  aqSetPoint(c.lat, c.lon, c.label);
+});
 $('aqSearchInput').addEventListener('keydown', ev => {
   if(ev.key === 'Enter'){ ev.preventDefault(); aqGeocode(); }
 });
@@ -5143,8 +5147,15 @@ async function siteGeocode(){
       ' \u00b7 ' + lat.toFixed(5) + ', ' + lon.toFixed(5);
   }catch(e){ toast('Search failed'); }
 }
-$('siteSearch').addEventListener('keydown', ev => {
-  if(ev.key === 'Enter'){ ev.preventDefault(); siteGeocode(); }
+attachSearch('siteSearch', c => {
+  siteState.lat = c.lat; siteState.lon = c.lon;
+  if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
+  drawSite();
+  if(typeof enableSiteRun === 'function') enableSiteRun();
+  else $('siteRun').disabled = false;
+  map.setView([c.lat, c.lon], c.zoom || 15);
+  $('siteStatus').textContent = c.label + ' \u00b7 ' +
+    c.lat.toFixed(5) + ', ' + c.lon.toFixed(5);
 });
 wireGoButton('siteSearchGo', 'siteSearch');
 attachLatLon($('siteSearch'), (lat, lon) => {
@@ -5442,24 +5453,43 @@ $('siteRun').addEventListener('click', async () => {
       land cover: ${P.lulc}; roads: ${P.roads}.
       ERA5-Land describes the ~9 km mesoclimate, not street-level microclimate.</p>`;
 
+    // Load Chart.js explicitly - the brief used to rely on another tab having
+    // pulled it in, which is why the panels could come up blank.
+    let chartsOk = true, chartErr = '';
     try{
-      await ensureChart();          // the brief never loaded Chart.js itself
-    }catch(err){
-      toast('Charts unavailable: ' + err.message, 8000);
-    }
-    // one bad series must not stop the rest from drawing
+      await ensureChart();
+    }catch(err){ chartsOk = false; chartErr = err.message; }
+
+    // Say plainly WHY a panel is empty: no library, or no data. A blank box
+    // that could mean either is the thing that wasted your time.
+    const monthsWithTemp = mo.filter(m => m.temp_c != null).length;
     function drawSeries(id, values, colour, label){
-      const has = values.some(v => v != null && isFinite(v));
-      if(!has){
-        const c = $(id);
-        if(c && c.parentNode)
-          c.parentNode.innerHTML =
-            '<p class="srcNote">No ' + label + ' data available for this location.</p>';
+      const c = $(id);
+      if(!c) return;
+      const n = values.filter(v => v != null && isFinite(v)).length;
+      if(!chartsOk){
+        c.parentNode.innerHTML = '<p class="srcNote" style="color:#E4572E">' +
+          'Chart library did not load (' + chartErr + '). ' +
+          'The numbers below are still valid.</p>';
+        return;
+      }
+      if(!n){
+        c.parentNode.innerHTML = '<p class="srcNote" style="color:#E9C46A">' +
+          'No ' + label + ' values returned for this location \u2014 the ' +
+          'dataset had no data here, so nothing can be plotted.</p>';
         return;
       }
       try{ siteChart(id, L, values, colour); }
-      catch(err){ console.error('chart ' + id, err); }
+      catch(err){
+        c.parentNode.innerHTML = '<p class="srcNote" style="color:#E4572E">' +
+          'Could not draw ' + label + ': ' + err.message + '</p>';
+      }
     }
+    if(chartsOk && monthsWithTemp === 0)
+      toast('Climate data came back empty for this location \u2014 charts cannot ' +
+            'be drawn. Try a nearby point, or check /health.', 9000);
+    else if(!chartsOk)
+      toast('Charts unavailable: ' + chartErr, 9000);
     try{ sitePieChart('cLulcPie', j.lulc.slice(0, 6)); }
     catch(err){ console.error('pie', err); }
     drawSeries('cTemp',  mo.map(m => m.temp_c),            '#E4572E', 'temperature');
