@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v94"
+APP_VERSION = "deepseego-v95"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -4961,6 +4961,91 @@ def _parse_overpass(js, lat, lon):
     return out
 
 
+def _seg_len_inside(p1, p2, clat, clon, R):
+    """Length of the segment p1->p2 that lies within R metres of (clat, clon).
+
+    Handles the three cases properly: both ends inside (whole segment), one end
+    inside (interpolate the crossing), both outside (a chord may still cross, so
+    sample rather than assume zero).
+    """
+    d1 = _haversine_m(p1[0], p1[1], clat, clon)
+    d2 = _haversine_m(p2[0], p2[1], clat, clon)
+    full = _haversine_m(p1[0], p1[1], p2[0], p2[1])
+    if full <= 0:
+        return 0.0
+    if d1 <= R and d2 <= R:
+        return full
+    if d1 > R and d2 > R:
+        # a long segment can still cut through the circle - sample to check
+        inside = 0
+        N = 12
+        for i in range(N + 1):
+            t = i / N
+            la = p1[0] + (p2[0] - p1[0]) * t
+            lo = p1[1] + (p2[1] - p1[1]) * t
+            if _haversine_m(la, lo, clat, clon) <= R:
+                inside += 1
+        return full * inside / (N + 1)
+    # exactly one end inside: bisect for the boundary crossing
+    lo_t, hi_t = 0.0, 1.0
+    for _ in range(20):
+        mid = (lo_t + hi_t) / 2
+        la = p1[0] + (p2[0] - p1[0]) * mid
+        lo = p1[1] + (p2[1] - p1[1]) * mid
+        if (_haversine_m(la, lo, clat, clon) <= R) == (d1 <= R):
+            lo_t = mid
+        else:
+            hi_t = mid
+    frac = (lo_t + hi_t) / 2
+    return full * (frac if d1 <= R else (1 - frac))
+
+
+# GRIP4 is a GLOBAL roads product: excellent for highways and main roads, but
+# its local/residential coverage is patchy - which is why a dense neighbourhood
+# could report almost no road length. OpenStreetMap maps Indian streets in
+# detail, so we measure from OSM and keep GRIP only as a comparison.
+_ROAD_CLASSES = [
+    ("motorway", "Motorway"), ("trunk", "Trunk"), ("primary", "Primary"),
+    ("secondary", "Secondary"), ("tertiary", "Tertiary"),
+    ("residential", "Residential"), ("unclassified", "Unclassified"),
+    ("service", "Service"), ("living_street", "Living street"),
+    ("track", "Track"), ("footway", "Footway"), ("path", "Path"),
+]
+
+
+def _overpass_road_length(lat, lon, radius_m, include_paths=False):
+    """Total road length within radius_m, measured from OSM way geometry."""
+    kinds = ("motorway|trunk|primary|secondary|tertiary|residential|"
+             "unclassified|service|living_street|road")
+    if include_paths:
+        kinds += "|track|footway|path|pedestrian|cycleway"
+    q = (f'[out:json][timeout:40];'
+         f'way["highway"~"^({kinds})$"](around:{int(radius_m)},{lat},{lon});'
+         f'out geom;')
+    js = _overpass(q)
+    if js is None:
+        return None
+    by_class, total = {}, 0.0
+    ways = 0
+    for el in js.get("elements", []):
+        geom = el.get("geometry") or []
+        if len(geom) < 2:
+            continue
+        hw = (el.get("tags") or {}).get("highway", "other")
+        seg_total = 0.0
+        for a, b in zip(geom[:-1], geom[1:]):
+            seg_total += _seg_len_inside(
+                (a["lat"], a["lon"]), (b["lat"], b["lon"]),
+                lat, lon, float(radius_m))
+        if seg_total > 0:
+            ways += 1
+            total += seg_total
+            by_class[hw] = by_class.get(hw, 0.0) + seg_total
+    return {"total_m": total, "ways": ways,
+            "by_class_m": {k: round(v, 1) for k, v in
+                           sorted(by_class.items(), key=lambda kv: -kv[1])}}
+
+
 def _overpass_noise(lat, lon):
     q = f"""[out:json][timeout:20];
 (way["landuse"="industrial"](around:2000,{lat},{lon});
@@ -5050,6 +5135,41 @@ def road_check(q: RoadCheckQuery):
     gj = fc.getInfo()
     area_km2 = region.area(10).getInfo() / 1e6
 
+    # OSM ways - the source we actually report, and the one that includes the
+    # local streets a user can see on the basemap.
+    osm_feats, osm_total, osm_by_class = [], 0.0, {}
+    try:
+        kinds = ("motorway|trunk|primary|secondary|tertiary|residential|"
+                 "unclassified|service|living_street|road")
+        oq = (f'[out:json][timeout:40];'
+              f'way["highway"~"^({kinds})$"]'
+              f'(around:{int(q.radius_m)},{q.lat},{q.lon});out geom;')
+        ojs = _overpass(oq)
+        for el in (ojs or {}).get("elements", []):
+            geom = el.get("geometry") or []
+            if len(geom) < 2:
+                continue
+            hw = (el.get("tags") or {}).get("highway", "other")
+            coords, seg_total = [], 0.0
+            for a, b in zip(geom[:-1], geom[1:]):
+                seg_total += _seg_len_inside(
+                    (a["lat"], a["lon"]), (b["lat"], b["lon"]),
+                    q.lat, q.lon, float(q.radius_m))
+            if seg_total <= 0:
+                continue
+            for pnt in geom:
+                coords.append([pnt["lon"], pnt["lat"]])
+            osm_total += seg_total
+            osm_by_class[hw] = osm_by_class.get(hw, 0.0) + seg_total
+            if len(osm_feats) < 600:
+                osm_feats.append({
+                    "geometry": {"type": "LineString", "coordinates": coords},
+                    "clip_len_m": round(seg_total, 1),
+                    "type": hw,
+                    "name": (el.get("tags") or {}).get("name", "")})
+    except Exception:
+        pass
+
     feats, total_clip, total_full = [], 0.0, 0.0
     for f in gj.get("features", []):
         p = f.get("properties", {}) or {}
@@ -5063,6 +5183,15 @@ def road_check(q: RoadCheckQuery):
                       "type": p.get("type") or p.get("highway") or ""})
 
     return {
+        "osm": {
+            "features": osm_feats,
+            "count": len(osm_feats),
+            "total_km": round(osm_total / 1000, 3),
+            "density_km_per_km2": (round((osm_total / 1000) / area_km2, 2)
+                                   if area_km2 else None),
+            "by_class_km": {k: round(v / 1000, 3) for k, v in
+                            sorted(osm_by_class.items(), key=lambda kv: -kv[1])},
+        },
         "features": feats,
         "count": len(feats),
         "capped": len(feats) >= 400,
@@ -5072,11 +5201,13 @@ def road_check(q: RoadCheckQuery):
         "density_km_per_km2": (round((total_clip / 1000) / area_km2, 2)
                                if area_km2 else None),
         "explanation": (
-            "clipped = road length INSIDE the region (what the brief reports). "
-            "unclipped = the full length of every road that merely touches the "
-            "region - this is what the earlier version mistakenly summed, which "
-            "is why a single highway could inflate the total."),
-        "source": DATASETS["roads"].get("info") or "GRIP global roads",
+            "OSM is the reported figure: it maps local streets in detail. "
+            "GRIP4 is a global product that covers highways and main roads well "
+            "but under-maps residential streets, so its total is usually much "
+            "lower - sometimes zero in a purely residential area. 'unclipped' "
+            "shows what summing whole roads would give, which is the error that "
+            "produced the impossible 968 km figure."),
+        "source": "OSM (reported) vs GRIP4 (comparison)",
     }
 
 
@@ -5361,7 +5492,18 @@ def site_brief(q: SiteQuery):
         "air": air,
         "noise": noise,
         "lulc": lulc, "green_pct": green_pct,
-        "road_km": None if g("road_m") is None else round(g("road_m") / 1000, 2),
+        # OSM is the primary source (GRIP4 under-maps local streets); the GRIP
+        # figure is kept alongside so the two can be compared.
+        "road_km": (round(osm_roads["total_m"] / 1000, 2) if osm_roads
+                    else (None if g("road_m") is None
+                          else round(g("road_m") / 1000, 2))),
+        "road_source": ("OpenStreetMap" if osm_roads else "GRIP4"),
+        "road_km_grip": (None if g("road_m") is None
+                         else round(g("road_m") / 1000, 2)),
+        "road_ways": (osm_roads or {}).get("ways"),
+        "road_by_class_km": ({k: round(v / 1000, 3) for k, v in
+                              (osm_roads or {}).get("by_class_m", {}).items()}
+                             if osm_roads else None),
     }
 
 
