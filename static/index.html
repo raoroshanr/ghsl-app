@@ -238,6 +238,38 @@ a.dsgNew:hover{background:#f4f7f5}
   font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;border-radius:6px;
   background:#12201B;color:#E7EDE8}
 .llRow .llGo{flex:0 0 auto;padding:7px 12px}
+.aiSrcBox{display:flex;flex-direction:column;gap:3px;padding:7px 8px;
+  border:1px solid #2E3E37;border-radius:7px;background:#12201B}
+.aiSrcBox label{display:flex;align-items:center;gap:7px;font-size:11.5px;
+  color:#C9D3CC;font-family:Arial,Helvetica,sans-serif}
+#aiRef{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
+  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
+  border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
+.aiQRow{display:flex;gap:5px;margin-top:5px}
+.aiQRow textarea{flex:1;min-width:0;padding:6px 8px;font-size:11.5px;
+  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
+  border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
+.aiQRow .aiQDel{flex:0 0 auto;padding:4px 9px;align-self:flex-start}
+.aiAnswer{font-family:Arial,Helvetica,sans-serif;font-size:12.5px;
+  line-height:1.5;color:#E7EDE8}
+.aiAnswer h3{font-size:12.5px;color:#7FD0BC;margin:12px 0 4px}
+.aiAnswer p{margin:0 0 8px}
+.aiMeta{font-size:10.5px;color:#8A968F;margin-top:10px;padding-top:8px;
+  border-top:1px solid #2A3A33}
+.aiModelBlock{border:1px solid #2A3A33;border-radius:8px;padding:10px 12px;
+  margin-bottom:10px;background:#101B16}
+.aiModelHead{display:flex;justify-content:space-between;align-items:center;
+  gap:8px;font-family:Arial,Helvetica,sans-serif;font-size:11.5px;
+  font-weight:700;color:#7FD0BC;margin-bottom:6px}
+.aiBadge{font-weight:400;font-size:10.5px;padding:2px 7px;border-radius:10px;
+  border:1px solid #2E3E37;color:#9FB0A8}
+.aiBadge.good{color:#84CC16;border-color:#3d5a1f}
+.aiBadge.warn{color:#E4572E;border-color:#6b2f1c}
+.aiFlag{margin-top:8px;padding:7px 9px;border-radius:6px;font-size:11px;
+  font-family:Arial,Helvetica,sans-serif;line-height:1.45}
+.aiFlag.warn{background:rgba(228,87,46,.12);border:1px solid #6b2f1c;color:#F0B49E}
+.aiFlag.info{background:rgba(127,208,188,.08);border:1px solid #2E4E45;color:#9FD9C9}
+.aiFail{color:#E4572E;font-size:11.5px;font-family:Arial,Helvetica,sans-serif}
 #progWrap{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(14px);
   z-index:4000;opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
 #progWrap.on{opacity:1;transform:translateX(-50%) translateY(0)}
@@ -751,6 +783,38 @@ label.chk input{width:auto}
       <button id="siteRun" class="primary" disabled>Generate site brief</button>
       <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
       <button id="site3dBtn" style="width:100%;margin-top:6px" disabled>3D building view (extruded)</button>
+
+      <div class="stepH" style="margin-top:14px">AI site assessor</div>
+      <p class="hint">Answers <b>your</b> fixed questions using <b>only</b> the data blocks you allow below. It is instructed never to invent a number and to say when the data cannot answer.</p>
+
+      <label class="fld">1 &middot; Sources the agent may use</label>
+      <div id="aiSources" class="aiSrcBox">
+        <label><input type="checkbox" value="site" checked> Site &amp; region (location, radius, area)</label>
+        <label><input type="checkbox" value="lulc" checked> Land cover / green cover</label>
+        <label><input type="checkbox" value="air" checked> Air quality</label>
+        <label><input type="checkbox" value="periods" checked> Climate normals</label>
+        <label><input type="checkbox" value="monthly" checked> Monthly climate</label>
+        <label><input type="checkbox" value="noise" checked> Noise-source proximity</label>
+        <label><input type="checkbox" value="open_buildings" checked> Building heights / footprints</label>
+        <label><input type="checkbox" value="lst_day_c" checked> Land surface temperature</label>
+      </div>
+
+      <label class="fld" for="aiRef">2 &middot; Reference material (optional)</label>
+      <textarea id="aiRef" rows="3" placeholder="Paste authoritative text the agent may rely on — e.g. an NBC clause, a design brief, your own sensor readings."></textarea>
+
+      <label class="fld">3 &middot; Models <span class="per">(tick 2+ to cross-check)</span></label>
+      <div id="aiModels" class="aiSrcBox"><span class="per">Loading models&hellip;</span></div>
+
+      <label class="fld">4 &middot; Your fixed questions</label>
+      <div id="aiQList"></div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="aiQAdd" class="ghost" style="flex:1">+ Add question</button>
+        <button id="aiQSave" class="ghost" style="flex:1">Save set</button>
+        <button id="aiQReset" class="ghost" style="flex:1">Defaults</button>
+      </div>
+
+      <button id="aiRun" class="primary" style="width:100%;margin-top:10px" disabled>Run AI assessment</button>
+      <div id="aiStatus" class="hint" style="min-height:18px"></div>
     </section>
     </div><!-- /tab-site -->
 
@@ -953,7 +1017,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v85</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v87</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -980,7 +1044,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v85";
+const DSG_VERSION = "deepseego-v87";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1952,6 +2016,223 @@ map.on('mousemove', ev => {
 map.on('mouseout', () => { $('cursorTip').style.display = 'none'; });
 
 /* map clicks feed whichever mode is armed */
+/* ---------- AI site assessor (grounded question answering) -----------------
+   The user owns BOTH halves of the contract:
+     - the QUESTIONS (edited here, persisted server-side)
+     - the SOURCES (only the ticked site-brief blocks + their own reference text)
+   The backend instructs the model to answer strictly from that material and to
+   state plainly when it cannot. We also display exactly which blocks were sent,
+   so an answer can always be traced back to its inputs.
+--------------------------------------------------------------------------- */
+let lastSiteBrief = null;
+let AI_QUESTIONS = [];
+let aiInited = false;
+
+function aiRenderQuestions(){
+  const box = $('aiQList');
+  if(!box) return;
+  box.innerHTML = '';
+  AI_QUESTIONS.forEach((q, i) => {
+    const row = document.createElement('div');
+    row.className = 'aiQRow';
+    const ta = document.createElement('textarea');
+    ta.rows = 2; ta.value = q;
+    ta.addEventListener('input', () => { AI_QUESTIONS[i] = ta.value; });
+    const del = document.createElement('button');
+    del.className = 'ghost aiQDel'; del.textContent = '\u2715';
+    del.title = 'Remove this question';
+    del.addEventListener('click', () => {
+      AI_QUESTIONS.splice(i, 1); aiRenderQuestions();
+    });
+    row.appendChild(ta); row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+async function aiLoadModels(){
+  const box = $('aiModels');
+  if(!box) return;
+  try{
+    const j = await api('/ai_models');
+    const avail = j.models.filter(m => m.available);
+    if(!avail.length){
+      const envs = Object.values(j.providers).map(p => p.env).join(', ');
+      box.innerHTML = '<span class="per">No AI provider configured. Set one of '
+        + envs + ' on Cloud Run (see AI_AGENT_SETUP.md).</span>';
+      return;
+    }
+    box.innerHTML = '';
+    j.models.forEach(m => {
+      const lab = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.value = m.id;
+      cb.disabled = !m.available;
+      cb.checked = m.available && m.id === j.default;
+      lab.appendChild(cb);
+      const t = document.createElement('span');
+      t.textContent = m.label + '  \u00b7 ' + m.provider_label +
+                      (m.available ? '' : '  (no API key)');
+      if(!m.available) t.style.opacity = '.45';
+      lab.appendChild(t);
+      box.appendChild(lab);
+    });
+    // if the default was not available, tick the first that is
+    if(!box.querySelector('input:checked')){
+      const first = box.querySelector('input:not([disabled])');
+      if(first) first.checked = true;
+    }
+  }catch(e){
+    box.innerHTML = '<span class="per">Could not load model list: ' +
+                    e.message + '</span>';
+  }
+}
+async function aiInit(){
+  if(aiInited) return; aiInited = true;
+  aiLoadModels();
+  try{
+    const j = await api('/ai_questions');
+    AI_QUESTIONS = j.questions || [];
+  }catch(e){ AI_QUESTIONS = []; }
+  aiRenderQuestions();
+  $('aiQAdd').addEventListener('click', () => {
+    AI_QUESTIONS.push(''); aiRenderQuestions();
+    const tas = $('aiQList').querySelectorAll('textarea');
+    if(tas.length) tas[tas.length - 1].focus();
+  });
+  $('aiQSave').addEventListener('click', async () => {
+    const qs = AI_QUESTIONS.map(s => (s || '').trim()).filter(Boolean);
+    try{
+      await api('/ai_questions', {method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({questions: qs})});
+      AI_QUESTIONS = qs; aiRenderQuestions();
+      toast('Question set saved');
+    }catch(e){ toast('Save failed: ' + e.message, 7000); }
+  });
+  $('aiQReset').addEventListener('click', async () => {
+    try{
+      const j = await api('/ai_questions');
+      AI_QUESTIONS = j.source === 'default' ? j.questions : j.questions;
+      aiRenderQuestions(); toast('Reloaded saved set');
+    }catch(e){ toast('Could not reload'); }
+  });
+  $('aiRun').addEventListener('click', runAiAssessment);
+  if(lastSiteBrief) $('aiRun').disabled = false;
+}
+function aiSelectedContext(){
+  if(!lastSiteBrief) return null;
+  const ctx = {};
+  $('aiSources').querySelectorAll('input[type=checkbox]').forEach(cb => {
+    if(cb.checked && lastSiteBrief[cb.value] !== undefined)
+      ctx[cb.value] = lastSiteBrief[cb.value];
+  });
+  // always carry the provenance note so the model cannot forget the caveats
+  if(lastSiteBrief.historical_note)
+    ctx.data_limitations = lastSiteBrief.historical_note;
+  return ctx;
+}
+async function runAiAssessment(){
+  if(!lastSiteBrief) return toast('Generate a site brief first');
+  const qs = AI_QUESTIONS.map(s => (s || '').trim()).filter(Boolean);
+  if(!qs.length) return toast('Add at least one question');
+  const ctx = aiSelectedContext();
+  if(!ctx || !Object.keys(ctx).length)
+    return toast('Tick at least one data source for the agent to use');
+
+  const models = Array.from(
+    $('aiModels').querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
+  if(!models.length) return toast('Tick at least one model');
+
+  const btn = $('aiRun'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Thinking\u2026';
+  Progress.start('AI site assessment',
+    (models.length > 1 ? 'Cross-checking across ' + models.length + ' models' :
+     'Answering ' + qs.length + ' questions') + ' from the selected data\u2026', 0);
+  try{
+    const j = await api('/ai_ask', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({questions: qs, context: ctx, models: models,
+                            reference: $('aiRef').value || ''})});
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'AI site assessment';
+    $('siteWrap').innerHTML =
+      '<div class="siteSec"><div class="paneLabel">AI site assessment</div>' +
+      aiCrossCheckBlock(j.cross_check) +
+      j.results.map(aiResultBlock).join('') +
+      '<div class="aiMeta">Data blocks used: ' + (j.context_keys || []).join(', ') +
+      ($('aiRef').value.trim() ? ' \u00b7 + your reference text' : '') +
+      '<br>' + (j.note || '') + '</div></div>';
+    $('aiStatus').textContent = 'Answered ' + qs.length + ' questions with ' +
+      j.results.filter(r => r.ok).length + '/' + j.results.length + ' models.';
+  }catch(e){
+    toast('AI: ' + e.message, 12000);
+    $('aiStatus').textContent = e.message;
+  }
+  finally { Progress.done(); btn.disabled = false; btn.textContent = orig; }
+}
+function aiResultBlock(r){
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if(!r.ok){
+    return '<div class="aiModelBlock"><div class="aiModelHead">' + esc(r.model) +
+           '</div><div class="aiFail">Did not answer: ' + esc(r.error) +
+           '</div></div>';
+  }
+  const v = r.verification || {};
+  const bad = (v.unverified || []).length;
+  const badge = bad
+    ? '<span class="aiBadge warn">' + bad + ' figure' + (bad > 1 ? 's' : '') +
+      ' not found in the data</span>'
+    : '<span class="aiBadge good">all ' + (v.cited_count || 0) +
+      ' figures traced to the data</span>';
+  const flag = bad
+    ? '<div class="aiFlag warn"><b>Unverified numbers:</b> ' +
+      (v.unverified || []).join(', ') +
+      '<br>These do not appear in the data you supplied. They may be legitimately ' +
+      'derived (a percentage, a sum), or they may be wrong. Check before using them.</div>'
+    : '';
+  const u = r.usage || {};
+  return '<div class="aiModelBlock"><div class="aiModelHead"><span>' +
+    esc(r.model) + '</span>' + badge + '</div>' +
+    '<div class="aiAnswer">' + aiMarkdown(r.answer) + '</div>' + flag +
+    '<div class="aiMeta">tokens in/out: ' + (u.input_tokens || '?') + '/' +
+    (u.output_tokens || '?') + '</div></div>';
+}
+function aiCrossCheckBlock(cc){
+  if(!cc || !cc.comparable) return '';
+  const uniq = cc.unique_to_model || {};
+  const diverging = Object.keys(uniq).filter(m => (uniq[m] || []).length);
+  const ratio = cc.agreement_ratio == null ? '?' :
+                Math.round(cc.agreement_ratio * 100) + '%';
+  let html = '<div class="aiFlag ' + (diverging.length ? 'warn' : 'info') + '">' +
+    '<b>Cross-check across ' + cc.models.length + ' models</b><br>' +
+    'Figures cited by every model: ' +
+    (cc.agreed_values.length ? cc.agreed_values.join(', ') : 'none') +
+    '  (' + ratio + ' of all figures)<br>';
+  if(diverging.length){
+    html += '<b>Figures only one model cited:</b><br>' +
+      diverging.map(m => '&nbsp;&nbsp;' + m + ': ' + uniq[m].join(', ')).join('<br>') +
+      '<br><i>Divergent figures are the ones worth checking first.</i>';
+  } else {
+    html += 'No divergent figures. Note that agreement is <i>not</i> independent ' +
+            'confirmation \u2014 models share training data and can repeat the same error.';
+  }
+  return html + '</div>';
+}
+
+// minimal, safe markdown -> HTML (escapes first, so model output cannot inject)
+function aiMarkdown(t){
+  const esc = (t || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                       .replace(/>/g, '&gt;');
+  return esc
+    .replace(/^### +(.*)$/gm, '<h3>$1</h3>')
+    .replace(/^## +(.*)$/gm, '<h3>$1</h3>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/`(.+?)`/g, '<code>$1</code>')
+    .split(/\n{2,}/).map(p => p.match(/^<h3>/) ? p : '<p>' + p.replace(/\n/g, '<br>') + '</p>')
+    .join('');
+}
+
 /* ---------- Create: draw polygon / line / point, export as shapefile -------
    Vertices are added by tapping the map. Finished features accumulate into a
    small in-memory GeoJSON FeatureCollection, which can be used as the analysis
@@ -3056,7 +3337,7 @@ function showTab(tab){
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight') sunlightInit();
   if(tab === 'noise') noiseInit();
-  if(tab === 'site') siteInit();
+  if(tab === 'site'){ siteInit(); aiInit(); }
   if(tab === 'slope') slopeInit();
 }
 function setBasket(name){
@@ -4748,6 +5029,8 @@ $('siteRun').addEventListener('click', async () => {
   try{
     const j = await api('/site_brief', opts);
     lastSiteOB = j.open_buildings || null;
+    lastSiteBrief = j;                       // grounding data for the AI assessor
+    if($('aiRun')) $('aiRun').disabled = false;
     if(!j.air || !j.periods || !j.noise)
       throw new Error('older backend version \u2014 deploy the latest main.py ' +
         '(the health endpoint should report deepseego-v11 or later)');
