@@ -255,7 +255,7 @@ a.dsgAi:hover{background:#f4f7f5;color:#0B5A49}
   box-shadow:0 8px 22px rgba(0,0,0,.4)}
 .geoItem{padding:8px 10px;font-family:Arial,Helvetica,sans-serif;font-size:12px;
   color:#E7EDE8;cursor:pointer;border-bottom:1px solid #22322B}
-.geoItem:hover{background:#1D2D26}
+.geoItem:hover,.geoItem.sel{background:#1D2D26}
 .geoItem:last-child{border-bottom:none}
 /* pencil cursor while a Custom Draw geometry is being digitised.
    NOTE: #map.drawing already forces crosshair with !important, so this rule
@@ -842,7 +842,6 @@ label.chk input{width:auto}
       <button id="siteRun" class="primary" disabled>Generate site brief</button>
       <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
       <button id="site3dBtn" style="width:100%;margin-top:6px" disabled>3D building view (extruded)</button>
-      <button id="siteRoadCheck" class="ghost" style="width:100%;margin-top:6px" disabled>Show the roads counted (verify length)</button>
 
     </section>
     </div><!-- /tab-site -->
@@ -1046,7 +1045,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v97</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v99</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1073,7 +1072,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v97";
+const DSG_VERSION = "deepseego-v99";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1794,8 +1793,65 @@ function attachSearch(inputId, onPick, {dropdown = true} = {}){
     inp.parentNode.style.position = 'relative';
     inp.parentNode.appendChild(box);
   }
+  // ---- type-ahead ----------------------------------------------------
+  // Nominatim asks for at most 1 request/second, so suggestions are debounced
+  // and only fire from 3 characters. Stale replies are discarded by sequence
+  // number, otherwise a slow early request can overwrite a newer one.
+  let tmr = null, seq = 0, items = [], active = -1;
+  function highlight(){
+    if(!box) return;
+    box.querySelectorAll('.geoItem').forEach((el, i) =>
+      el.classList.toggle('sel', i === active));
+  }
+  function pick(i){
+    if(i < 0 || i >= items.length) return;
+    closeBox();
+    inp.value = items[i].label.split(' \u2014 ')[0];
+    onPick(items[i]);
+  }
+  function showList(cands){
+    items = cands.slice(0, 8);
+    closeBox();
+    if(!items.length) return;
+    box = document.createElement('div');
+    box.className = 'geoResults';
+    items.forEach((c, i) => {
+      const it = document.createElement('div');
+      it.className = 'geoItem';
+      it.textContent = c.label;
+      it.addEventListener('mousedown', ev => { ev.preventDefault(); pick(i); });
+      box.appendChild(it);
+    });
+    active = -1;
+    inp.parentNode.style.position = 'relative';
+    inp.parentNode.appendChild(box);
+  }
+  inp.addEventListener('input', () => {
+    const q = inp.value.trim();
+    clearTimeout(tmr);
+    if(q.length < 3){ closeBox(); return; }
+    tmr = setTimeout(async () => {
+      const my = ++seq;
+      const cands = await geocode(q, {limit: 8});
+      if(my !== seq) return;            // a newer keystroke already won
+      showList(cands);
+    }, 350);
+  });
   inp.addEventListener('keydown', ev => {
-    if(ev.key === 'Enter'){ ev.preventDefault(); run(); }
+    if(box && items.length){
+      if(ev.key === 'ArrowDown'){
+        ev.preventDefault(); active = Math.min(items.length - 1, active + 1);
+        highlight(); return;
+      }
+      if(ev.key === 'ArrowUp'){
+        ev.preventDefault(); active = Math.max(0, active - 1);
+        highlight(); return;
+      }
+      if(ev.key === 'Enter' && active >= 0){
+        ev.preventDefault(); pick(active); return;
+      }
+    }
+    if(ev.key === 'Enter'){ ev.preventDefault(); clearTimeout(tmr); run(); }
     if(ev.key === 'Escape') closeBox();
   });
   inp.addEventListener('blur', () => setTimeout(closeBox, 200));
@@ -3130,74 +3186,6 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
-/* ---------- road-length verification ---------------------------------------
-   The brief reports a road length; this draws the EXACT segments that figure
-   was computed from, already clipped to the region, so the number can be
-   checked rather than trusted.
---------------------------------------------------------------------------- */
-const roadCheckLayer = L.featureGroup().addTo(map);
-async function runRoadCheck(){
-  if(siteState.lat == null && !siteRoiState)
-    return toast('Pick a site point first');
-  const btn = $('siteRoadCheck'); const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Fetching roads\u2026';
-  Progress.start('Road length check', 'Clipping road segments to the region\u2026', 0);
-  try{
-    const j = await api('/road_check', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
-                            radius_m: +$('siteRadius').value,
-                            region: siteRoiState})});
-    roadCheckLayer.clearLayers();
-    const O = j.osm || {features: [], total_km: 0};
-    // GRIP first (underneath), dashed - the comparison layer
-    j.features.forEach(f => {
-      if(!f.geometry) return;
-      L.geoJSON(f.geometry, {style: {color: '#E4572E', weight: 4, opacity: .5,
-                                     dashArray: '6 5'}})
-        .addTo(roadCheckLayer)
-        .bindTooltip('GRIP4 (comparison)<br>inside region: ' +
-          f.clip_len_m.toFixed(0) + ' m<br>whole road: ' +
-          (f.full_len_m / 1000).toFixed(1) + ' km', {sticky: true});
-    });
-    // OSM on top, solid yellow - this is what the brief reports
-    O.features.forEach(f => {
-      if(!f.geometry) return;
-      L.geoJSON(f.geometry, {style: {color: '#FFE01B', weight: 3, opacity: .95}})
-        .addTo(roadCheckLayer)
-        .bindTooltip('OSM \u00b7 ' + (f.name || f.type) +
-          '<br>inside region: ' + f.clip_len_m.toFixed(0) + ' m', {sticky: true});
-    });
-    if(roadCheckLayer.getLayers().length)
-      map.fitBounds(roadCheckLayer.getBounds().pad(0.2));
-
-    const infl = j.total_unclipped_km && j.total_clipped_km
-      ? (j.total_unclipped_km / j.total_clipped_km) : null;
-    toast('OSM roads in yellow (' + O.total_km + ' km) \u00b7 GRIP4 dashed orange (' +
-          j.total_clipped_km + ' km)', 8000);
-    const cls = Object.entries(O.by_class_km || {})
-      .map(([k, v]) => `<tr><td style="padding-left:12px">${k}</td>` +
-                       `<td style="text-align:right">${v} km</td></tr>`).join('');
-    const box = document.getElementById('roadCheckOut');
-    if(box) box.innerHTML =
-      '<div class="siteSec"><div class="paneLabel">Road length \u2014 verification</div>' +
-      '<table class="aqTable">' +
-      '<tr><td>Region area</td><td style="text-align:right">' + j.area_km2 + ' km\u00b2</td></tr>' +
-      '<tr><td><b>OSM \u2014 reported</b></td><td style="text-align:right"><b>' +
-        O.total_km + ' km</b></td></tr>' +
-      '<tr><td>OSM density</td><td style="text-align:right">' +
-        (O.density_km_per_km2 == null ? '\u2014' : O.density_km_per_km2 + ' km/km\u00b2') +
-        '</td></tr>' + cls +
-      '<tr><td>GRIP4 \u2014 comparison</td><td style="text-align:right">' +
-        j.total_clipped_km + ' km</td></tr>' +
-      '<tr><td>If whole roads were summed (the old bug)</td><td style="text-align:right">' +
-        j.total_unclipped_km + ' km' +
-        (infl ? ' (\u00d7' + infl.toFixed(0) + ')' : '') + '</td></tr>' +
-      '</table><p class="srcNote">' + j.explanation + '</p></div>';
-  }catch(e){ toast('Road check: ' + e.message, 9000); }
-  finally { Progress.done(); btn.disabled = false; btn.textContent = orig; }
-}
-
 /* ---------- Sun path (3D solar dome, projected onto the map) ----------
    The sun's track IS a 3D dome over the point. A Leaflet map is top-down, so
    we project that dome vertically onto the ground - which is exactly what a
@@ -3603,8 +3591,7 @@ function wipeMapAnalysis(){
   try {
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
-   slopeLayer, sunPathLayer, shadowLayer, createLayer,
-   roadCheckLayer].forEach(g => {
+   slopeLayer, sunPathLayer, shadowLayer, createLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -4980,7 +4967,6 @@ $('customWmsAdd').addEventListener('click', () => {
 /* ---------- Site Brief ---------- */
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
 if($('site3dBtn')) $('site3dBtn').addEventListener('click', open3DView);
-if($('siteRoadCheck')) $('siteRoadCheck').addEventListener('click', runRoadCheck);
 if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async () => {
   if(siteState.lat == null) return toast('Pick a site first');
   const btn = $('siteBuildingsBtn');
@@ -5279,8 +5265,6 @@ function enableSiteRun(){
   if(bb) bb.disabled = (siteState.lat == null);
   const tb = $('site3dBtn');
   if(tb) tb.disabled = (siteState.lat == null);
-  const rc = $('siteRoadCheck');
-  if(rc) rc.disabled = (siteState.lat == null && !siteRoiState);
 }
 const _hasRoiUI = !!$('siteRoiRect');
 function clearSiteRegions(kind){
@@ -5383,12 +5367,41 @@ $('siteRun').addEventListener('click', async () => {
     if(pm && pm.band) chips.push(siteChip('PM2.5', pm.band,
       pm.band === 'Low' ? '#84CC16' : pm.band === 'Moderate' ? '#E9C46A' : '#E4572E'));
     if(j.lst_day_c != null) chips.push(siteChip('Day surface temp', j.lst_day_c + '\u00b0C', '#C9D3CC'));
-    if(j.road_km != null) chips.push(siteChip('Roads in ring', j.road_km + ' km', '#C9D3CC'));
     const bh = j.site.building_height_m;
     const N = j.noise;
 
+    // Road network, rendered upfront from the OSM measurement in the brief.
+    // No extra request: road_by_class_km already comes back with the data.
+    function roadSectionHtml(){
+      const areaKm2 = (j.region && j.region.area_km2) || null;
+      if(j.road_km == null){
+        return '<div class="siteSec"><div class="paneLabel">Road network</div>' +
+          '<p class="srcNote">OpenStreetMap road data was not available for ' +
+          'this location (the lookup timed out or returned nothing). ' +
+          'No road length is reported rather than showing a misleading zero.</p></div>';
+      }
+      const dens = areaKm2 ? (j.road_km / areaKm2) : null;
+      const cls = j.road_by_class_km || {};
+      const rows = Object.entries(cls)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `<tr><td style="padding-left:14px">${k}</td>` +
+             `<td style="text-align:right">${v.toFixed(3)} km</td></tr>`).join('');
+      return '<div class="siteSec"><div class="paneLabel">Road network ' +
+        '<span class="per">\u00b7 OpenStreetMap</span></div>' +
+        '<table class="aqTable">' +
+        (areaKm2 != null ? `<tr><td>Region area</td><td style="text-align:right">${areaKm2} km\u00b2</td></tr>` : '') +
+        `<tr><td><b>Total road length</b></td><td style="text-align:right"><b>${j.road_km} km</b></td></tr>` +
+        (dens != null ? `<tr><td>Road density</td><td style="text-align:right">${dens.toFixed(2)} km/km\u00b2</td></tr>` : '') +
+        (rows ? '<tr><td colspan="2" style="padding-top:6px;color:#8A968F">By class</td></tr>' + rows : '') +
+        '</table>' +
+        (j.road_ways ? `<p class="srcNote">${j.road_ways} OSM ways, clipped to the region boundary.` : '<p class="srcNote">') +
+        (j.road_km_grip != null
+          ? ` For comparison, the global GRIP4 product reports ${j.road_km_grip} km here \u2014 it covers highways well but under-maps local streets.`
+          : '') +
+        '</p></div>';
+    }
+
     $('siteWrap').innerHTML = `
-      <div id="roadCheckOut"></div>
       <div class="siteSec">
         <div class="paneLabel">Region details</div>
         <table class="aqTable">
@@ -5416,6 +5429,7 @@ $('siteRun').addEventListener('click', async () => {
           : 'No building detected at the point \u2014 treated as an open site.'}
           ${j.historical_note}</p>
       </div>
+      ${roadSectionHtml()}
       <div class="siteSec"><div class="paneLabel">Air temperature \u00b0C <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cTemp')}${statLine(mo,'temp_c','\u00b0C',1)}</div>
       <div class="siteSec"><div class="paneLabel">Relative humidity % <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cRh')}${statLine(mo,'rh_pct','%',0)}</div>
       <div class="siteSec"><div class="paneLabel">Rainfall mm/month <span class="per">\u00b7 ${P.climate}</span></div>${siteCanvas('cRain')}${statLine(mo,'rain_mm',' mm',0,true)}</div>
@@ -5428,13 +5442,32 @@ $('siteRun').addEventListener('click', async () => {
       land cover: ${P.lulc}; roads: ${P.roads}.
       ERA5-Land describes the ~9 km mesoclimate, not street-level microclimate.</p>`;
 
-    sitePieChart('cLulcPie', j.lulc.slice(0, 6));
-    siteChart('cTemp', L, mo.map(m => m.temp_c), '#E4572E');
-    siteChart('cRh', L, mo.map(m => m.rh_pct), '#00B4D8');
-    siteChart('cRain', L, mo.map(m => m.rain_mm), '#2A9D8F');
-    siteChart('cWind', L, mo.map(m => m.wind_ms), '#7FD0BC');
-    siteChart('cSolar', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
-    siteChart('cMrt', L, mo.map(m => m.mrt_c), '#F15BB5');
+    try{
+      await ensureChart();          // the brief never loaded Chart.js itself
+    }catch(err){
+      toast('Charts unavailable: ' + err.message, 8000);
+    }
+    // one bad series must not stop the rest from drawing
+    function drawSeries(id, values, colour, label){
+      const has = values.some(v => v != null && isFinite(v));
+      if(!has){
+        const c = $(id);
+        if(c && c.parentNode)
+          c.parentNode.innerHTML =
+            '<p class="srcNote">No ' + label + ' data available for this location.</p>';
+        return;
+      }
+      try{ siteChart(id, L, values, colour); }
+      catch(err){ console.error('chart ' + id, err); }
+    }
+    try{ sitePieChart('cLulcPie', j.lulc.slice(0, 6)); }
+    catch(err){ console.error('pie', err); }
+    drawSeries('cTemp',  mo.map(m => m.temp_c),            '#E4572E', 'temperature');
+    drawSeries('cRh',    mo.map(m => m.rh_pct),            '#00B4D8', 'humidity');
+    drawSeries('cRain',  mo.map(m => m.rain_mm),           '#2A9D8F', 'rainfall');
+    drawSeries('cWind',  mo.map(m => m.wind_ms),           '#7FD0BC', 'wind');
+    drawSeries('cSolar', mo.map(m => m.solar_kwh_m2_day),  '#E9C46A', 'solar');
+    drawSeries('cMrt',   mo.map(m => m.mrt_c),             '#F15BB5', 'MRT');
   }catch(e){
     toast('Site brief: ' + e.message, 9000);
     Progress.done();          // phase 2 never starts, so close it here
