@@ -814,6 +814,7 @@ label.chk input{width:auto}
       </div>
 
       <button id="aiRun" class="primary" style="width:100%;margin-top:10px" disabled>Run AI assessment</button>
+      <div id="aiReady" class="hint" style="min-height:18px"></div>
       <div id="aiStatus" class="hint" style="min-height:18px"></div>
     </section>
     </div><!-- /tab-site -->
@@ -1017,7 +1018,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v87</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v88</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1044,7 +1045,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v87";
+const DSG_VERSION = "deepseego-v88";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -2037,12 +2038,14 @@ function aiRenderQuestions(){
     row.className = 'aiQRow';
     const ta = document.createElement('textarea');
     ta.rows = 2; ta.value = q;
-    ta.addEventListener('input', () => { AI_QUESTIONS[i] = ta.value; });
+    ta.addEventListener('input', () => {
+      AI_QUESTIONS[i] = ta.value; aiUpdateReady();
+    });
     const del = document.createElement('button');
     del.className = 'ghost aiQDel'; del.textContent = '\u2715';
     del.title = 'Remove this question';
     del.addEventListener('click', () => {
-      AI_QUESTIONS.splice(i, 1); aiRenderQuestions();
+      AI_QUESTIONS.splice(i, 1); aiRenderQuestions(); aiUpdateReady();
     });
     row.appendChild(ta); row.appendChild(del);
     box.appendChild(row);
@@ -2058,6 +2061,7 @@ async function aiLoadModels(){
       const envs = Object.values(j.providers).map(p => p.env).join(', ');
       box.innerHTML = '<span class="per">No AI provider configured. Set one of '
         + envs + ' on Cloud Run (see AI_AGENT_SETUP.md).</span>';
+      AI_MODELS_AVAILABLE = 0; aiUpdateReady();
       return;
     }
     box.innerHTML = '';
@@ -2075,11 +2079,15 @@ async function aiLoadModels(){
       lab.appendChild(t);
       box.appendChild(lab);
     });
+    AI_MODELS_AVAILABLE = avail.length;
     // if the default was not available, tick the first that is
     if(!box.querySelector('input:checked')){
       const first = box.querySelector('input:not([disabled])');
       if(first) first.checked = true;
     }
+    box.querySelectorAll('input[type=checkbox]')
+       .forEach(cb => cb.addEventListener('change', aiUpdateReady));
+    aiUpdateReady();
   }catch(e){
     box.innerHTML = '<span class="per">Could not load model list: ' +
                     e.message + '</span>';
@@ -2093,6 +2101,7 @@ async function aiInit(){
     AI_QUESTIONS = j.questions || [];
   }catch(e){ AI_QUESTIONS = []; }
   aiRenderQuestions();
+  aiUpdateReady();
   $('aiQAdd').addEventListener('click', () => {
     AI_QUESTIONS.push(''); aiRenderQuestions();
     const tas = $('aiQList').querySelectorAll('textarea');
@@ -2116,8 +2125,35 @@ async function aiInit(){
     }catch(e){ toast('Could not reload'); }
   });
   $('aiRun').addEventListener('click', runAiAssessment);
-  if(lastSiteBrief) $('aiRun').disabled = false;
+  aiUpdateReady();
 }
+// Decide whether the assessor can run, and - crucially - explain why not.
+// A disabled control with no explanation is a dead end for the user.
+let AI_MODELS_AVAILABLE = 0;
+function aiUpdateReady(){
+  const btn = $('aiRun'), note = $('aiReady');
+  if(!btn) return;
+  const reasons = [];
+  if(!lastSiteBrief)
+    reasons.push('generate a Site Brief first (the agent only reads that data)');
+  if(!AI_MODELS_AVAILABLE)
+    reasons.push('no AI provider is configured on the server \u2014 see AI_AGENT_SETUP.md');
+  const qs = AI_QUESTIONS.map(s => (s || '').trim()).filter(Boolean);
+  if(!qs.length) reasons.push('add at least one question');
+  const ticked = $('aiModels')
+    ? $('aiModels').querySelectorAll('input[type=checkbox]:checked').length : 0;
+  if(AI_MODELS_AVAILABLE && !ticked) reasons.push('tick at least one model');
+
+  btn.disabled = reasons.length > 0;
+  if(note){
+    note.innerHTML = reasons.length
+      ? '<b>To run:</b> ' + reasons.join(' \u00b7 ')
+      : 'Ready \u2014 ' + qs.length + ' question' + (qs.length > 1 ? 's' : '') +
+        ' across ' + ticked + ' model' + (ticked > 1 ? 's' : '') + '.';
+    note.style.color = reasons.length ? '#E9C46A' : '#84CC16';
+  }
+}
+
 function aiSelectedContext(){
   if(!lastSiteBrief) return null;
   const ctx = {};
@@ -5030,7 +5066,7 @@ $('siteRun').addEventListener('click', async () => {
     const j = await api('/site_brief', opts);
     lastSiteOB = j.open_buildings || null;
     lastSiteBrief = j;                       // grounding data for the AI assessor
-    if($('aiRun')) $('aiRun').disabled = false;
+    if(typeof aiUpdateReady === 'function') aiUpdateReady();
     if(!j.air || !j.periods || !j.noise)
       throw new Error('older backend version \u2014 deploy the latest main.py ' +
         '(the health endpoint should report deepseego-v11 or later)');
