@@ -1046,7 +1046,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v94</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v95</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1073,7 +1073,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v94";
+const DSG_VERSION = "deepseego-v95";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3132,34 +3132,48 @@ async function runRoadCheck(){
                             radius_m: +$('siteRadius').value,
                             region: siteRoiState})});
     roadCheckLayer.clearLayers();
+    const O = j.osm || {features: [], total_km: 0};
+    // GRIP first (underneath), dashed - the comparison layer
     j.features.forEach(f => {
+      if(!f.geometry) return;
+      L.geoJSON(f.geometry, {style: {color: '#E4572E', weight: 4, opacity: .5,
+                                     dashArray: '6 5'}})
+        .addTo(roadCheckLayer)
+        .bindTooltip('GRIP4 (comparison)<br>inside region: ' +
+          f.clip_len_m.toFixed(0) + ' m<br>whole road: ' +
+          (f.full_len_m / 1000).toFixed(1) + ' km', {sticky: true});
+    });
+    // OSM on top, solid yellow - this is what the brief reports
+    O.features.forEach(f => {
       if(!f.geometry) return;
       L.geoJSON(f.geometry, {style: {color: '#FFE01B', weight: 3, opacity: .95}})
         .addTo(roadCheckLayer)
-        .bindTooltip((f.type ? f.type + ' \u00b7 ' : '') +
-          'inside region: ' + f.clip_len_m.toFixed(0) + ' m' +
-          '<br>whole road: ' + (f.full_len_m / 1000).toFixed(1) + ' km',
-          {sticky: true});
+        .bindTooltip('OSM \u00b7 ' + (f.name || f.type) +
+          '<br>inside region: ' + f.clip_len_m.toFixed(0) + ' m', {sticky: true});
     });
     if(roadCheckLayer.getLayers().length)
       map.fitBounds(roadCheckLayer.getBounds().pad(0.2));
 
     const infl = j.total_unclipped_km && j.total_clipped_km
       ? (j.total_unclipped_km / j.total_clipped_km) : null;
-    toast('Roads drawn in yellow \u2014 ' + j.count + ' segments, ' +
-          j.total_clipped_km + ' km inside the region', 7000);
+    toast('OSM roads in yellow (' + O.total_km + ' km) \u00b7 GRIP4 dashed orange (' +
+          j.total_clipped_km + ' km)', 8000);
+    const cls = Object.entries(O.by_class_km || {})
+      .map(([k, v]) => `<tr><td style="padding-left:12px">${k}</td>` +
+                       `<td style="text-align:right">${v} km</td></tr>`).join('');
     const box = document.getElementById('roadCheckOut');
     if(box) box.innerHTML =
       '<div class="siteSec"><div class="paneLabel">Road length \u2014 verification</div>' +
       '<table class="aqTable">' +
-      '<tr><td>Segments counted</td><td style="text-align:right">' + j.count +
-        (j.capped ? ' (capped)' : '') + '</td></tr>' +
       '<tr><td>Region area</td><td style="text-align:right">' + j.area_km2 + ' km\u00b2</td></tr>' +
-      '<tr><td><b>Road length inside region</b></td><td style="text-align:right"><b>' +
-        j.total_clipped_km + ' km</b></td></tr>' +
-      '<tr><td>Density</td><td style="text-align:right">' +
-        j.density_km_per_km2 + ' km/km\u00b2</td></tr>' +
-      '<tr><td>If whole roads were summed</td><td style="text-align:right">' +
+      '<tr><td><b>OSM \u2014 reported</b></td><td style="text-align:right"><b>' +
+        O.total_km + ' km</b></td></tr>' +
+      '<tr><td>OSM density</td><td style="text-align:right">' +
+        (O.density_km_per_km2 == null ? '\u2014' : O.density_km_per_km2 + ' km/km\u00b2') +
+        '</td></tr>' + cls +
+      '<tr><td>GRIP4 \u2014 comparison</td><td style="text-align:right">' +
+        j.total_clipped_km + ' km</td></tr>' +
+      '<tr><td>If whole roads were summed (the old bug)</td><td style="text-align:right">' +
         j.total_unclipped_km + ' km' +
         (infl ? ' (\u00d7' + infl.toFixed(0) + ')' : '') + '</td></tr>' +
       '</table><p class="srcNote">' + j.explanation + '</p></div>';
