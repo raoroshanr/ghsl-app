@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v96"
+APP_VERSION = "deepseego-v97"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -4961,6 +4961,13 @@ def _parse_overpass(js, lat, lon):
     return out
 
 
+# Wall-clock budget for the optional OSM enrichment inside /site_brief.
+# Kept well under the 60 s proxy limit so a slow Overpass can never sink the
+# whole brief.
+OSM_ROAD_TIMEOUT = float(os.environ.get("OSM_ROAD_TIMEOUT", "14"))
+OSM_NOISE_TIMEOUT = float(os.environ.get("OSM_NOISE_TIMEOUT", "18"))
+
+
 def _seg_len_inside(p1, p2, clat, clon, R):
     """Length of the segment p1->p2 that lies within R metres of (clat, clon).
 
@@ -5019,7 +5026,7 @@ def _overpass_road_length(lat, lon, radius_m, include_paths=False):
              "unclassified|service|living_street|road")
     if include_paths:
         kinds += "|track|footway|path|pedestrian|cycleway"
-    q = (f'[out:json][timeout:40];'
+    q = (f'[out:json][timeout:{int(OSM_ROAD_TIMEOUT)}];'
          f'way["highway"~"^({kinds})$"](around:{int(radius_m)},{lat},{lon});'
          f'out geom;')
     js = _overpass(q)
@@ -5425,17 +5432,19 @@ def site_brief(q: SiteQuery):
     ]
 
     # collect the Overpass result that has been running all along
+    # Hard caps. Anything slower is dropped rather than risking the whole
+    # request: the brief is far more useful slightly incomplete than 502-ing.
     osm = None
     if _osm_future is not None:
         try:
-            osm = _osm_future.result(timeout=45)
+            osm = _osm_future.result(timeout=OSM_NOISE_TIMEOUT)
         except Exception:
             osm = None
     osm_roads = None
     try:
-        osm_roads = _road_future.result(timeout=50)
+        osm_roads = _road_future.result(timeout=OSM_ROAD_TIMEOUT)
     except Exception:
-        osm_roads = None
+        osm_roads = None          # falls back to the GRIP figure below
     _osm_pool.shutdown(wait=False)
     def nband(d, hi, mid):
         return None if d is None else ("High" if d < hi else
@@ -5507,7 +5516,9 @@ def site_brief(q: SiteQuery):
         "road_km": (round(osm_roads["total_m"] / 1000, 2) if osm_roads
                     else (None if g("road_m") is None
                           else round(g("road_m") / 1000, 2))),
-        "road_source": ("OpenStreetMap" if osm_roads else "GRIP4"),
+        "road_source": ("OpenStreetMap" if osm_roads else
+                        "GRIP4 (OSM lookup timed out - GRIP under-maps local "
+                        "streets, so this is likely an undercount)"),
         "road_km_grip": (None if g("road_m") is None
                          else round(g("road_m") / 1000, 2)),
         "road_ways": (osm_roads or {}).get("ways"),
