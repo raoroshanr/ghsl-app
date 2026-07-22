@@ -842,6 +842,7 @@ label.chk input{width:auto}
       <button id="siteRun" class="primary" disabled>Generate site brief</button>
       <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
       <button id="site3dBtn" style="width:100%;margin-top:6px" disabled>3D building view (extruded)</button>
+      <button id="siteRoadCheck" class="ghost" style="width:100%;margin-top:6px" disabled>Show the roads counted (verify length)</button>
 
     </section>
     </div><!-- /tab-site -->
@@ -1045,7 +1046,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v93</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v94</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1072,7 +1073,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v93";
+const DSG_VERSION = "deepseego-v94";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3112,6 +3113,60 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
+/* ---------- road-length verification ---------------------------------------
+   The brief reports a road length; this draws the EXACT segments that figure
+   was computed from, already clipped to the region, so the number can be
+   checked rather than trusted.
+--------------------------------------------------------------------------- */
+const roadCheckLayer = L.featureGroup().addTo(map);
+async function runRoadCheck(){
+  if(siteState.lat == null && !siteRoiState)
+    return toast('Pick a site point first');
+  const btn = $('siteRoadCheck'); const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Fetching roads\u2026';
+  Progress.start('Road length check', 'Clipping road segments to the region\u2026', 0);
+  try{
+    const j = await api('/road_check', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
+                            radius_m: +$('siteRadius').value,
+                            region: siteRoiState})});
+    roadCheckLayer.clearLayers();
+    j.features.forEach(f => {
+      if(!f.geometry) return;
+      L.geoJSON(f.geometry, {style: {color: '#FFE01B', weight: 3, opacity: .95}})
+        .addTo(roadCheckLayer)
+        .bindTooltip((f.type ? f.type + ' \u00b7 ' : '') +
+          'inside region: ' + f.clip_len_m.toFixed(0) + ' m' +
+          '<br>whole road: ' + (f.full_len_m / 1000).toFixed(1) + ' km',
+          {sticky: true});
+    });
+    if(roadCheckLayer.getLayers().length)
+      map.fitBounds(roadCheckLayer.getBounds().pad(0.2));
+
+    const infl = j.total_unclipped_km && j.total_clipped_km
+      ? (j.total_unclipped_km / j.total_clipped_km) : null;
+    toast('Roads drawn in yellow \u2014 ' + j.count + ' segments, ' +
+          j.total_clipped_km + ' km inside the region', 7000);
+    const box = document.getElementById('roadCheckOut');
+    if(box) box.innerHTML =
+      '<div class="siteSec"><div class="paneLabel">Road length \u2014 verification</div>' +
+      '<table class="aqTable">' +
+      '<tr><td>Segments counted</td><td style="text-align:right">' + j.count +
+        (j.capped ? ' (capped)' : '') + '</td></tr>' +
+      '<tr><td>Region area</td><td style="text-align:right">' + j.area_km2 + ' km\u00b2</td></tr>' +
+      '<tr><td><b>Road length inside region</b></td><td style="text-align:right"><b>' +
+        j.total_clipped_km + ' km</b></td></tr>' +
+      '<tr><td>Density</td><td style="text-align:right">' +
+        j.density_km_per_km2 + ' km/km\u00b2</td></tr>' +
+      '<tr><td>If whole roads were summed</td><td style="text-align:right">' +
+        j.total_unclipped_km + ' km' +
+        (infl ? ' (\u00d7' + infl.toFixed(0) + ')' : '') + '</td></tr>' +
+      '</table><p class="srcNote">' + j.explanation + '</p></div>';
+  }catch(e){ toast('Road check: ' + e.message, 9000); }
+  finally { Progress.done(); btn.disabled = false; btn.textContent = orig; }
+}
+
 /* ---------- Sun path (3D solar dome, projected onto the map) ----------
    The sun's track IS a 3D dome over the point. A Leaflet map is top-down, so
    we project that dome vertically onto the ground - which is exactly what a
@@ -3517,7 +3572,8 @@ function wipeMapAnalysis(){
   try {
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
-   slopeLayer, sunPathLayer, shadowLayer, createLayer].forEach(g => {
+   slopeLayer, sunPathLayer, shadowLayer, createLayer,
+   roadCheckLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -4893,6 +4949,7 @@ $('customWmsAdd').addEventListener('click', () => {
 /* ---------- Site Brief ---------- */
 function siteInit(){ /* region tools live in Explore; nothing to preload */ }
 if($('site3dBtn')) $('site3dBtn').addEventListener('click', open3DView);
+if($('siteRoadCheck')) $('siteRoadCheck').addEventListener('click', runRoadCheck);
 if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async () => {
   if(siteState.lat == null) return toast('Pick a site first');
   const btn = $('siteBuildingsBtn');
@@ -5191,6 +5248,8 @@ function enableSiteRun(){
   if(bb) bb.disabled = (siteState.lat == null);
   const tb = $('site3dBtn');
   if(tb) tb.disabled = (siteState.lat == null);
+  const rc = $('siteRoadCheck');
+  if(rc) rc.disabled = (siteState.lat == null && !siteRoiState);
 }
 const _hasRoiUI = !!$('siteRoiRect');
 function clearSiteRegions(kind){
@@ -5298,6 +5357,7 @@ $('siteRun').addEventListener('click', async () => {
     const N = j.noise;
 
     $('siteWrap').innerHTML = `
+      <div id="roadCheckOut"></div>
       <div class="siteSec">
         <div class="paneLabel">Region details</div>
         <table class="aqTable">
