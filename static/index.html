@@ -1046,7 +1046,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v95</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v96</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1073,7 +1073,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v95";
+const DSG_VERSION = "deepseego-v96";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1704,30 +1704,47 @@ let searchPin = null;
    It is still Nominatim, so not Google-grade, but far more usable.
 --------------------------------------------------------------------------- */
 async function geocode(query, {limit = 8, biasView = true} = {}){
-  const p = new URLSearchParams({
-    format: 'jsonv2', q: query, limit: String(limit),
-    addressdetails: '1', 'accept-language': 'en',
-    countrycodes: 'in'                       // India-first
-  });
-  if(biasView && typeof map !== 'undefined'){
-    const b = map.getBounds();
-    p.set('viewbox', [b.getWest(), b.getNorth(), b.getEast(), b.getSouth()].join(','));
-    p.set('bounded', '0');                    // prefer the view, don't restrict
-  }
-  let res = [];
-  try{
-    const r = await fetch('https://nominatim.openstreetmap.org/search?' + p.toString(),
-      {headers: {'Accept': 'application/json'}});
-    res = await r.json();
-  }catch(e){ return []; }
-  // if India-restricted found nothing, retry worldwide
-  if(!res.length){
-    p.delete('countrycodes');
+  // one attempt; returns [] on any failure so callers never see an exception
+  async function tryFetch(params){
     try{
-      const r = await fetch('https://nominatim.openstreetmap.org/search?' + p.toString());
-      res = await r.json();
+      const r = await fetch('https://nominatim.openstreetmap.org/search?' +
+                            params.toString());
+      if(!r.ok) return [];
+      const j = await r.json();
+      // Nominatim returns an OBJECT (not an array) on error - e.g. a malformed
+      // viewbox. Guard, or .map() below throws and the search "fails".
+      return Array.isArray(j) ? j : [];
     }catch(e){ return []; }
   }
+  const base = () => new URLSearchParams({
+    format: 'jsonv2', q: query, limit: String(limit),
+    addressdetails: '1', 'accept-language': 'en'
+  });
+
+  // 1) India-biased, biased to the current view
+  const p = base();
+  p.set('countrycodes', 'in');
+  if(biasView && typeof map !== 'undefined' && map.getBounds){
+    try{
+      const b = map.getBounds();
+      const cl = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      const w = cl(b.getWest(), -180, 180), e = cl(b.getEast(), -180, 180);
+      const s = cl(b.getSouth(), -90, 90),  n = cl(b.getNorth(), -90, 90);
+      if(isFinite(w) && isFinite(e) && isFinite(s) && isFinite(n) && w < e && s < n){
+        p.set('viewbox', [w, n, e, s].join(','));
+        p.set('bounded', '0');       // prefer the view, do not restrict to it
+      }
+    }catch(e){ /* no viewbox is fine */ }
+  }
+  let res = await tryFetch(p);
+
+  // 2) India, no viewbox
+  if(!res.length){
+    const p2 = base(); p2.set('countrycodes', 'in');
+    res = await tryFetch(p2);
+  }
+  // 3) worldwide
+  if(!res.length) res = await tryFetch(base());
   return (res || []).map(x => ({
     lat: +x.lat, lon: +x.lon,
     label: _shortPlace(x),
