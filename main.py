@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v88"
+APP_VERSION = "deepseego-v89"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -4749,6 +4749,40 @@ class SiteQuery(BaseModel):
 
 @app.post("/site_brief")
 @ee_errors
+def _eval_stats_resiliently(stats: dict):
+    """Evaluate a dict of Earth Engine values.
+
+    Fast path: one round-trip for everything. If that throws (one bad layer
+    poisons the whole batch), retry in small groups, then individually for a
+    failing group - so a single unavailable dataset costs us that one field
+    instead of the entire site brief.
+
+    Returns (values, failed_keys).
+    """
+    try:
+        return ee.Dictionary(stats).getInfo(), []
+    except Exception:
+        pass
+
+    out, failed = {}, []
+    keys = list(stats.keys())
+    GROUP = 4
+    for i in range(0, len(keys), GROUP):
+        chunk = keys[i:i + GROUP]
+        try:
+            out.update(ee.Dictionary({k: stats[k] for k in chunk}).getInfo())
+            continue
+        except Exception:
+            pass
+        for k in chunk:                      # isolate the offender
+            try:
+                out.update(ee.Dictionary({k: stats[k]}).getInfo())
+            except Exception:
+                out[k] = None
+                failed.append(k)
+    return out, failed
+
+
 def site_brief(q: SiteQuery):
     """Historical environmental snapshot for a point. Every component reports
     its exact data period. Single batched Earth Engine round-trip + one OSM
@@ -4881,7 +4915,7 @@ def site_brief(q: SiteQuery):
     except Exception:
         altitude_m = None
 
-    info = ee.Dictionary(stats).getInfo()      # ONE EE round-trip
+    info, failed_keys = _eval_stats_resiliently(stats)
 
     def g(k):
         v = info.get(k)
@@ -4986,6 +5020,9 @@ def site_brief(q: SiteQuery):
         "historical_note": ("All values are historical satellite / reanalysis "
                             "records for the periods shown - not live "
                             "measurements."),
+        # datasets that could not be evaluated for this location; the rest of
+        # the brief is still valid. Reported rather than silently blank.
+        "unavailable": failed_keys,
         "periods": {
             "climate": "ERA5-Land monthly normals, 2015-2024",
             "lst": "MODIS Terra 8-day LST, 2023 annual mean",
