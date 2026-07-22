@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v90"
+APP_VERSION = "deepseego-v91"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2224,9 +2224,18 @@ AI_MODEL = os.environ.get("AI_MODEL", "claude-sonnet-4-5")
 # environment variable; models whose key is absent are reported as unavailable
 # rather than failing at request time.
 AI_PROVIDERS = {
-    "anthropic": {"env": "ANTHROPIC_API_KEY", "label": "Anthropic"},
-    "openai":    {"env": "OPENAI_API_KEY",    "label": "OpenAI"},
-    "google":    {"env": "GEMINI_API_KEY",    "label": "Google"},
+    "anthropic": {"env": "ANTHROPIC_API_KEY", "label": "Anthropic",
+                  "tier": "paid",
+                  "tier_note": "Pay-as-you-go: every call is billed."},
+    "openai":    {"env": "OPENAI_API_KEY", "label": "OpenAI",
+                  "tier": "paid",
+                  "tier_note": "Pay-as-you-go: every call is billed."},
+    "google":    {"env": "GEMINI_API_KEY", "label": "Google",
+                  "tier": "free_tier",
+                  "tier_note": ("Google AI Studio keys include a free tier with "
+                                "tight rate limits - a 429 means that quota is "
+                                "used up, not that something is broken. Enabling "
+                                "billing lifts the limits (and starts charging).")},
 }
 # Fallback only - used if a provider's model-list call fails. Kept deliberately
 # short; the live list is what the UI normally shows.
@@ -2552,6 +2561,8 @@ def ai_models(refresh: int = 0):
         out.append({"id": mid, "provider": prov,
                     "provider_label": AI_PROVIDERS[prov]["label"],
                     "label": label,
+                    "tier": AI_PROVIDERS[prov]["tier"],
+                    "tier_note": AI_PROVIDERS[prov]["tier_note"],
                     "available": bool(_provider_key(prov))})
     # pick a sensible default that actually exists right now
     default = AI_MODEL if AI_MODEL in live else None
@@ -2563,6 +2574,7 @@ def ai_models(refresh: int = 0):
                 break
     return {"models": out, "default": default,
             "providers": {p: {"label": v["label"], "env": v["env"],
+                              "tier": v["tier"], "tier_note": v["tier_note"],
                               "configured": bool(_provider_key(p))}
                           for p, v in AI_PROVIDERS.items()}}
 AI_QUESTIONS_BLOB = "ai/site_questions.json"
@@ -2654,6 +2666,102 @@ def ai_questions_set(body: AIQuestionsBody):
         raise HTTPException(status_code=500,
                             detail=f"Could not save questions: {e}")
     return {"saved": len(qs), "questions": qs}
+
+
+class ExtractTextQuery(BaseModel):
+    filename: str = ""
+    data_b64: str = ""          # sent as base64 so no multipart dependency
+    max_chars: int = 20000
+
+
+@app.post("/extract_text")
+def extract_text(q: ExtractTextQuery):
+    """Pull plain text out of an uploaded reference document.
+
+    Supported without extra packages: .txt .md .csv .json .geojson
+    PDF needs `pypdf`, DOCX needs `python-docx`; if either is missing we say so
+    plainly rather than failing obscurely.
+    """
+    try:
+        raw = base64.b64decode(q.data_b64 or "", validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not decode the file.")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(raw) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File is larger than 12 MB.")
+
+    name = (q.filename or "").lower()
+    limit = int(max(1000, min(60000, q.max_chars or 20000)))
+
+    def clip(t):
+        t = re.sub(r"[ \t]+", " ", (t or "")).strip()
+        return (t[:limit] + "\n\n[... truncated ...]") if len(t) > limit else t
+
+    if name.endswith(".pdf"):
+        try:
+            import pypdf
+        except ImportError:
+            raise HTTPException(status_code=501, detail=(
+                "PDF text extraction needs the 'pypdf' package - add it to "
+                "requirements.txt and redeploy. Meanwhile you can paste the "
+                "text directly."))
+        try:
+            rd = pypdf.PdfReader(io.BytesIO(raw))
+            if getattr(rd, "is_encrypted", False):
+                try:
+                    rd.decrypt("")
+                except Exception:
+                    raise HTTPException(status_code=400,
+                                        detail="That PDF is password-protected.")
+            pages = []
+            for i, p in enumerate(rd.pages):
+                if i >= 80:
+                    break
+                pages.append(p.extract_text() or "")
+            text = "\n".join(pages)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400,
+                                detail=f"Could not read that PDF: {e}")
+        if not text.strip():
+            raise HTTPException(status_code=422, detail=(
+                "No selectable text found - this looks like a scanned PDF. "
+                "OCR it first, or paste the text in manually."))
+        return {"filename": q.filename, "chars": len(text), "text": clip(text),
+                "pages": len(rd.pages)}
+
+    if name.endswith(".docx"):
+        try:
+            import docx
+        except ImportError:
+            raise HTTPException(status_code=501, detail=(
+                "DOCX extraction needs the 'python-docx' package - add it to "
+                "requirements.txt and redeploy."))
+        try:
+            d = docx.Document(io.BytesIO(raw))
+            text = "\n".join(p.text for p in d.paragraphs)
+        except Exception as e:
+            raise HTTPException(status_code=400,
+                                detail=f"Could not read that DOCX: {e}")
+        return {"filename": q.filename, "chars": len(text), "text": clip(text)}
+
+    # NB: do not include "" in this tuple - every string ends with "",
+    # which would make any file type match here.
+    if name.endswith((".txt", ".md", ".csv", ".json", ".geojson", ".log")) \
+            or "." not in name.rsplit("/", 1)[-1]:
+        for enc in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return {"filename": q.filename, "chars": len(raw),
+                        "text": clip(raw.decode(enc))}
+            except Exception:
+                continue
+        raise HTTPException(status_code=400,
+                            detail="Could not decode that text file.")
+
+    raise HTTPException(status_code=415, detail=(
+        "Unsupported file type. Use .txt, .md, .csv, .json, .pdf or .docx."))
 
 
 @app.post("/ai_ask")
