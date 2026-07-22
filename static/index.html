@@ -1045,7 +1045,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v92</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v93</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1072,7 +1072,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v92";
+const DSG_VERSION = "deepseego-v93";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1427,8 +1427,8 @@ L.control.layers(
 const AiBtn = L.Control.extend({
   onAdd: function(){
     const a = L.DomUtil.create('a', 'leaflet-bar dsgAi');
-    a.href = '#'; a.title = 'AI Consultant \u2014 ask questions about any analysis';
-    a.innerHTML = 'AI Consultant';
+    a.href = '#'; a.title = 'Discuss with AI \u2014 ask questions about any analysis';
+    a.innerHTML = 'Discuss with AI';
     L.DomEvent.on(a, 'click', L.DomEvent.stop)
               .on(a, 'click', () => aiOpen());
     return a;
@@ -2168,7 +2168,10 @@ async function aiLoadModels(force){
         const cb = document.createElement('input');
         cb.type = 'checkbox'; cb.value = m.id;
         cb.disabled = !m.available;
-        cb.checked = m.available && m.id === j.default;
+        // default to a FREE-tier model so an accidental run costs nothing;
+        // paid models are opt-in.
+        cb.checked = m.available && m.tier === 'free_tier' &&
+                     !box.querySelector('input:checked');
         lab.appendChild(cb);
         const t = document.createElement('span');
         t.textContent = m.label + '  \u00b7 ' + m.provider_label +
@@ -2180,9 +2183,13 @@ async function aiLoadModels(force){
       });
     });
     AI_MODELS_AVAILABLE = avail.length;
-    // if the default was not available, tick the first that is
+    // nothing free available -> fall back to the reported default, then to the
+    // first usable model, so the panel is never left with nothing ticked.
     if(!box.querySelector('input:checked')){
-      const first = box.querySelector('input:not([disabled])');
+      const pref = j.default
+        ? box.querySelector('input[value="' + j.default + '"]:not([disabled])')
+        : null;
+      const first = pref || box.querySelector('input:not([disabled])');
       if(first) first.checked = true;
     }
     box.querySelectorAll('input[type=checkbox]')
@@ -5226,13 +5233,34 @@ $('siteRun').addEventListener('click', async () => {
   $('drawerSub').textContent = 'Site Brief \u00b7 ' +
     plat.toFixed(4) + ', ' + plon.toFixed(4);
   siteCharts.forEach(c => c.destroy()); siteCharts = [];
-  $('siteWrap').innerHTML = '<p class="hint">Gathering climate, air quality, land cover, roads and noise sources\u2026</p>';
+  $('siteWrap').innerHTML = '<p class="hint">Gathering climate, air quality, land cover and buildings\u2026</p>';
+  Progress.start('Site brief', 'Reading satellite and climate data\u2026', 2);
   const opts = {method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({lat: plat, lon: plon,
                                       radius_m: +$('siteRadius').value,
-                                      region: siteRoiState})};
+                                      region: siteRoiState,
+                                      skip_osm: true})};   // phase 2 fetches this
   try{
     const j = await api('/site_brief', opts);
+    Progress.step('Scanning nearby noise sources\u2026');
+    // phase 2: the OSM scan is the slow part, so it runs AFTER the brief is
+    // already on screen rather than holding everything up.
+    setTimeout(async () => {
+      try{
+        const ns = await api('/noise_sources', {method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({lat: plat, lon: plon})});
+        if(ns){
+          j.noise = Object.assign({}, j.noise || {}, ns, {osm_ok: true});
+          lastSiteBrief = j;
+          // re-register so the AI discussion can use the noise data too
+          aiRegister('site_brief',
+                     'Site brief (land cover, climate, air, buildings, noise)', j);
+        }
+      }catch(e){
+        // the brief is already on screen and still valid without it
+      }finally{ Progress.done(); }
+    }, 0);
     lastSiteOB = j.open_buildings || null;
     lastSiteBrief = j;                       // grounding data for the AI assessor
     aiRegister('site_brief', 'Site brief (land cover, climate, air, buildings)', j);
@@ -5316,7 +5344,10 @@ $('siteRun').addEventListener('click', async () => {
     siteChart('cWind', L, mo.map(m => m.wind_ms), '#7FD0BC');
     siteChart('cSolar', L, mo.map(m => m.solar_kwh_m2_day), '#E9C46A');
     siteChart('cMrt', L, mo.map(m => m.mrt_c), '#F15BB5');
-  }catch(e){ toast('Site brief: ' + e.message, 9000); }
+  }catch(e){
+    toast('Site brief: ' + e.message, 9000);
+    Progress.done();          // phase 2 never starts, so close it here
+  }
   btn.disabled = false; btn.textContent = 'Generate site brief';
 });
 
@@ -5346,7 +5377,7 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
   <div id="aiModal">
     <div id="aiModalCard">
       <div id="aiModalHead">
-        <h2>AI Consultant</h2>
+        <h2>Discuss with AI</h2>
         <button id="aiModalClose">&#10005; Close</button>
       </div>
       <p class="hint">Answers <b>your</b> questions using <b>only</b> the analysis results you tick. It is instructed never to invent a number, and every figure it cites is checked against your data.</p>
