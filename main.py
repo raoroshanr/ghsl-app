@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v95"
+APP_VERSION = "deepseego-v96"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5323,9 +5323,14 @@ def site_brief(q: SiteQuery):
     # Overpass is independent of Earth Engine and is typically the slowest
     # single step, so it runs concurrently with all the EE work below and is
     # collected at the end. This overlaps its entire duration.
-    _osm_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _osm_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     _osm_future = (None if q.skip_osm
                    else _osm_pool.submit(_overpass_noise, q.lat, q.lon))
+    # OSM road length: GRIP4 under-maps local streets, so this is the figure we
+    # report. Always measured (it is fast and is the headline number), and runs
+    # concurrently with all the Earth Engine work.
+    _road_future = _osm_pool.submit(_overpass_road_length, q.lat, q.lon,
+                                    max(float(q.radius_m), 100.0))
 
     cen_lat, cen_lon = q.lat, q.lon
     try:
@@ -5426,6 +5431,11 @@ def site_brief(q: SiteQuery):
             osm = _osm_future.result(timeout=45)
         except Exception:
             osm = None
+    osm_roads = None
+    try:
+        osm_roads = _road_future.result(timeout=50)
+    except Exception:
+        osm_roads = None
     _osm_pool.shutdown(wait=False)
     def nband(d, hi, mid):
         return None if d is None else ("High" if d < hi else
