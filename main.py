@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v91"
+APP_VERSION = "deepseego-v92"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -4981,8 +4981,6 @@ class SiteQuery(BaseModel):
     skip_osm: bool = False                   # skip the slow OSM noise query
 
 
-@app.post("/site_brief")
-@ee_errors
 def _eval_stats_resiliently(stats: dict):
     """Evaluate a dict of Earth Engine values.
 
@@ -5017,6 +5015,8 @@ def _eval_stats_resiliently(stats: dict):
     return out, failed
 
 
+@app.post("/site_brief")
+@ee_errors
 def site_brief(q: SiteQuery):
     """Historical environmental snapshot for a point. Every component reports
     its exact data period. Single batched Earth Engine round-trip + one OSM
