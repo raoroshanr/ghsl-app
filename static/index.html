@@ -1027,7 +1027,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v89</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v90</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1054,7 +1054,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v89";
+const DSG_VERSION = "deepseego-v90";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -2116,11 +2116,11 @@ function aiRenderQuestions(){
     box.appendChild(row);
   });
 }
-async function aiLoadModels(){
+async function aiLoadModels(force){
   const box = $('aiModels');
   if(!box) return;
   try{
-    const j = await api('/ai_models');
+    const j = await api('/ai_models' + (force ? '?refresh=1' : ''));
     const avail = j.models.filter(m => m.available);
     if(!avail.length){
       const envs = Object.values(j.providers).map(p => p.env).join(', ');
@@ -2191,6 +2191,13 @@ async function aiInit(){
   });
   $('aiRun').addEventListener('click', runAiAssessment);
   $('aiModalClose').addEventListener('click', aiClose);
+  $('aiModelsRefresh').addEventListener('click', async () => {
+    const b = $('aiModelsRefresh'); const o = b.textContent;
+    b.disabled = true; b.textContent = 'Refreshing\u2026';
+    await aiLoadModels(true);
+    b.disabled = false; b.textContent = o;
+    toast('Model list refreshed from the providers');
+  });
   $('aiModal').addEventListener('click', ev => {
     if(ev.target && ev.target.id === 'aiModal') aiClose();   // click the backdrop
   });
@@ -5266,8 +5273,11 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <label class="fld" for="aiRef">2 &middot; Reference material (optional)</label>
       <textarea id="aiRef" rows="3" placeholder="Paste authoritative text the agent may rely on \u2014 e.g. an NBC clause, a design brief, your own sensor readings."></textarea>
 
-      <label class="fld">3 &middot; Models <span class="per">(tick 2+ to cross-check)</span></label>
+      <label class="fld">3 &middot; Models <span class="per">(tick 2+ to cross-check)</span>
+        <button id="aiModelsRefresh" class="ghost" style="float:right;padding:2px 9px;font-size:10.5px;text-transform:none;letter-spacing:0">Refresh list</button>
+      </label>
       <div id="aiModels" class="aiSrcBox"><span class="per">Loading models&hellip;</span></div>
+      <div class="hint" style="font-size:10.5px;margin-top:4px">Fetched live from each provider, so retired models never appear.</div>
 
       <label class="fld">4 &middot; Your fixed questions</label>
       <div id="aiQList"></div>
