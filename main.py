@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v89"
+APP_VERSION = "deepseego-v90"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2228,16 +2228,97 @@ AI_PROVIDERS = {
     "openai":    {"env": "OPENAI_API_KEY",    "label": "OpenAI"},
     "google":    {"env": "GEMINI_API_KEY",    "label": "Google"},
 }
-AI_MODELS = {
-    # id                     provider      human label
+# Fallback only - used if a provider's model-list call fails. Kept deliberately
+# short; the live list is what the UI normally shows.
+AI_MODELS_FALLBACK = {
     "claude-sonnet-4-5":   ("anthropic", "Claude Sonnet 4.5"),
     "claude-opus-4-1":     ("anthropic", "Claude Opus 4.1"),
-    "claude-haiku-4-5":    ("anthropic", "Claude Haiku 4.5"),
     "gpt-4o":              ("openai",    "GPT-4o"),
-    "gpt-4o-mini":         ("openai",    "GPT-4o mini"),
-    "gemini-2.0-flash":    ("google",    "Gemini 2.0 Flash"),
-    "gemini-1.5-pro":      ("google",    "Gemini 1.5 Pro"),
+    "gemini-2.5-flash":    ("google",    "Gemini 2.5 Flash"),
 }
+_MODEL_CACHE = {"at": 0, "models": None}
+_MODEL_TTL = 900          # seconds
+
+
+def _prettify_model(mid):
+    s = mid.replace("models/", "")
+    return s.replace("-", " ").replace("gpt", "GPT").title() \
+            .replace("Gpt", "GPT").replace("Ai", "AI")
+
+
+def _list_anthropic():
+    req = UrlRequest("https://api.anthropic.com/v1/models?limit=100",
+                     headers={"x-api-key": _provider_key("anthropic"),
+                              "anthropic-version": "2023-06-01"})
+    with urlopen(req, timeout=20) as r:
+        d = json.loads(r.read())
+    return [(m["id"], m.get("display_name") or _prettify_model(m["id"]))
+            for m in d.get("data", [])]
+
+
+def _list_openai():
+    req = UrlRequest("https://api.openai.com/v1/models",
+                     headers={"authorization": "Bearer " + _provider_key("openai")})
+    with urlopen(req, timeout=20) as r:
+        d = json.loads(r.read())
+    out = []
+    for m in d.get("data", []):
+        mid = m.get("id", "")
+        # chat-capable families only; skip embeddings/audio/image/moderation
+        if not mid.startswith(("gpt-", "o1", "o3", "o4")):
+            continue
+        if any(x in mid for x in ("embedding", "audio", "realtime", "image",
+                                  "tts", "whisper", "moderation", "transcribe",
+                                  "search", "instruct")):
+            continue
+        out.append((mid, _prettify_model(mid)))
+    return out
+
+
+def _list_google():
+    url = ("https://generativelanguage.googleapis.com/v1beta/models?key="
+           + _provider_key("google") + "&pageSize=200")
+    with urlopen(UrlRequest(url), timeout=20) as r:
+        d = json.loads(r.read())
+    out = []
+    for m in d.get("models", []):
+        methods = m.get("supportedGenerationMethods") or []
+        if "generateContent" not in methods:
+            continue                       # e.g. embedding-only models
+        mid = (m.get("name") or "").replace("models/", "")
+        if not mid or any(x in mid for x in ("embedding", "aqa", "imagen",
+                                             "veo", "tts", "learnlm")):
+            continue
+        out.append((mid, m.get("displayName") or _prettify_model(mid)))
+    return out
+
+
+_MODEL_LISTERS = {"anthropic": _list_anthropic, "openai": _list_openai,
+                  "google": _list_google}
+
+
+def _live_models(force=False):
+    """{model_id: (provider, label)} from the providers themselves."""
+    now = time.time()
+    if (not force and _MODEL_CACHE["models"] is not None
+            and now - _MODEL_CACHE["at"] < _MODEL_TTL):
+        return _MODEL_CACHE["models"]
+    out = {}
+    for prov, lister in _MODEL_LISTERS.items():
+        if not _provider_key(prov):
+            continue
+        try:
+            for mid, label in lister():
+                out[mid] = (prov, label)
+        except Exception:
+            # provider unreachable or key invalid - fall back for that provider
+            for mid, (p, label) in AI_MODELS_FALLBACK.items():
+                if p == prov:
+                    out[mid] = (p, label)
+    if not out:
+        out = dict(AI_MODELS_FALLBACK)
+    _MODEL_CACHE.update({"at": now, "models": out})
+    return out
 
 
 def _provider_key(provider):
@@ -2304,10 +2385,39 @@ _AI_CALLERS = {"anthropic": _call_anthropic, "openai": _call_openai,
                "google": _call_google}
 
 
+def _explain_provider_error(raw, model_id):
+    """Turn a provider's error payload into one actionable sentence."""
+    txt = raw if isinstance(raw, str) else str(raw)
+    code, msg = None, ""
+    try:
+        j = json.loads(txt)
+        err = j.get("error", j) if isinstance(j, dict) else {}
+        code = err.get("code") or err.get("status")
+        msg = err.get("message", "") or ""
+    except Exception:
+        msg = txt[:300]
+    low = (str(code) + " " + msg).lower()
+
+    if "429" in low or "quota" in low or "rate limit" in low:
+        return ("Quota or rate limit reached for this provider. Check your plan "
+                "and billing, or wait and retry. (Free tiers are very limited.)")
+    if "404" in low or "not found" in low or "does not exist" in low:
+        return (f"The model '{model_id}' is no longer served by this provider. "
+                "Reopen the panel to refresh the model list and pick a current one.")
+    if "401" in low or "invalid api key" in low or "unauthorized" in low \
+            or "permission" in low:
+        return "The API key was rejected. Check the key set on Cloud Run."
+    if "billing" in low or "credit" in low or "payment" in low:
+        return "The provider reports a billing problem on this account."
+    if "overloaded" in low or "503" in low or "unavailable" in low:
+        return "The provider is temporarily overloaded. Try again shortly."
+    return (msg or txt)[:300]
+
+
 def _run_model(model_id, system, user, max_tokens):
     """Returns a result dict; never raises - a failed model is reported, so one
     dead provider cannot sink the whole cross-check."""
-    prov = (AI_MODELS.get(model_id) or (None, None))[0]
+    prov = (_live_models().get(model_id) or (None, None))[0]
     if not prov:
         return {"model": model_id, "ok": False, "error": "Unknown model."}
     if not _provider_key(prov):
@@ -2318,13 +2428,13 @@ def _run_model(model_id, system, user, max_tokens):
         return {"model": model_id, "provider": prov, "ok": True,
                 "answer": text, "usage": usage}
     except Exception as e:
-        detail = f"{type(e).__name__}: {e}"
+        raw = f"{type(e).__name__}: {e}"
         try:
-            detail = e.read().decode()[:300]
+            raw = e.read().decode()
         except Exception:
             pass
         return {"model": model_id, "provider": prov, "ok": False,
-                "error": detail}
+                "error": _explain_provider_error(raw, model_id)}
 
 
 def _collect_numbers(obj, out=None):
@@ -2434,15 +2544,24 @@ def _disagreements(results):
 
 
 @app.get("/ai_models")
-def ai_models():
+def ai_models(refresh: int = 0):
     """Which models are usable right now (i.e. their provider key is set)."""
+    live = _live_models(force=bool(refresh))
     out = []
-    for mid, (prov, label) in AI_MODELS.items():
+    for mid, (prov, label) in sorted(live.items(), key=lambda kv: kv[1][1]):
         out.append({"id": mid, "provider": prov,
                     "provider_label": AI_PROVIDERS[prov]["label"],
                     "label": label,
                     "available": bool(_provider_key(prov))})
-    return {"models": out, "default": AI_MODEL,
+    # pick a sensible default that actually exists right now
+    default = AI_MODEL if AI_MODEL in live else None
+    if default is None:
+        for pref in ("anthropic", "openai", "google"):
+            cand = [m for m, (p, _) in live.items() if p == pref]
+            if cand:
+                default = sorted(cand)[0]
+                break
+    return {"models": out, "default": default,
             "providers": {p: {"label": v["label"], "env": v["env"],
                               "configured": bool(_provider_key(p))}
                           for p, v in AI_PROVIDERS.items()}}
@@ -2568,7 +2687,14 @@ def ai_ask(q: AIAskQuery):
           "<your answer>\n\n"
           "QUESTIONS:\n" + numbered)
 
-    models = [m for m in (q.models or []) if m in AI_MODELS] or [AI_MODEL]
+    live = _live_models()
+    models = [m for m in (q.models or []) if m in live]
+    if not models:
+        models = [AI_MODEL] if AI_MODEL in live else (
+            sorted(live)[:1] if live else [])
+    if not models:
+        raise HTTPException(status_code=503, detail=(
+            "No usable model found for the configured providers."))
     models = list(dict.fromkeys(models))[:4]        # de-dup, cap at 4
 
     # Run them in PARALLEL - a cross-check should not cost N times the wall time.
