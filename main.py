@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v100"
+APP_VERSION = "deepseego-v101"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -4738,6 +4738,91 @@ out geom tags 400;"""
 class WeatherQuery(BaseModel):
     lat: float
     lon: float
+
+
+class WeatherGridQuery(BaseModel):
+    west: float
+    south: float
+    east: float
+    north: float
+    n: int = 7          # grid is n x n points
+
+
+@app.post("/weather_grid")
+def weather_grid(q: WeatherGridQuery):
+    """Live weather sampled on a grid across the map view.
+
+    Open-Meteo accepts MANY coordinates in one request, so an n x n grid costs a
+    single call rather than n^2 of them. Keyless and free for non-commercial use.
+    Values are model output (ICON/GFS blend) assimilating nearby observations -
+    not radar, and not station measurements at each grid point.
+    """
+    n = max(3, min(10, int(q.n or 7)))
+    w, e = min(q.west, q.east), max(q.west, q.east)
+    s, nr = min(q.south, q.north), max(q.south, q.north)
+    # guard against absurd extents (a world-wide grid is meaningless here)
+    if (e - w) > 25 or (nr - s) > 25:
+        raise HTTPException(status_code=400, detail=(
+            "Zoom in before loading the weather grid - the view spans too "
+            "large an area for a meaningful sample."))
+
+    lats, lons = [], []
+    for i in range(n):
+        for j in range(n):
+            lats.append(round(s + (nr - s) * (i / (n - 1)), 4))
+            lons.append(round(w + (e - w) * (j / (n - 1)), 4))
+
+    url = ("https://api.open-meteo.com/v1/forecast?"
+           + "latitude=" + ",".join(str(x) for x in lats)
+           + "&longitude=" + ",".join(str(x) for x in lons)
+           + "&current=temperature_2m,precipitation,wind_speed_10m,"
+             "wind_direction_10m,relative_humidity_2m,cloud_cover"
+           + "&wind_speed_unit=ms"      # default is km/h; keep m/s app-wide
+           + "&timezone=auto")
+    try:
+        d = _get_json(url)
+    except Exception as ex:
+        raise HTTPException(status_code=502,
+                            detail=f"Open-Meteo did not respond: {ex}")
+
+    # a single location returns an object; many return a list
+    blocks = d if isinstance(d, list) else [d]
+    pts = []
+    for k, b in enumerate(blocks):
+        cur = (b or {}).get("current") or {}
+        if not cur:
+            continue
+        pts.append({
+            "lat": b.get("latitude", lats[k] if k < len(lats) else None),
+            "lon": b.get("longitude", lons[k] if k < len(lons) else None),
+            "temp_c": cur.get("temperature_2m"),
+            "precip_mm": cur.get("precipitation"),
+            "wind_ms": cur.get("wind_speed_10m"),
+            "wind_from_deg": cur.get("wind_direction_10m"),
+            "rh_pct": cur.get("relative_humidity_2m"),
+            "cloud_pct": cur.get("cloud_cover"),
+            "time": cur.get("time"),
+        })
+    if not pts:
+        raise HTTPException(status_code=502,
+                            detail="Open-Meteo returned no grid values.")
+
+    def rng(key):
+        vals = [p[key] for p in pts if isinstance(p.get(key), (int, float))]
+        return {"min": min(vals), "max": max(vals)} if vals else None
+
+    return {
+        "points": pts, "n": n, "count": len(pts),
+        "bounds": {"west": w, "south": s, "east": e, "north": nr},
+        "ranges": {"temp_c": rng("temp_c"), "wind_ms": rng("wind_ms"),
+                   "precip_mm": rng("precip_mm")},
+        "units": {"temp_c": "\u00b0C", "wind_ms": "m/s",
+                  "precip_mm": "mm (last hour)"},
+        "source": "Open-Meteo current conditions (ICON/GFS blend), keyless",
+        "note": ("Model output assimilating nearby observations - not radar and "
+                 "not a station reading at each grid point. Wind is the 10 m "
+                 "value; direction is where the wind is coming FROM."),
+    }
 
 
 @app.post("/weather_live")
