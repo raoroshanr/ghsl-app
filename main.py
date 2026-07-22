@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v92"
+APP_VERSION = "deepseego-v93"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5123,31 +5123,47 @@ def site_brief(q: SiteQuery):
     # region metadata for the header (name, area, centroid, altitude)
     region_area_km2 = None
     region_name = None
+    # Overpass is independent of Earth Engine and is typically the slowest
+    # single step, so it runs concurrently with all the EE work below and is
+    # collected at the end. This overlaps its entire duration.
+    _osm_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _osm_future = (None if q.skip_osm
+                   else _osm_pool.submit(_overpass_noise, q.lat, q.lon))
+
     cen_lat, cen_lon = q.lat, q.lon
     try:
-        area_m2 = ring.area(10).getInfo()
+        # area + centroid in ONE round-trip instead of two
+        _geo = ee.Dictionary({
+            "area": ring.area(10),
+            "cen": ring.centroid(10).coordinates(),
+        }).getInfo()
+        area_m2 = _geo.get("area")
         region_area_km2 = round(area_m2 / 1e6, 3)
-        c = ring.centroid(10).coordinates().getInfo()
+        c = _geo.get("cen")
         cen_lon, cen_lat = c[0], c[1]
     except Exception:
         pass
+    # Region name and altitude are independent of each other, so ask for both
+    # in a single round-trip rather than two sequential ones.
+    altitude_m = None
     try:
-        gaul = (ee.FeatureCollection("FAO/GAUL/2015/level2")
-                .filterBounds(ee.Geometry.Point([cen_lon, cen_lat])).first())
-        gi = gaul.getInfo()
-        if gi and gi.get("properties"):
-            p = gi["properties"]
-            region_name = ", ".join(x for x in
-                [p.get("ADM2_NAME"), p.get("ADM1_NAME")] if x)
+        _pt = ee.Geometry.Point([cen_lon, cen_lat])
+        _gaul = (ee.FeatureCollection("FAO/GAUL/2015/level2")
+                 .filterBounds(_pt).first())
+        _meta = ee.Dictionary({
+            "adm2": ee.Algorithms.If(_gaul, _gaul.get("ADM2_NAME"), None),
+            "adm1": ee.Algorithms.If(_gaul, _gaul.get("ADM1_NAME"), None),
+            "alt": ee.Image("USGS/SRTMGL1_003").reduceRegion(
+                ee.Reducer.mean(), _pt.buffer(90), 90,
+                bestEffort=True).get("elevation"),
+        }).getInfo()
+        nm = ", ".join(x for x in [_meta.get("adm2"), _meta.get("adm1")] if x)
+        if nm:
+            region_name = nm
+        if _meta.get("alt") is not None:
+            altitude_m = round(float(_meta["alt"]))
     except Exception:
         pass
-    try:
-        alt = (ee.Image("USGS/SRTMGL1_003").reduceRegion(
-            ee.Reducer.mean(), ee.Geometry.Point([cen_lon, cen_lat]).buffer(90),
-            90, bestEffort=True).get("elevation").getInfo())
-        altitude_m = None if alt is None else round(float(alt))
-    except Exception:
-        altitude_m = None
 
     info, failed_keys = _eval_stats_resiliently(stats)
 
@@ -5206,7 +5222,14 @@ def site_brief(q: SiteQuery):
          "period": "Sentinel-5P, 2024 mean"},
     ]
 
-    osm = None if q.skip_osm else _overpass_noise(q.lat, q.lon)
+    # collect the Overpass result that has been running all along
+    osm = None
+    if _osm_future is not None:
+        try:
+            osm = _osm_future.result(timeout=45)
+        except Exception:
+            osm = None
+    _osm_pool.shutdown(wait=False)
     def nband(d, hi, mid):
         return None if d is None else ("High" if d < hi else
                                        "Moderate" if d < mid else "Low")
