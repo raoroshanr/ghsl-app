@@ -225,6 +225,30 @@ a.dsgNew{
   text-decoration:none;
 }
 a.dsgNew:hover{background:#f4f7f5}
+a.dsgAi{display:flex!important;align-items:center;justify-content:center;
+  width:34px!important;height:34px!important;
+  font:700 12px/1 Arial,Helvetica,sans-serif;color:#fff;background:#0B5A49;
+  text-decoration:none;letter-spacing:.02em}
+a.dsgAi:hover{background:#0d6b57;color:#fff}
+#aiModal{position:fixed;inset:0;z-index:5000;display:none;
+  background:rgba(8,14,11,.62);backdrop-filter:blur(2px)}
+#aiModal.on{display:flex;align-items:flex-start;justify-content:center}
+#aiModalCard{margin:5vh auto;width:min(560px,94vw);max-height:88vh;overflow-y:auto;
+  background:#0F1A15;border:1px solid #2E3E37;border-radius:14px;
+  box-shadow:0 24px 60px rgba(0,0,0,.5);padding:16px 18px 20px;
+  font-family:Arial,Helvetica,sans-serif}
+#aiModalHead{display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:4px}
+#aiModalHead h2{margin:0;font-size:16px;color:#E7EDE8}
+#aiModalClose{background:none;border:1px solid #2E3E37;border-radius:7px;
+  color:#9FB0A8;cursor:pointer;padding:5px 10px;font-size:12px;
+  font-family:Arial,Helvetica,sans-serif}
+#aiModalClose:hover{background:#1D2D26;color:#E7EDE8}
+#aiModal .fld{display:block;margin-top:12px;margin-bottom:4px;
+  font-size:11px;font-weight:700;color:#7FD0BC;text-transform:uppercase;
+  letter-spacing:.05em}
+#aiModal .hint{font-size:11.5px;color:#9FB0A8;line-height:1.45}
+#aiOut{margin-top:14px}
 .geoResults{position:absolute;top:100%;left:0;right:0;z-index:5000;
   background:#12201B;border:1px solid #2E3E37;border-top:none;
   border-radius:0 0 8px 8px;max-height:230px;overflow-y:auto;
@@ -233,11 +257,28 @@ a.dsgNew:hover{background:#f4f7f5}
   color:#E7EDE8;cursor:pointer;border-bottom:1px solid #22322B}
 .geoItem:hover{background:#1D2D26}
 .geoItem:last-child{border-bottom:none}
-.llRow{display:flex;gap:5px;margin-top:5px}
-.llRow .llLat,.llRow .llLon{flex:1;min-width:0;padding:7px 8px;font-size:12px;
-  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;border-radius:6px;
-  background:#12201B;color:#E7EDE8}
-.llRow .llGo{flex:0 0 auto;padding:7px 12px}
+/* pencil cursor while a custom-draw geometry is being digitised */
+.leaflet-container.drawing,
+.leaflet-container.drawing .leaflet-interactive{
+  cursor: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMyKSBzY2FsZSgxLC0xKSI+PHBhdGggZD0iTTMgMSBMNiA5IEwyNiAyOSBMMzAgMjUgTDEwIDUgWiIgZmlsbD0iI0ZGRTAxQiIgc3Ryb2tlPSIjMUExQTFBIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNMyAxIEw2IDkgTDEwIDUgWiIgZmlsbD0iIzFBMUExQSIvPjwvZz48L3N2Zz4=") 2 30, crosshair;
+}
+.llRow{display:flex;gap:8px;margin-top:8px;align-items:stretch}
+.llRow .llLat,.llRow .llLon{flex:1 1 0;min-width:0;width:100%;
+  padding:9px 10px;font-size:12px;line-height:1.2;
+  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
+  border-radius:7px;background:#12201B;color:#E7EDE8;box-sizing:border-box}
+.llRow .llLat:focus,.llRow .llLon:focus{outline:none;border-color:#0B5A49}
+.llRow .llLat::placeholder,.llRow .llLon::placeholder{color:#6E7D75}
+.llRow .llGo{flex:0 0 auto;padding:9px 16px;white-space:nowrap;border-radius:7px}
+@media (max-width:420px){
+  .llRow{flex-wrap:wrap}
+  .llRow .llLat,.llRow .llLon{flex:1 1 calc(50% - 4px)}
+  .llRow .llGo{flex:1 1 100%}
+}
+/* the search row above it needs the same rhythm */
+.searchGoRow{display:flex;gap:8px;align-items:stretch}
+.searchGoRow input{flex:1 1 0;min-width:0}
+.searchGoRow button{flex:0 0 auto;white-space:nowrap;padding:9px 16px}
 .aiSrcBox{display:flex;flex-direction:column;gap:3px;padding:7px 8px;
   border:1px solid #2E3E37;border-radius:7px;background:#12201B}
 .aiSrcBox label{display:flex;align-items:center;gap:7px;font-size:11.5px;
@@ -558,7 +599,7 @@ label.chk input{width:auto}
         <button class="ghost" data-mode="circles">Circles</button>
         <button class="ghost" data-mode="admin">Boundary</button>
         <button class="ghost" data-mode="shape">Shapefile</button>
-        <button class="ghost" data-mode="create">Create</button>
+        <button class="ghost" data-mode="create">Custom Draw</button>
       </div>
 
       <div class="modepane show" id="pane-draw">
@@ -784,38 +825,6 @@ label.chk input{width:auto}
       <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
       <button id="site3dBtn" style="width:100%;margin-top:6px" disabled>3D building view (extruded)</button>
 
-      <div class="stepH" style="margin-top:14px">AI site assessor</div>
-      <p class="hint">Answers <b>your</b> fixed questions using <b>only</b> the data blocks you allow below. It is instructed never to invent a number and to say when the data cannot answer.</p>
-
-      <label class="fld">1 &middot; Sources the agent may use</label>
-      <div id="aiSources" class="aiSrcBox">
-        <label><input type="checkbox" value="site" checked> Site &amp; region (location, radius, area)</label>
-        <label><input type="checkbox" value="lulc" checked> Land cover / green cover</label>
-        <label><input type="checkbox" value="air" checked> Air quality</label>
-        <label><input type="checkbox" value="periods" checked> Climate normals</label>
-        <label><input type="checkbox" value="monthly" checked> Monthly climate</label>
-        <label><input type="checkbox" value="noise" checked> Noise-source proximity</label>
-        <label><input type="checkbox" value="open_buildings" checked> Building heights / footprints</label>
-        <label><input type="checkbox" value="lst_day_c" checked> Land surface temperature</label>
-      </div>
-
-      <label class="fld" for="aiRef">2 &middot; Reference material (optional)</label>
-      <textarea id="aiRef" rows="3" placeholder="Paste authoritative text the agent may rely on — e.g. an NBC clause, a design brief, your own sensor readings."></textarea>
-
-      <label class="fld">3 &middot; Models <span class="per">(tick 2+ to cross-check)</span></label>
-      <div id="aiModels" class="aiSrcBox"><span class="per">Loading models&hellip;</span></div>
-
-      <label class="fld">4 &middot; Your fixed questions</label>
-      <div id="aiQList"></div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button id="aiQAdd" class="ghost" style="flex:1">+ Add question</button>
-        <button id="aiQSave" class="ghost" style="flex:1">Save set</button>
-        <button id="aiQReset" class="ghost" style="flex:1">Defaults</button>
-      </div>
-
-      <button id="aiRun" class="primary" style="width:100%;margin-top:10px" disabled>Run AI assessment</button>
-      <div id="aiReady" class="hint" style="min-height:18px"></div>
-      <div id="aiStatus" class="hint" style="min-height:18px"></div>
     </section>
     </div><!-- /tab-site -->
 
@@ -1018,7 +1027,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v88</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v89</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1045,7 +1054,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v88";
+const DSG_VERSION = "deepseego-v89";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1395,6 +1404,19 @@ L.control.layers(
    'OSM standard': osmStd, 'OSM cycle map': osmCycle,
    'OSM transport': osmTransport, 'OSM humanitarian': osmHumanitarian},
   null, {position: 'topleft', collapsed: true}).addTo(map);
+
+// AI assessor button, directly under the layers control.
+const AiBtn = L.Control.extend({
+  onAdd: function(){
+    const a = L.DomUtil.create('a', 'leaflet-bar dsgAi');
+    a.href = '#'; a.title = 'AI assessor \u2014 ask questions about any analysis';
+    a.innerHTML = 'AI';
+    L.DomEvent.on(a, 'click', L.DomEvent.stop)
+              .on(a, 'click', () => aiOpen());
+    return a;
+  }
+});
+new AiBtn({position: 'topleft'}).addTo(map);
 
 L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
 // "New" button - clears every overlay so a fresh analysis can start.
@@ -1841,6 +1863,7 @@ document.querySelectorAll('.modes button').forEach(b => {
     if(b.dataset.mode === 'admin') loadStatesOnce();
     if(b.dataset.mode === 'shape') loadShapesOnce();
     if(b.dataset.mode === 'create') crInit();
+    else if(typeof crPencil === 'function') crPencil(false);
   });
 });
 
@@ -2026,6 +2049,48 @@ map.on('mouseout', () => { $('cursorTip').style.display = 'none'; });
    so an answer can always be traced back to its inputs.
 --------------------------------------------------------------------------- */
 let lastSiteBrief = null;
+
+// Any analysis can publish its result for the AI assessor. Key -> {label, data}.
+// This is what makes the assessor work across tabs instead of only Site Brief.
+const AI_DATA = {};
+function aiRegister(key, label, data){
+  if(data === undefined || data === null) return;
+  AI_DATA[key] = {label: label, data: data, at: Date.now()};
+  if(typeof aiUpdateReady === 'function') aiUpdateReady();
+}
+function aiRenderSources(){
+  const box = $('aiSources');
+  if(!box) return;
+  const keys = Object.keys(AI_DATA);
+  if(!keys.length){
+    box.innerHTML = '<span class="per">No analysis results yet. Run something ' +
+                    'in any tab \u2014 site brief, zonal, slope, air, sun \u2014 ' +
+                    'then reopen this panel.</span>';
+    return;
+  }
+  const prev = {};
+  box.querySelectorAll('input[type=checkbox]').forEach(cb => prev[cb.value] = cb.checked);
+  box.innerHTML = '';
+  keys.forEach(k => {
+    const lab = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = k;
+    cb.checked = prev[k] !== undefined ? prev[k] : true;
+    cb.addEventListener('change', aiUpdateReady);
+    lab.appendChild(cb);
+    const t = document.createElement('span');
+    t.textContent = AI_DATA[k].label;
+    lab.appendChild(t);
+    box.appendChild(lab);
+  });
+}
+function aiOpen(){
+  $('aiModal').classList.add('on');
+  aiInit();                      // idempotent
+  aiRenderSources();
+  aiUpdateReady();
+}
+function aiClose(){ $('aiModal').classList.remove('on'); }
 let AI_QUESTIONS = [];
 let aiInited = false;
 
@@ -2125,6 +2190,13 @@ async function aiInit(){
     }catch(e){ toast('Could not reload'); }
   });
   $('aiRun').addEventListener('click', runAiAssessment);
+  $('aiModalClose').addEventListener('click', aiClose);
+  $('aiModal').addEventListener('click', ev => {
+    if(ev.target && ev.target.id === 'aiModal') aiClose();   // click the backdrop
+  });
+  document.addEventListener('keydown', ev => {
+    if(ev.key === 'Escape') aiClose();
+  });
   aiUpdateReady();
 }
 // Decide whether the assessor can run, and - crucially - explain why not.
@@ -2134,8 +2206,10 @@ function aiUpdateReady(){
   const btn = $('aiRun'), note = $('aiReady');
   if(!btn) return;
   const reasons = [];
-  if(!lastSiteBrief)
-    reasons.push('generate a Site Brief first (the agent only reads that data)');
+  if(!Object.keys(AI_DATA).length)
+    reasons.push('run an analysis first (the agent only reads your results)');
+  else if(!Object.keys(aiSelectedContext()).filter(k => k !== 'data_limitations').length)
+    reasons.push('tick at least one analysis');
   if(!AI_MODELS_AVAILABLE)
     reasons.push('no AI provider is configured on the server \u2014 see AI_AGENT_SETUP.md');
   const qs = AI_QUESTIONS.map(s => (s || '').trim()).filter(Boolean);
@@ -2155,24 +2229,25 @@ function aiUpdateReady(){
 }
 
 function aiSelectedContext(){
-  if(!lastSiteBrief) return null;
   const ctx = {};
-  $('aiSources').querySelectorAll('input[type=checkbox]').forEach(cb => {
-    if(cb.checked && lastSiteBrief[cb.value] !== undefined)
-      ctx[cb.value] = lastSiteBrief[cb.value];
+  const box = $('aiSources');
+  if(!box) return ctx;
+  box.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    if(cb.checked && AI_DATA[cb.value]) ctx[cb.value] = AI_DATA[cb.value].data;
   });
-  // always carry the provenance note so the model cannot forget the caveats
-  if(lastSiteBrief.historical_note)
-    ctx.data_limitations = lastSiteBrief.historical_note;
+  // always carry the provenance caveat so the model cannot forget it
+  if(Object.keys(ctx).length)
+    ctx.data_limitations = ('All values are satellite / reanalysis / OSM ' +
+      'derived estimates for the periods shown, not ground measurements.');
   return ctx;
 }
 async function runAiAssessment(){
-  if(!lastSiteBrief) return toast('Generate a site brief first');
+  if(!Object.keys(AI_DATA).length) return toast('Run an analysis first');
   const qs = AI_QUESTIONS.map(s => (s || '').trim()).filter(Boolean);
   if(!qs.length) return toast('Add at least one question');
   const ctx = aiSelectedContext();
-  if(!ctx || !Object.keys(ctx).length)
-    return toast('Tick at least one data source for the agent to use');
+  if(!ctx || !Object.keys(ctx).filter(k => k !== 'data_limitations').length)
+    return toast('Tick at least one analysis for the agent to use');
 
   const models = Array.from(
     $('aiModels').querySelectorAll('input[type=checkbox]:checked')).map(c => c.value);
@@ -2188,16 +2263,14 @@ async function runAiAssessment(){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({questions: qs, context: ctx, models: models,
                             reference: $('aiRef').value || ''})});
-    $('drawer').classList.add('open');
-    if(typeof paneMode === 'function') paneMode('site');
-    $('drawerSub').textContent = 'AI site assessment';
-    $('siteWrap').innerHTML =
-      '<div class="siteSec"><div class="paneLabel">AI site assessment</div>' +
+    $('aiOut').innerHTML =
       aiCrossCheckBlock(j.cross_check) +
       j.results.map(aiResultBlock).join('') +
-      '<div class="aiMeta">Data blocks used: ' + (j.context_keys || []).join(', ') +
+      '<div class="aiMeta">Analyses used: ' + (j.context_keys || [])
+        .filter(k => k !== 'data_limitations').join(', ') +
       ($('aiRef').value.trim() ? ' \u00b7 + your reference text' : '') +
-      '<br>' + (j.note || '') + '</div></div>';
+      '<br>' + (j.note || '') + '</div>';
+    $('aiOut').scrollIntoView({behavior: 'smooth', block: 'nearest'});
     $('aiStatus').textContent = 'Answered ' + qs.length + ' questions with ' +
       j.results.filter(r => r.ok).length + '/' + j.results.length + ' models.';
   }catch(e){
@@ -2317,9 +2390,14 @@ function crRedraw(){
         `<div>${i + 1}. ${f.geometry.type} &middot; ${f.properties.name || ''}</div>`).join('')
     : '<span class="per">No finished shapes yet.</span>';
 }
+function crPencil(on){
+  const c = map.getContainer();
+  if(c) c.classList.toggle('drawing', !!on);
+}
 function crStart(kind){
   CR.kind = kind; CR.verts = [];
   mapClickMode = 'create';
+  crPencil(true);
   $('crHint').textContent = kind === 'point'
     ? 'Tap the map to place a point.'
     : (kind === 'poly'
@@ -2343,6 +2421,7 @@ function crFinish(){
   const nm = ($('crName').value.trim() || 'shape') + '_' + (CR.features.length + 1);
   CR.features.push({type: 'Feature', geometry: geom, properties: {name: nm}});
   CR.verts = []; CR.kind = null; mapClickMode = null;
+  crPencil(false);
   $('crHint').textContent = 'Saved. Pick a geometry type to draw another.';
   crRedraw();
 }
@@ -2355,6 +2434,7 @@ function crInit(){
   $('crUndo').addEventListener('click', () => { CR.verts.pop(); crRedraw(); });
   $('crClear').addEventListener('click', () => {
     CR.features = []; CR.verts = []; CR.kind = null; mapClickMode = null;
+    crPencil(false);
     $('crHint').textContent = 'Cleared.'; crRedraw();
   });
   $('crUseRegion').addEventListener('click', () => {
@@ -2666,6 +2746,9 @@ $('runAnalysis').addEventListener('click', async () => {
                          spec: regionSpec, series: ts.series}]};
     $('csvBtn').hidden = false; $('dlRow').hidden = false;
     $('pdfBtn').hidden = false;     // Explore can now export a PDF too
+    aiRegister('temporal_series', 'Satellite temporal analysis (time series)',
+               {dataset: currentDs.label, value_label: currentDs.value_label,
+                region: regionDesc, series: ts.series});
     buildChartHead(currentDs, ts.series);
     try{
       await ensureChart();
@@ -3281,6 +3364,13 @@ async function runSlope(){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({lat1: a.lat, lon1: a.lon, lat2: b.lat, lon2: b.lon,
                             dem: $('slopeDem').value, samples: 80})});
+    aiRegister('slope', 'Slope / terrain profile A\u2192B',
+               {dem: j.dem, a: j.a, b: j.b, distance_m: j.distance_m,
+                rise_m: j.rise_m, slope_pct: j.slope_pct, slope_deg: j.slope_deg,
+                gradient: j.gradient, steepest_section: j.steepest_section,
+                elev_min_m: j.elev_min_m, elev_max_m: j.elev_max_m,
+                total_ascent_m: j.total_ascent_m,
+                total_descent_m: j.total_descent_m, note: j.note});
     $('drawer').classList.add('open');
     if(typeof paneMode === 'function') paneMode('site');
     $('drawerSub').textContent = 'Slope \u00b7 ' + j.dem.label;
@@ -3373,7 +3463,7 @@ function showTab(tab){
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight') sunlightInit();
   if(tab === 'noise') noiseInit();
-  if(tab === 'site'){ siteInit(); aiInit(); }
+  if(tab === 'site') siteInit();
   if(tab === 'slope') slopeInit();
 }
 function setBasket(name){
@@ -3962,6 +4052,9 @@ async function runAdvanced(allYears, tableOnly){
                                             spec: z.spec,
                                             series: results[i].series}))};
     $('csvBtn').hidden = false; $('dlRow').hidden = false;
+    aiRegister('zonal_analysis', 'Zonal analysis (' + runs.length + ' zones)',
+      {dataset: meta.label, statistic: stat, zones: lastRuns.zones.map(z =>
+        ({label: z.label, series: z.series}))});
     const metaClone = {...meta,
       value_label: stat.toUpperCase() + ' \u00b7 ' + meta.label,
       class_map: (single && !tableOnly && stat === 'mode') ? meta.class_map : null,
@@ -4498,6 +4591,7 @@ $('aqRun').addEventListener('click', async () => {
     const j = await api('/air_quality_live', {method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({lat: aqState.lat, lon: aqState.lon, providers: provs})});
+    aiRegister('air_quality', 'Air quality (live, multi-provider)', j);
     const entries = Object.entries(j.providers);
     const good = entries.filter(([id, r]) => !r.error);
     const bad = entries.filter(([id, r]) => r.error);
@@ -5066,7 +5160,7 @@ $('siteRun').addEventListener('click', async () => {
     const j = await api('/site_brief', opts);
     lastSiteOB = j.open_buildings || null;
     lastSiteBrief = j;                       // grounding data for the AI assessor
-    if(typeof aiUpdateReady === 'function') aiUpdateReady();
+    aiRegister('site_brief', 'Site brief (land cover, climate, air, buildings)', j);
     if(!j.air || !j.periods || !j.noise)
       throw new Error('older backend version \u2014 deploy the latest main.py ' +
         '(the health endpoint should report deepseego-v11 or later)');
@@ -5156,6 +5250,37 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <button id="loginBtn">Sign in with Google</button>
       <div id="loginMsg"></div>
       <div id="loginFoot">built by VINAMRAVIGYAN TECHNOLOGIES PRIVATE LIMITED</div>
+    </div>
+  </div>
+  <div id="aiModal">
+    <div id="aiModalCard">
+      <div id="aiModalHead">
+        <h2>AI assessor</h2>
+        <button id="aiModalClose">&#10005; Close</button>
+      </div>
+      <p class="hint">Answers <b>your</b> questions using <b>only</b> the analysis results you tick. It is instructed never to invent a number, and every figure it cites is checked against your data.</p>
+
+      <label class="fld">1 &middot; Analyses the agent may use</label>
+      <div id="aiSources" class="aiSrcBox"><span class="per">Run an analysis in any tab, then reopen this panel.</span></div>
+
+      <label class="fld" for="aiRef">2 &middot; Reference material (optional)</label>
+      <textarea id="aiRef" rows="3" placeholder="Paste authoritative text the agent may rely on \u2014 e.g. an NBC clause, a design brief, your own sensor readings."></textarea>
+
+      <label class="fld">3 &middot; Models <span class="per">(tick 2+ to cross-check)</span></label>
+      <div id="aiModels" class="aiSrcBox"><span class="per">Loading models&hellip;</span></div>
+
+      <label class="fld">4 &middot; Your fixed questions</label>
+      <div id="aiQList"></div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="aiQAdd" class="ghost" style="flex:1">+ Add question</button>
+        <button id="aiQSave" class="ghost" style="flex:1">Save set</button>
+        <button id="aiQReset" class="ghost" style="flex:1">Reload saved</button>
+      </div>
+
+      <button id="aiRun" class="primary" style="width:100%;margin-top:12px" disabled>Run AI assessment</button>
+      <div id="aiReady" class="hint" style="min-height:18px"></div>
+      <div id="aiStatus" class="hint" style="min-height:18px"></div>
+      <div id="aiOut"></div>
     </div>
   </div>
 </body>
