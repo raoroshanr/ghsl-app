@@ -1046,7 +1046,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v96</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v97</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1073,7 +1073,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v96";
+const DSG_VERSION = "deepseego-v97";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1366,7 +1366,7 @@ function toast(msg, ms = 3500){
   t.textContent = msg; t.style.display = 'block';
   clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', ms);
 }
-async function api(path, opts){
+async function api(path, opts, direct){
   opts = opts || {};
   await AUTH_READY;                       // never fire before sign-in has landed
   const tok = await authToken();
@@ -1376,7 +1376,7 @@ async function api(path, opts){
   }
   let r;
   try{
-    r = await fetch(BACKEND_URL + path, opts);
+    r = await fetch(direct ? heavyUrl(path) : (BACKEND_URL + path), opts);
   }catch(e){
     // ONLY a true transport failure lands here — DNS, offline, CORS, dead container.
     throw new Error('Backend unreachable (network error).');
@@ -5153,7 +5153,7 @@ async function siteGeocode(){
     drawSite();
     if(typeof enableSiteRun === 'function') enableSiteRun(); else $('siteRun').disabled = false;
     map.setView([lat, lon], 15);
-    $('siteStatus').textContent = j[0].display_name.split(',').slice(0,3).join(',') +
+    $('siteStatus').textContent = cands[0].label +
       ' \u00b7 ' + lat.toFixed(5) + ', ' + lon.toFixed(5);
   }catch(e){ toast('Search failed'); }
 }
@@ -5331,7 +5331,7 @@ $('siteRun').addEventListener('click', async () => {
                                       region: siteRoiState,
                                       skip_osm: true})};   // phase 2 fetches this
   try{
-    const j = await api('/site_brief', opts);
+    const j = await api('/site_brief', opts, true);   // direct: no 60s proxy cap
     Progress.step('Scanning nearby noise sources\u2026');
     // phase 2: the OSM scan is the slow part, so it runs AFTER the brief is
     // already on screen rather than holding everything up.
