@@ -226,10 +226,10 @@ a.dsgNew{
 }
 a.dsgNew:hover{background:#f4f7f5}
 a.dsgAi{display:flex!important;align-items:center;justify-content:center;
-  width:34px!important;height:34px!important;
-  font:700 12px/1 Arial,Helvetica,sans-serif;color:#fff;background:#0B5A49;
-  text-decoration:none;letter-spacing:.02em}
-a.dsgAi:hover{background:#0d6b57;color:#fff}
+  width:auto!important;min-width:34px;height:30px!important;padding:0 10px;
+  font:700 12px/1 Arial,Helvetica,sans-serif;color:#0B5A49;background:#fff;
+  text-decoration:none;letter-spacing:.02em;white-space:nowrap}
+a.dsgAi:hover{background:#f4f7f5;color:#0B5A49}
 #aiModal{position:fixed;inset:0;z-index:5000;display:none;
   background:rgba(8,14,11,.62);backdrop-filter:blur(2px)}
 #aiModal.on{display:flex;align-items:flex-start;justify-content:center}
@@ -257,10 +257,13 @@ a.dsgAi:hover{background:#0d6b57;color:#fff}
   color:#E7EDE8;cursor:pointer;border-bottom:1px solid #22322B}
 .geoItem:hover{background:#1D2D26}
 .geoItem:last-child{border-bottom:none}
-/* pencil cursor while a custom-draw geometry is being digitised */
-.leaflet-container.drawing,
-.leaflet-container.drawing .leaflet-interactive{
-  cursor: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMyKSBzY2FsZSgxLC0xKSI+PHBhdGggZD0iTTMgMSBMNiA5IEwyNiAyOSBMMzAgMjUgTDEwIDUgWiIgZmlsbD0iI0ZGRTAxQiIgc3Ryb2tlPSIjMUExQTFBIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNMyAxIEw2IDkgTDEwIDUgWiIgZmlsbD0iIzFBMUExQSIvPjwvZz48L3N2Zz4=") 2 30, crosshair;
+/* pencil cursor while a Custom Draw geometry is being digitised.
+   NOTE: #map.drawing already forces crosshair with !important, so this rule
+   must match that specificity (id + class) and also use !important. */
+#map.pencil, #map.pencil .leaflet-interactive, #map.pencil .leaflet-grab,
+#map.pencil.drawing, #map.pencil.drawing .leaflet-interactive,
+#map.pencil.drawing .leaflet-grab{
+  cursor: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDMyIDMyIj48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgwLDMyKSBzY2FsZSgxLC0xKSI+PHBhdGggZD0iTTMgMSBMNiA5IEwyNiAyOSBMMzAgMjUgTDEwIDUgWiIgZmlsbD0iI0ZGRTAxQiIgc3Ryb2tlPSIjMUExQTFBIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cGF0aCBkPSJNMyAxIEw2IDkgTDEwIDUgWiIgZmlsbD0iIzFBMUExQSIvPjwvZz48L3N2Zz4=") 2 30, crosshair !important;
 }
 .llRow{display:flex;gap:8px;margin-top:8px;align-items:stretch}
 .llRow .llLat,.llRow .llLon{flex:1 1 0;min-width:0;width:100%;
@@ -283,6 +286,21 @@ a.dsgAi:hover{background:#0d6b57;color:#fff}
   border:1px solid #2E3E37;border-radius:7px;background:#12201B}
 .aiSrcBox label{display:flex;align-items:center;gap:7px;font-size:11.5px;
   color:#C9D3CC;font-family:Arial,Helvetica,sans-serif}
+.aiGroupHead{margin:8px 0 3px;font-family:Arial,Helvetica,sans-serif}
+.aiGroupHead:first-child{margin-top:2px}
+.aiGroupHead b{display:block;font-size:10.5px;color:#7FD0BC;
+  text-transform:uppercase;letter-spacing:.06em}
+.aiGroupHead span{display:block;font-size:10px;color:#8A968F;line-height:1.4;
+  margin-top:1px}
+.aiUpRow{display:flex;gap:8px;align-items:center;margin-top:7px}
+.aiUpRow input[type=file]{flex:1;min-width:0;font-size:11px;color:#9FB0A8;
+  font-family:Arial,Helvetica,sans-serif}
+.aiUpRow input[type=file]::file-selector-button{
+  padding:6px 11px;margin-right:9px;border:1px solid #2E3E37;border-radius:6px;
+  background:#12201B;color:#E7EDE8;cursor:pointer;font-size:11px;
+  font-family:Arial,Helvetica,sans-serif}
+.aiUpRow input[type=file]::file-selector-button:hover{background:#1D2D26}
+.aiUpRow .ghost{flex:0 0 auto;padding:6px 12px}
 #aiRef{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
   font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
   border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
@@ -1027,7 +1045,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v90</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v91</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1054,7 +1072,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v90";
+const DSG_VERSION = "deepseego-v91";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1409,8 +1427,8 @@ L.control.layers(
 const AiBtn = L.Control.extend({
   onAdd: function(){
     const a = L.DomUtil.create('a', 'leaflet-bar dsgAi');
-    a.href = '#'; a.title = 'AI assessor \u2014 ask questions about any analysis';
-    a.innerHTML = 'AI';
+    a.href = '#'; a.title = 'AI Consultant \u2014 ask questions about any analysis';
+    a.innerHTML = 'AI Consultant';
     L.DomEvent.on(a, 'click', L.DomEvent.stop)
               .on(a, 'click', () => aiOpen());
     return a;
@@ -2130,19 +2148,36 @@ async function aiLoadModels(force){
       return;
     }
     box.innerHTML = '';
-    j.models.forEach(m => {
-      const lab = document.createElement('label');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.value = m.id;
-      cb.disabled = !m.available;
-      cb.checked = m.available && m.id === j.default;
-      lab.appendChild(cb);
-      const t = document.createElement('span');
-      t.textContent = m.label + '  \u00b7 ' + m.provider_label +
-                      (m.available ? '' : '  (no API key)');
-      if(!m.available) t.style.opacity = '.45';
-      lab.appendChild(t);
-      box.appendChild(lab);
+    // group by billing tier - free-tier providers first, since that is the
+    // choice most people care about before hitting a quota wall.
+    const groups = [
+      {key: 'free_tier', title: 'Free tier available',
+       sub: 'Has a no-cost quota, but the limits are tight \u2014 a 429 error means that quota is used up.'},
+      {key: 'paid', title: 'Paid \u00b7 billed per call',
+       sub: 'Charged from the first token. Set a spend limit in the provider console.'},
+    ];
+    groups.forEach(g => {
+      const inGroup = j.models.filter(m => m.tier === g.key);
+      if(!inGroup.length) return;
+      const h = document.createElement('div');
+      h.className = 'aiGroupHead';
+      h.innerHTML = '<b>' + g.title + '</b><span>' + g.sub + '</span>';
+      box.appendChild(h);
+      inGroup.forEach(m => {
+        const lab = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.value = m.id;
+        cb.disabled = !m.available;
+        cb.checked = m.available && m.id === j.default;
+        lab.appendChild(cb);
+        const t = document.createElement('span');
+        t.textContent = m.label + '  \u00b7 ' + m.provider_label +
+                        (m.available ? '' : '  (no API key)');
+        if(!m.available) t.style.opacity = '.45';
+        lab.appendChild(t);
+        lab.title = m.tier_note || '';
+        box.appendChild(lab);
+      });
     });
     AI_MODELS_AVAILABLE = avail.length;
     // if the default was not available, tick the first that is
@@ -2191,6 +2226,39 @@ async function aiInit(){
   });
   $('aiRun').addEventListener('click', runAiAssessment);
   $('aiModalClose').addEventListener('click', aiClose);
+  $('aiRefFile').addEventListener('change', async ev => {
+    const files = Array.from(ev.target.files || []);
+    if(!files.length) return;
+    const info = $('aiRefInfo');
+    info.textContent = 'Reading ' + files.length + ' file(s)\u2026';
+    const added = [];
+    for(const f of files){
+      try{
+        const b64 = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = () => res(String(r.result).split(',')[1]);
+          r.onerror = () => rej(new Error('could not read the file'));
+          r.readAsDataURL(f);
+        });
+        const j = await api('/extract_text', {method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({filename: f.name, data_b64: b64})});
+        const ta = $('aiRef');
+        ta.value = (ta.value ? ta.value.trim() + '\n\n' : '') +
+                   '--- ' + f.name + ' ---\n' + j.text;
+        added.push(f.name + ' (' + j.text.length.toLocaleString() + ' chars' +
+                   (j.pages ? ', ' + j.pages + ' pages' : '') + ')');
+      }catch(e){
+        added.push(f.name + ' \u2014 FAILED: ' + e.message);
+      }
+    }
+    info.innerHTML = added.map(s => '\u2022 ' + s).join('<br>');
+    ev.target.value = '';                    // allow re-picking the same file
+    aiUpdateReady();
+  });
+  $('aiRefClear').addEventListener('click', () => {
+    $('aiRef').value = ''; $('aiRefInfo').textContent = '';
+  });
   $('aiModelsRefresh').addEventListener('click', async () => {
     const b = $('aiModelsRefresh'); const o = b.textContent;
     b.disabled = true; b.textContent = 'Refreshing\u2026';
@@ -2399,7 +2467,7 @@ function crRedraw(){
 }
 function crPencil(on){
   const c = map.getContainer();
-  if(c) c.classList.toggle('drawing', !!on);
+  if(c) c.classList.toggle('pencil', !!on);
 }
 function crStart(kind){
   CR.kind = kind; CR.verts = [];
@@ -5262,7 +5330,7 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
   <div id="aiModal">
     <div id="aiModalCard">
       <div id="aiModalHead">
-        <h2>AI assessor</h2>
+        <h2>AI Consultant</h2>
         <button id="aiModalClose">&#10005; Close</button>
       </div>
       <p class="hint">Answers <b>your</b> questions using <b>only</b> the analysis results you tick. It is instructed never to invent a number, and every figure it cites is checked against your data.</p>
@@ -5271,7 +5339,13 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <div id="aiSources" class="aiSrcBox"><span class="per">Run an analysis in any tab, then reopen this panel.</span></div>
 
       <label class="fld" for="aiRef">2 &middot; Reference material (optional)</label>
-      <textarea id="aiRef" rows="3" placeholder="Paste authoritative text the agent may rely on \u2014 e.g. an NBC clause, a design brief, your own sensor readings."></textarea>
+      <textarea id="aiRef" rows="4" placeholder="Paste authoritative text the agent may rely on \u2014 e.g. an NBC clause, a design brief, your own sensor readings."></textarea>
+      <div class="aiUpRow">
+        <input type="file" id="aiRefFile" multiple
+               accept=".txt,.md,.csv,.json,.geojson,.log,.pdf,.docx">
+        <button id="aiRefClear" class="ghost">Clear</button>
+      </div>
+      <div id="aiRefInfo" class="hint" style="font-size:10.5px"></div>
 
       <label class="fld">3 &middot; Models <span class="per">(tick 2+ to cross-check)</span>
         <button id="aiModelsRefresh" class="ghost" style="float:right;padding:2px 9px;font-size:10.5px;text-transform:none;letter-spacing:0">Refresh list</button>
