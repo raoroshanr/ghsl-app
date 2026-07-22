@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v99"
+APP_VERSION = "deepseego-v100"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -756,7 +756,7 @@ AUTH_REQUIRED = os.environ.get("AUTH_REQUIRED", "true").lower() != "false"
 # (they take no user data and reveal nothing sensitive - they exist so you can
 # open them straight in a browser, which cannot send a bearer token).
 _OPEN_PATHS = {"/health", "/api", "/favicon.ico", "/__/auth/handler",
-               "/basemap_test"}
+               "/basemap_test", "/climate_test"}
 
 
 def _verify_bearer(token: str):
@@ -5726,6 +5726,43 @@ def timeseries(q: RegionQuery):
     return {"dataset": q.dataset,
             "value_label": _dataset(q.dataset)["value_label"],
             "series": _series(q.dataset, region)}
+
+
+@app.get("/climate_test")
+def climate_test(lat: float = 12.8138, lon: float = 74.8614):
+    """Open this in a browser to see whether ERA5-Land actually returns values
+    for a point. If months_with_data is 12 the backend is fine and any blank
+    chart is a front-end problem; if it is 0 the dataset returned nothing."""
+    try:
+        ensure_ee()
+    except Exception as e:
+        return {"ok": False, "stage": "earth engine init", "error": str(e)}
+    try:
+        pt = ee.Geometry.Point([lon, lat])
+        era = (ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
+               .filterDate("2015-01-01", "2025-01-01"))
+        n_images = era.size().getInfo()
+        stats = {}
+        for m in range(1, 13):
+            img = era.filter(ee.Filter.calendarRange(m, m, "month")).mean()
+            stats[f"t{m}"] = img.select("temperature_2m").reduceRegion(
+                ee.Reducer.mean(), pt.buffer(6000), 9000,
+                bestEffort=True).get("temperature_2m")
+        vals = ee.Dictionary(stats).getInfo()
+        temps = {k: (None if v is None else round(float(v) - 273.15, 2))
+                 for k, v in sorted(vals.items(),
+                                    key=lambda kv: int(kv[0][1:]))}
+        got = sum(1 for v in temps.values() if v is not None)
+        return {"ok": got > 0, "lat": lat, "lon": lon,
+                "collection_images": n_images,
+                "months_with_data": got,
+                "temperature_c_by_month": temps,
+                "verdict": ("backend is fine - blank charts are a front-end issue"
+                            if got == 12 else
+                            "ERA5 returned no values here - charts cannot plot")}
+    except Exception as e:
+        return {"ok": False, "stage": "reduceRegion",
+                "error": f"{type(e).__name__}: {e}"}
 
 
 @app.get("/basemap_test")
