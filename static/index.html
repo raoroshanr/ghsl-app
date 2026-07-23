@@ -201,6 +201,18 @@ button.ghost.active{border-color:var(--deep);color:var(--deep);font-weight:700}
 #epochBar button{background:none;border:1px solid #2E3E37;border-radius:6px;
   color:#E7EDE8;width:26px;height:26px;cursor:pointer;font-size:13px;line-height:1}
 #epochBar button:hover{background:#1D2D26}
+#spDateRow{display:flex;align-items:center;gap:8px;margin-top:6px}
+#spDay{flex:1;accent-color:#E9C46A}
+#spDateRow button{background:none;border:1px solid #2E3E37;border-radius:6px;
+  color:#E7EDE8;width:26px;height:26px;cursor:pointer;font-size:13px;
+  line-height:1;flex:0 0 auto}
+#spDateRow button:hover{background:#1D2D26}
+#spDateLbl{color:#E9C46A;font-weight:700}
+#spSeasons{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+#spSeasons button{flex:1 1 auto;padding:4px 6px;font-size:10px;
+  font-family:Arial,Helvetica,sans-serif;background:#12201B;color:#9FB0A8;
+  border:1px solid #2E3E37;border-radius:6px;cursor:pointer;white-space:nowrap}
+#spSeasons button:hover{background:#1D2D26;color:#E7EDE8}
 .frame{width:100%;display:flex;flex-direction:column;gap:4px}
 .frame .imgbox{
   flex:1;min-height:160px;background:
@@ -979,8 +991,19 @@ label.chk input{width:auto}
 
       <div class="stepH" style="margin-top:14px">Sun path on the map</div>
       <p class="hint">The 3D sun dome, projected onto the ground at your point &mdash; so azimuths line up with real compass directions on the map.</p>
-      <label class="fld" for="spDate">Date</label>
+      <label class="fld" for="spDate">Date &mdash; <span id="spDateLbl"></span></label>
       <input type="date" id="spDate">
+      <div id="spDateRow">
+        <button id="spDatePrev" title="Previous day">&#8249;</button>
+        <input type="range" id="spDay" min="1" max="365" step="1" value="1">
+        <button id="spDateNext" title="Next day">&#8250;</button>
+      </div>
+      <div id="spSeasons">
+        <button data-md="03-20">Mar equinox</button>
+        <button data-md="06-21">Jun solstice</button>
+        <button data-md="09-22">Sep equinox</button>
+        <button data-md="12-21">Dec solstice</button>
+      </div>
       <label class="fld" for="spTime">Time (local solar) &mdash; <span id="spTimeLbl">12:00</span></label>
       <input type="range" id="spTime" min="0" max="1439" step="5" value="720">
       <label class="fld" for="spRadius">Dome radius on the map</label>
@@ -1068,7 +1091,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v102</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v103</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1095,7 +1118,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v102";
+const DSG_VERSION = "deepseego-v103";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3473,6 +3496,43 @@ function dayArc(dateStr, lat, lon, R){
 }
 function clearSunPath(){ sunPathLayer.clearLayers(); $('spInfo').textContent = ''; }
 
+/* ---- date slider: scrub through the year and watch the arc shift --------
+   Day-of-year <-> calendar date, leap-year aware (a 2024 slider must reach
+   366, a 2025 one only 365, or late-December positions drift by a day).      */
+function _isLeap(y){ return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; }
+function _daysInYear(y){ return _isLeap(y) ? 366 : 365; }
+function _dateToDoy(ds){
+  const [Y, M, D] = ds.split('-').map(Number);
+  const start = Date.UTC(Y, 0, 1);
+  return Math.round((Date.UTC(Y, M - 1, D) - start) / 86400000) + 1;
+}
+function _doyToDate(Y, doy){
+  const d = new Date(Date.UTC(Y, 0, 1));
+  d.setUTCDate(d.getUTCDate() + (doy - 1));
+  const p = n => String(n).padStart(2, '0');
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+}
+function spSyncFromDate(redraw){
+  const ds = $('spDate').value || new Date().toISOString().slice(0, 10);
+  const Y = +ds.slice(0, 4);
+  const sl = $('spDay');
+  sl.max = String(_daysInYear(Y));
+  sl.value = String(Math.min(_dateToDoy(ds), _daysInYear(Y)));
+  const d = new Date(ds + 'T00:00:00Z');
+  $('spDateLbl').textContent = d.toLocaleDateString(undefined,
+    {day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC'});
+  if(redraw && sunPathLayer.getLayers().length) drawSunPath();
+  if(redraw && typeof SH_BUILDINGS !== 'undefined' && SH_BUILDINGS) renderShadows();
+}
+function spSetDoy(doy){
+  const ds = $('spDate').value || new Date().toISOString().slice(0, 10);
+  const Y = +ds.slice(0, 4);
+  const n = _daysInYear(Y);
+  doy = ((doy - 1 + n) % n) + 1;            // wrap around the year end
+  $('spDate').value = _doyToDate(Y, doy);
+  spSyncFromDate(true);
+}
+
 function drawSunPath(){
   const st = _sunlightTab.state;
   if(st.lat == null) return toast('Pick a point in the Sun tab first');
@@ -4811,10 +4871,18 @@ function sunlightInit(){
       if(sunPathLayer.getLayers().length) drawSunPath();   // live update
       if(SH_BUILDINGS) renderShadows();                    // shadows follow too
     });
-    $('spDate').addEventListener('change', () => {
-      if(sunPathLayer.getLayers().length) drawSunPath();
-      if(SH_BUILDINGS) renderShadows();
-    });
+    $('spDate').addEventListener('change', () => spSyncFromDate(true));
+    $('spDay').addEventListener('input', () => spSetDoy(+$('spDay').value));
+    $('spDatePrev').addEventListener('click', () => spSetDoy(+$('spDay').value - 1));
+    $('spDateNext').addEventListener('click', () => spSetDoy(+$('spDay').value + 1));
+    document.querySelectorAll('#spSeasons button').forEach(b =>
+      b.addEventListener('click', () => {
+        const Y = (($('spDate').value || '') .slice(0, 4)) ||
+                  String(new Date().getFullYear());
+        $('spDate').value = Y + '-' + b.dataset.md;
+        spSyncFromDate(true);
+      }));
+    spSyncFromDate(false);
     $('shDraw').addEventListener('click', castShadows);
     $('shClear').addEventListener('click', clearShadows);
   }
