@@ -230,6 +230,28 @@ a.dsgAi{display:flex!important;align-items:center;justify-content:center;
   font:700 12px/1 Arial,Helvetica,sans-serif;color:#0B5A49;background:#fff;
   text-decoration:none;letter-spacing:.02em;white-space:nowrap}
 a.dsgAi:hover{background:#f4f7f5;color:#0B5A49}
+a.dsgGoto{display:flex!important;align-items:center;justify-content:center;
+  width:auto!important;min-width:34px;height:30px!important;padding:0 10px;
+  font:700 12px/1 Arial,Helvetica,sans-serif;color:#0B5A49;background:#fff;
+  text-decoration:none;white-space:nowrap;margin-top:6px!important}
+a.dsgGoto:hover{background:#f4f7f5;color:#0B5A49}
+#gotoPanel{position:fixed;top:96px;left:50%;transform:translateX(-50%);
+  z-index:4500;display:none;width:min(420px,94vw);padding:14px 16px 16px;
+  background:#0F1A15;border:1px solid #2E3E37;border-radius:12px;
+  box-shadow:0 18px 46px rgba(0,0,0,.45);font-family:Arial,Helvetica,sans-serif}
+#gotoPanel.on{display:block}
+#gotoHead{display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:6px}
+#gotoHead h3{margin:0;font-size:14px;color:#E7EDE8}
+#gotoClose{background:none;border:1px solid #2E3E37;border-radius:6px;
+  color:#9FB0A8;cursor:pointer;padding:4px 9px;font-size:11px;
+  font-family:Arial,Helvetica,sans-serif}
+#gotoClose:hover{background:#1D2D26;color:#E7EDE8}
+#gotoPanel .fld{display:block;margin-top:10px;margin-bottom:4px;font-size:11px;
+  font-weight:700;color:#7FD0BC;text-transform:uppercase;letter-spacing:.05em}
+#gotoUse{width:100%;margin-top:10px}
+#gotoInfo{font-size:11.5px;color:#9FB0A8;min-height:16px;margin-top:8px;
+  line-height:1.45}
 #aiModal{position:fixed;inset:0;z-index:5000;display:none;
   background:rgba(8,14,11,.62);backdrop-filter:blur(2px)}
 #aiModal.on{display:flex;align-items:flex-start;justify-content:center}
@@ -609,8 +631,6 @@ label.chk input{width:auto}
 
     <section>
       <h2>Region of Interest</h2>
-      <label class="fld" for="searchInput">Find a place (pans the map)</label>
-      <input id="searchInput" type="text" placeholder="Search a place… (Enter/Go)" aria-label="Search a place" /><button id="searchGo" class="ghost" style="margin-left:6px;padding:0 12px">Go</button>
       <div class="modes">
         <button class="ghost active" data-mode="draw">Draw</button>
         <button class="ghost" data-mode="corners">Corners</button>
@@ -707,11 +727,6 @@ label.chk input{width:auto}
         <option value="alos">ALOS AW3D30 &middot; 30 m</option>
         <option value="srtm">SRTM &middot; 30 m</option>
       </select>
-      <label class="fld" for="slopeSearch">Search a location</label>
-      <div class="searchGoRow">
-        <input type="text" id="slopeSearch" placeholder="Type a place & press Enter">
-        <button id="slopeSearchGo" class="ghost">Go</button>
-      </div>
       <button id="slopePickA" style="width:100%;margin-top:6px">1 &middot; Pick point A</button>
       <button id="slopePickB" style="width:100%;margin-top:6px" disabled>2 &middot; Pick point B</button>
       <div id="slopeStatus" class="hint" style="min-height:20px">No points selected.</div>
@@ -824,11 +839,6 @@ label.chk input{width:auto}
     <section>
       <h2>Site Brief</h2>
       <p class="hint">Pick a site and context radius. The brief leads with land-cover use in the region, then climate, humidity, rainfall, wind, solar and mean radiant temperature. (Air quality now lives in the Climate basket.)</p>
-      <label class="fld" for="siteSearch">Search a location</label>
-      <div class="searchGoRow">
-        <input type="text" id="siteSearch" placeholder="Type a place & press Enter">
-        <button id="siteSearchGo" class="ghost">Go</button>
-      </div>
       <button id="sitePick" style="width:100%">Pick site on map</button>
       <label class="fld" for="siteRadius">Context radius</label>
       <select id="siteRadius">
@@ -894,8 +904,6 @@ label.chk input{width:auto}
     <section>
       <h2>Live weather</h2>
       <p class="hint">Current conditions at a point from Open-Meteo (keyless, multi-model, assimilating the nearest station observations). Pick a location or search.</p>
-      <label class="fld" for="weSearch">Search a location</label>
-      <div class="searchGoRow"><input type="text" id="weSearch" placeholder="Type a place & press Enter"><button id="weSearchGo" class="ghost">Go</button></div>
       <button id="wePick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="weStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="weRun" class="primary" style="margin-top:8px" disabled>Get live weather</button>
@@ -929,8 +937,6 @@ label.chk input{width:auto}
     <section>
       <h2>Live Air Quality</h2>
       <p class="hint">Real-time air quality at a point, from multiple providers. Open-Meteo works with no key. Others activate when their API key is set as a Cloud Run environment variable &mdash; the badge shows which are ready.</p>
-      <label class="fld" for="aqSearchInput">Search a location</label>
-      <div class="searchGoRow"><input type="text" id="aqSearchInput" placeholder="Type a place & press Enter"><button id="aqSearchGo" class="ghost">Go</button></div>
       <button id="aqPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="aqStatus" class="hint" style="min-height:20px">No point selected.</div>
       <label class="fld">Providers</label>
@@ -957,8 +963,6 @@ label.chk input{width:auto}
     <section>
       <h2>Thermal environment</h2>
       <p class="hint">Land-surface temperature and air-temperature climatology at a point. Pick a location; results show in the analysis pane.</p>
-      <label class="fld" for="thSearch">Search a location</label>
-      <div class="searchGoRow"><input type="text" id="thSearch" placeholder="Type a place & press Enter"><button id="thSearchGo" class="ghost">Go</button></div>
       <button id="thPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="thStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="thRun" class="primary" style="margin-top:8px" disabled>Analyse thermal</button>
@@ -969,8 +973,6 @@ label.chk input{width:auto}
     <section>
       <h2>Sunlight &amp; solar</h2>
       <p class="hint">Monthly solar irradiance (kWh/m&sup2;/day) and approximate mean radiant temperature for a sun-exposed person at the point.</p>
-      <label class="fld" for="suSearch">Search a location</label>
-      <div class="searchGoRow"><input type="text" id="suSearch" placeholder="Type a place & press Enter"><button id="suSearchGo" class="ghost">Go</button></div>
       <button id="suPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="suStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="suRun" class="primary" style="margin-top:8px" disabled>Analyse sunlight</button>
@@ -1017,8 +1019,6 @@ label.chk input{width:auto}
     <section>
       <h2>Noise screening</h2>
       <p class="hint">Distance-based screening from mapped noise sources (major roads, railways, industry, airports) via OpenStreetMap. This is a proximity screen, not an acoustic measurement.</p>
-      <label class="fld" for="noSearch">Search a location</label>
-      <div class="searchGoRow"><input type="text" id="noSearch" placeholder="Type a place & press Enter"><button id="noSearchGo" class="ghost">Go</button></div>
       <button id="noPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="noStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="noRun" class="primary" style="margin-top:8px" disabled>Screen noise sources</button>
@@ -1068,7 +1068,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v101</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v102</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1095,7 +1095,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v101";
+const DSG_VERSION = "deepseego-v102";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1458,6 +1458,19 @@ const AiBtn = L.Control.extend({
   }
 });
 new AiBtn({position: 'topleft'}).addTo(map);
+
+// Single place to find a location, replacing the per-tab search boxes.
+const GotoBtn = L.Control.extend({
+  onAdd: function(){
+    const a = L.DomUtil.create('a', 'leaflet-bar dsgGoto');
+    a.href = '#'; a.title = 'Go to a place or coordinate';
+    a.innerHTML = 'Go To Location';
+    L.DomEvent.on(a, 'click', L.DomEvent.stop)
+              .on(a, 'click', () => gotoOpen());
+    return a;
+  }
+});
+new GotoBtn({position: 'topleft'}).addTo(map);
 
 L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
 // "New" button - clears every overlay so a fresh analysis can start.
@@ -1924,15 +1937,6 @@ function wireGoButton(goId, inputId){
     else inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
   });
 }
-function _goToLatLon(lat, lon){
-  if(searchPin) map.removeLayer(searchPin);
-  searchPin = L.marker([lat, lon]).addTo(map)
-    .bindPopup(lat.toFixed(5) + ', ' + lon.toFixed(5));
-  map.setView([lat, lon], 16); searchPin.openPopup();
-}
-attachSearch('searchInput', c => _goToLatLon(c.lat, c.lon));
-wireGoButton('searchGo', 'searchInput');
-attachLatLon($('searchInput'), _goToLatLon);
 
 /* ---------- region selection ---------- */
 let regionSpec = null;
@@ -3209,6 +3213,77 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
+/* ---------- Go To Location (single, global place finder) --------------------
+   Replaces the per-tab search boxes. It pans the map and drops a pin, and -
+   because the old per-tab boxes also SET the analysis point - it offers to hand
+   the location straight to whichever tab is open, so no workflow is lost.
+--------------------------------------------------------------------------- */
+let gotoPin = null, GOTO_LAST = null;
+
+// which tabs accept a point, and how to give it to them
+const GOTO_TARGETS = {
+  site:     {label: 'Site Brief',    set: (la, lo, lb) => {
+              siteState.lat = la; siteState.lon = lo;
+              if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
+              drawSite();
+              if(typeof enableSiteRun === 'function') enableSiteRun();
+              $('siteStatus').textContent = (lb ? lb + ' \u00b7 ' : '') +
+                la.toFixed(5) + ', ' + lo.toFixed(5); }},
+  aq:       {label: 'Air Quality',   set: (la, lo, lb) => aqSetPoint(la, lo, lb)},
+  weather:  {label: 'Weather',       set: (la, lo, lb) => _weatherTab.setPoint(la, lo, lb)},
+  thermal:  {label: 'Heat',          set: (la, lo, lb) => _thermalTab.setPoint(la, lo, lb)},
+  sunlight: {label: 'Sun',           set: (la, lo, lb) => _sunlightTab.setPoint(la, lo, lb)},
+  noise:    {label: 'Noise',         set: (la, lo, lb) => _noiseTab.setPoint(la, lo, lb)},
+  slope:    {label: 'Slope (A then B)', set: (la, lo) => {
+              if(!slopeState.a) slopeState.a = {lat: la, lon: lo};
+              else if(!slopeState.b) slopeState.b = {lat: la, lon: lo};
+              else { slopeState.a = {lat: la, lon: lo}; slopeState.b = null; }
+              slopeDraw(); }},
+};
+
+function gotoShow(lat, lon, label, zoom){
+  GOTO_LAST = {lat: lat, lon: lon, label: label || ''};
+  if(gotoPin) map.removeLayer(gotoPin);
+  gotoPin = L.marker([lat, lon]).addTo(map)
+    .bindPopup(label || (lat.toFixed(5) + ', ' + lon.toFixed(5)));
+  map.setView([lat, lon], zoom || 15);
+  gotoPin.openPopup();
+  const t = GOTO_TARGETS[ACTIVE_TAB];
+  const btn = $('gotoUse');
+  btn.hidden = !t;
+  if(t) btn.textContent = 'Use this point for ' + t.label;
+  $('gotoInfo').innerHTML = (label ? label + '<br>' : '') +
+    '<span class="per">' + lat.toFixed(5) + ', ' + lon.toFixed(5) + '</span>' +
+    (t ? '' : '<br><span class="per">This tab does not take a map point.</span>');
+}
+function gotoOpen(){
+  $('gotoPanel').classList.add('on');
+  gotoInit();
+  const t = GOTO_TARGETS[ACTIVE_TAB];
+  const btn = $('gotoUse');
+  btn.hidden = !(t && GOTO_LAST);
+  if(t && GOTO_LAST) btn.textContent = 'Use this point for ' + t.label;
+  setTimeout(() => { const i = $('gotoSearch'); if(i) i.focus(); }, 30);
+}
+function gotoClose(){ $('gotoPanel').classList.remove('on'); }
+function gotoInit(){
+  if(gotoInit._done) return; gotoInit._done = true;
+  attachSearch('gotoSearch', c => gotoShow(c.lat, c.lon, c.label, c.zoom));
+  // the lat/lon row lives in its own slot so it lines up under the search
+  attachLatLon($('gotoSearch'), (la, lo) => gotoShow(la, lo, null, 15));
+  $('gotoClose').addEventListener('click', gotoClose);
+  $('gotoUse').addEventListener('click', () => {
+    const t = GOTO_TARGETS[ACTIVE_TAB];
+    if(!t || !GOTO_LAST) return;
+    t.set(GOTO_LAST.lat, GOTO_LAST.lon, GOTO_LAST.label);
+    toast('Point set for ' + t.label, 4000);
+    gotoClose();
+  });
+  document.addEventListener('keydown', ev => {
+    if(ev.key === 'Escape') gotoClose();
+  });
+}
+
 /* ---------- live weather map -----------------------------------------------
    Samples Open-Meteo across the visible extent (one request for the whole
    grid) and renders it as wind arrows or a coloured field. Keyless.
@@ -3648,15 +3723,6 @@ function slopeInit(){
   $('slopeClear').addEventListener('click', () => {
     slopeState.a = slopeState.b = null; slopeDraw();
   });
-  attachSearch('slopeSearch', c => map.setView([c.lat, c.lon], c.zoom || 14));
-  wireGoButton('slopeSearchGo', 'slopeSearch');
-  attachLatLon($('slopeSearch'), (lat, lon) => {
-    // fill A first, then B
-    if(!slopeState.a){ slopeState.a = {lat, lon}; }
-    else if(!slopeState.b){ slopeState.b = {lat, lon}; }
-    else { slopeState.a = {lat, lon}; slopeState.b = null; }
-    slopeDraw();
-  });
   $('slopeRun').addEventListener('click', runSlope);
 }
 async function runSlope(){
@@ -3755,7 +3821,9 @@ function wipeMapAnalysis(){
       if(tb) tb.textContent = '3D building view (extruded)'; } catch(e){}
   } catch(e){ /* consts not initialised yet at first load */ }
 }
+let ACTIVE_TAB = 'explore';
 function showTab(tab){
+  ACTIVE_TAB = tab;
   wipeMapAnalysis();
   ALL_TABS.forEach(t => { const el = $('tab-' + t); if(el) el.hidden = t !== tab; });
   // the shared Layer (dataset / year / opacity) shows on Explore, Zonal
@@ -4616,17 +4684,6 @@ function climatePointTab(prefix, mode){
   const el = id => $(prefix + id);
   function init(){
     if(st.inited) return; st.inited = true;
-    const goBtn = $(prefix + 'SearchGo');
-    if(goBtn) goBtn.addEventListener('click', () =>
-      el('Search').dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})));
-    attachSearch(prefix + 'Search', c => {
-      setPoint(c.lat, c.lon, c.label);
-      map.setView([c.lat, c.lon], c.zoom || 15);
-    });
-    attachLatLon(el('Search'), (lat, lon) => {
-      setPoint(lat, lon, lat.toFixed(5) + ', ' + lon.toFixed(5));
-      map.setView([lat, lon], 15);
-    });
     el('Pick').addEventListener('click', () => {
       mapClickMode = prefix + 'Pick';
       el('Status').textContent = 'Tap a location on the map\u2026';
@@ -4850,16 +4907,6 @@ async function aqInit(){
       `${ready ? '' : 'disabled'}> ${name} \u2014 ${badge}</label>`;
   }).join('');
 }
-async function aqGeocode(){
-  const q = $('aqSearchInput').value.trim(); if(!q) return;
-  try{
-    const cands = await geocode(q);
-    if(!cands.length) return toast('Place not found');
-    const lat = cands[0].lat, lon = cands[0].lon;
-    map.setView([lat, lon], cands[0].zoom || 16);
-    aqSetPoint(lat, lon, cands[0].label);
-  }catch(e){ toast('Search failed'); }
-}
 function aqSetPoint(lat, lon, label){
   aqState.lat = lat; aqState.lon = lon;
   aqLayer.clearLayers();
@@ -4872,17 +4919,6 @@ function aqSetPoint(lat, lon, label){
   $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
     ' \u2014 or tap the map to adjust';
 }
-attachSearch('aqSearchInput', c => {
-  map.setView([c.lat, c.lon], c.zoom || 16);
-  aqSetPoint(c.lat, c.lon, c.label);
-});
-$('aqSearchInput').addEventListener('keydown', ev => {
-  if(ev.key === 'Enter'){ ev.preventDefault(); aqGeocode(); }
-});
-wireGoButton('aqSearchGo', 'aqSearchInput');
-attachLatLon($('aqSearchInput'), (lat, lon) => {
-  map.setView([lat, lon], 16); aqSetPoint(lat, lon);
-});
 $('aqPick').addEventListener('click', () => {
   mapClickMode = 'aqPick';
   $('aqStatus').textContent = 'Tap a location on the map\u2026';
@@ -5284,39 +5320,6 @@ function drawSite(){
   addCrosshair(siteLayer, siteState.lat, siteState.lon, '#E4572E');
   map.panTo([siteState.lat, siteState.lon]);
 }
-async function siteGeocode(){
-  const q = $('siteSearch').value.trim(); if(!q) return;
-  try{
-    const cands = await geocode(q);
-    if(!cands.length) return toast('Place not found');
-    const lat = cands[0].lat, lon = cands[0].lon;
-    siteState.lat = lat; siteState.lon = lon;
-    if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
-    drawSite();
-    if(typeof enableSiteRun === 'function') enableSiteRun(); else $('siteRun').disabled = false;
-    map.setView([lat, lon], 15);
-    $('siteStatus').textContent = cands[0].label +
-      ' \u00b7 ' + lat.toFixed(5) + ', ' + lon.toFixed(5);
-  }catch(e){ toast('Search failed'); }
-}
-attachSearch('siteSearch', c => {
-  siteState.lat = c.lat; siteState.lon = c.lon;
-  if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
-  drawSite();
-  if(typeof enableSiteRun === 'function') enableSiteRun();
-  else $('siteRun').disabled = false;
-  map.setView([c.lat, c.lon], c.zoom || 15);
-  $('siteStatus').textContent = c.label + ' \u00b7 ' +
-    c.lat.toFixed(5) + ', ' + c.lon.toFixed(5);
-});
-wireGoButton('siteSearchGo', 'siteSearch');
-attachLatLon($('siteSearch'), (lat, lon) => {
-  siteState.lat = lat; siteState.lon = lon;
-  if(typeof clearSiteRegions === 'function') clearSiteRegions('point');
-  drawSite();
-  if(typeof enableSiteRun === 'function') enableSiteRun(); else $('siteRun').disabled = false;
-  map.setView([lat, lon], 15);
-});
 $('sitePick').addEventListener('click', () => {
   mapClickMode = 'sitePick';
   $('siteStatus').textContent = 'Tap the building or plot on the map\u2026';
@@ -5680,6 +5683,22 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <div id="loginFoot">built by VINAMRAVIGYAN TECHNOLOGIES PRIVATE LIMITED</div>
     </div>
   </div>
+  <div id="gotoPanel">
+    <div id="gotoHead">
+      <h3>Go to location</h3>
+      <button id="gotoClose">&#10005;</button>
+    </div>
+    <label class="fld" for="gotoSearch">Find a place</label>
+    <div class="searchGoRow">
+      <input type="text" id="gotoSearch" placeholder="Start typing a place name">
+      <button id="gotoSearchGo" class="ghost">Go</button>
+    </div>
+    <label class="fld">Or enter coordinates</label>
+    <div id="gotoLatLonSlot"></div>
+    <button id="gotoUse" class="primary" hidden>Use this point here</button>
+    <div id="gotoInfo"></div>
+  </div>
+
   <div id="aiModal">
     <div id="aiModalCard">
       <div id="aiModalHead">
