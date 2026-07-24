@@ -1212,7 +1212,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v109</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v110</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1317,7 +1317,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v109";
+const DSG_VERSION = "deepseego-v110";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3460,9 +3460,9 @@ let SL_DATA = null;
 
 // hypsometric ramp mirrored from the server so the map and the exported
 // sheet use the same colours
-const SL_HYPSO = [[0,[168,198,143]],[0.2,[208,220,150]],[0.4,[233,216,150]],
-                  [0.6,[214,178,120]],[0.75,[188,146,100]],[0.88,[163,130,118]],
-                  [1,[222,222,222]]];
+const SL_HYPSO = [[0,[122,176,108]],[0.18,[168,198,118]],[0.36,[214,205,126]],
+                  [0.54,[206,166,96]],[0.72,[176,128,78]],[0.88,[140,105,86]],
+                  [1,[205,205,205]]];
 function slHypso(t){
   t = Math.max(0, Math.min(1, t));
   for(let i = 0; i < SL_HYPSO.length - 1; i++){
