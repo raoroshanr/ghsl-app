@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v107"
+APP_VERSION = "deepseego-v108"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6938,9 +6938,20 @@ def _dem_contours(lat, lon, r, dem_key, interval):
                              "coordinates": [[float(p[0]), float(p[1])]
                                              for p in line]},
                 "properties": {"elevation_m": round(float(lev), 2)}})
+    # A downsampled elevation grid travels with the result so the exporter can
+    # paint true hypsometric bands, rather than trying to fill between lines
+    # (contours are open polylines, not nested polygons - filling them is
+    # unreliable, sampling the surface is exact).
+    step = max(1, rows // 64)
+    Zs = Z[::step, ::step]
+    grid = [[None if not math.isfinite(v) else round(float(v), 1) for v in row]
+            for row in Zs]
     return feats, {"min": round(zmin, 2), "max": round(zmax, 2),
                    "interval": interval, "dem": dem["label"],
-                   "res_m": dem["res_m"]}
+                   "res_m": dem["res_m"],
+                   "grid": grid,
+                   "grid_bounds": [lon0, lat0, lon1, lat1],
+                   "levels": [round(float(x), 2) for x in levels]}
 
 
 # ----------------------------------------------------------------------------
@@ -7051,10 +7062,69 @@ def _build_dxf(layers, lat, lon, interval=5.0):
     return ("\r\n".join(lines) + "\r\n").encode("utf-8"), epsg, zone
 
 
-def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False):
-    """Render the vector layers to an image, for JPEG/TIFF export."""
+# Hypsometric ramp: low ground green, rising through tan to brown, then grey
+# for the highest ground. This is the standard cartographic convention.
+_HYPSO = [
+    (0.00, (168, 198, 143)), (0.20, (208, 220, 150)), (0.40, (233, 216, 150)),
+    (0.60, (214, 178, 120)), (0.75, (188, 146, 100)), (0.88, (163, 130, 118)),
+    (1.00, (222, 222, 222)),
+]
+
+
+def _hypso_rgb(t):
+    t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+    for i in range(len(_HYPSO) - 1):
+        a, ca = _HYPSO[i]
+        b, cb = _HYPSO[i + 1]
+        if a <= t <= b:
+            f = 0.0 if b == a else (t - a) / (b - a)
+            return tuple(int(ca[k] + (cb[k] - ca[k]) * f) for k in range(3))
+    return _HYPSO[-1][1]
+
+
+def _hypso_band_image(meta, size):
+    """Paint elevation BANDS (one flat colour per contour interval) from the
+    sampled grid. Banding, not a smooth ramp, so the steps line up with the
+    contour lines drawn on top."""
+    from PIL import Image
+    grid = (meta or {}).get("grid")
+    if not grid:
+        return None
+    zmin = meta.get("min"); zmax = meta.get("max")
+    interval = meta.get("interval") or 5.0
+    if zmin is None or zmax is None or zmax - zmin < 1e-9:
+        return None
+    rows = len(grid); cols = len(grid[0]) if rows else 0
+    if rows < 2 or cols < 2:
+        return None
+    im = Image.new("RGB", (cols, rows), (255, 255, 255))
+    pxl = im.load()
+    span = max(1e-9, zmax - zmin)
+    for i in range(rows):
+        for j in range(cols):
+            v = grid[i][j]
+            if v is None:
+                pxl[j, i] = (255, 255, 255)
+                continue
+            # snap to the band the value falls in, so colour changes exactly
+            # where a contour line is drawn
+            band = math.floor((v - zmin) / interval) * interval + zmin
+            pxl[j, i] = _hypso_rgb((band - zmin) / span)
+    return im.resize(size, Image.NEAREST)
+
+
+def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False,
+                       basemap=False, furniture=True, title=None):
+    """Render the vector layers to a finished map sheet."""
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (px, px), (255, 255, 255))
+
+    # 1) hypsometric elevation bands underneath everything
+    cmeta = ((layers.get("contours") or {}).get("meta")) or {}
+    band = _hypso_band_image(cmeta, (px, px)) if cmeta.get("grid") else None
+    if band is not None:
+        img.paste(band, (0, 0))
+
     dr = ImageDraw.Draw(img)
     mlat = 110540.0
     mlon = 111320.0 * math.cos(math.radians(lat))
@@ -7074,6 +7144,18 @@ def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False):
         "buildings": {"outline": (150, 60, 40),   "width": 1,
                       "fill": (232, 205, 195)},
     }
+    # 2) optional transparent basemap so the drawing sits in real context
+    if basemap:
+        mlat0 = 110540.0
+        mlon0 = 111320.0 * math.cos(math.radians(lat))
+        bm = _osm_basemap_png(lon - r / mlon0, lat - r / mlat0,
+                              lon + r / mlon0, lat + r / mlat0,
+                              px, px, 0.35)
+        if bm is not None:
+            img.paste(Image.alpha_composite(
+                img.convert("RGBA"), bm.convert("RGBA")).convert("RGB"), (0, 0))
+            dr = ImageDraw.Draw(img)
+
     for key in ("contours", "water", "roads", "buildings"):
         block = layers.get(key)
         if not block:
@@ -7103,7 +7185,106 @@ def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False):
                         dr.line(pts, fill=st["outline"], width=st["width"])
                 else:
                     dr.line(pts, fill=st["outline"], width=st["width"])
+
+    if furniture:
+        img = _map_furniture(img, layers, lat, lon, r, cmeta, title)
     return img, (lon0, lat0, lon1, lat1)
+
+
+def _map_furniture(img, layers, lat, lon, r, cmeta, title=None):
+    """Title, legend, scale bar and north arrow - so a downloaded sheet is
+    self-explanatory without the app around it."""
+    from PIL import Image, ImageDraw
+    W, H = img.size
+    pad = max(14, W // 100)
+    strip = max(150, H // 8)
+    out = Image.new("RGB", (W, H + strip), (255, 255, 255))
+    out.paste(img, (0, 0))
+    dr = ImageDraw.Draw(out)
+    f_t = _font(max(22, W // 46), bold=True)
+    f_s = _font(max(14, W // 84))
+    f_xs = _font(max(12, W // 105))
+
+    # ---- title plate ----
+    ttl = title or "Site layers"
+    sub = f"{lat:.5f}, {lon:.5f}  \u00b7  radius {int(r)} m"
+    tb = dr.textbbox((0, 0), ttl, font=f_t)
+    plate_w = max(tb[2] - tb[0], int(dr.textlength(sub, font=f_s))) + 2 * pad
+    dr.rectangle([pad, pad, pad + plate_w, pad + (tb[3] - tb[1]) + 2 * pad + 22],
+                 fill=(255, 255, 255), outline=(90, 100, 95))
+    dr.text((pad * 1.6, pad * 1.3), ttl, font=f_t, fill=(20, 33, 28))
+    dr.text((pad * 1.6, pad * 1.3 + (tb[3] - tb[1]) + 8), sub, font=f_s,
+            fill=(90, 100, 95))
+
+    # ---- north arrow ----
+    ax, ay = W - pad - 40, pad + 10
+    dr.polygon([(ax, ay), (ax + 17, ay + 52), (ax, ay + 38), (ax - 17, ay + 52)],
+               fill=(255, 255, 255), outline=(20, 20, 20))
+    dr.text((ax - 8, ay + 54), "N", font=f_s, fill=(255, 255, 255),
+            stroke_width=3, stroke_fill=(20, 20, 20))
+
+    # ---- legend ----
+    y = H + 14
+    x = pad
+    dr.text((x, y), "LEGEND", font=f_xs, fill=(90, 100, 95))
+    y += 20
+    entries = [
+        ("buildings", "Buildings", (150, 60, 40), (232, 205, 195)),
+        ("roads", "Roads", (90, 90, 90), None),
+        ("water", "Water", (60, 130, 190), (200, 225, 245)),
+        ("contours", "Contours", (120, 140, 125), None),
+    ]
+    for key, label, line_c, fill_c in entries:
+        block = layers.get(key)
+        if not block or not block.get("features"):
+            continue
+        if fill_c:
+            dr.rectangle([x, y, x + 26, y + 14], fill=fill_c, outline=line_c)
+        else:
+            dr.line([(x, y + 7), (x + 26, y + 7)], fill=line_c, width=3)
+        n = block.get("count", len(block.get("features", [])))
+        dr.text((x + 34, y - 1), f"{label} ({n})", font=f_s, fill=(40, 50, 45))
+        src_txt = str(block.get("source", ""))[:34]
+        dr.text((x + 34, y + 16), src_txt, font=f_xs, fill=(130, 140, 135))
+        x += 30 + int(dr.textlength(f"{label} ({n})", font=f_s)) + 60
+
+    # ---- elevation band key ----
+    if cmeta.get("grid"):
+        zmin, zmax = cmeta.get("min"), cmeta.get("max")
+        iv = cmeta.get("interval") or 5
+        bw, bh = min(430, W // 4), 16
+        bx, by = pad, H + strip - 46
+        steps = max(2, min(48, int(round((zmax - zmin) / iv)) or 2))
+        for i in range(steps):
+            t = i / max(1, steps - 1)
+            c = _hypso_rgb(t)
+            dr.rectangle([bx + i * bw / steps, by,
+                          bx + (i + 1) * bw / steps, by + bh], fill=c)
+        dr.rectangle([bx, by, bx + bw, by + bh], outline=(60, 60, 60))
+        dr.text((bx, by + bh + 3), f"{zmin} m", font=f_xs, fill=(40, 50, 45))
+        rt = f"{zmax} m  \u00b7  {iv} m interval  \u00b7  {cmeta.get('dem','')}"
+        dr.text((bx + bw - int(dr.textlength(rt, font=f_xs)), by + bh + 3), rt,
+                font=f_xs, fill=(40, 50, 45))
+
+    # ---- scale bar ----
+    ground_km = 2 * r / 1000.0
+    target = W * 0.20
+    km_per_px = ground_km / W
+    nice = 0.1
+    for cand in (0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20):
+        if cand <= target * km_per_px:
+            nice = cand
+    sw = int(nice / km_per_px)
+    sx, sy = W - pad - sw, H + strip - 40
+    dr.rectangle([sx, sy, sx + sw, sy + 10], fill=(255, 255, 255),
+                 outline=(30, 30, 30))
+    dr.rectangle([sx, sy, sx + sw // 2, sy + 10], fill=(30, 30, 30))
+    lab = f"{nice:g} km" if nice >= 1 else f"{int(nice * 1000)} m"
+    dr.text((sx + sw - int(dr.textlength(lab, font=f_xs)), sy - 18), lab,
+            font=f_xs, fill=(30, 40, 35))
+    dr.text((pad, H + strip - 18), "DeepSeeGo \u00b7 Vinamravigyan Technologies",
+            font=f_xs, fill=(140, 150, 145))
+    return out
 
 
 def _geotiff_bytes(img, bounds, lat, lon):
@@ -7140,6 +7321,9 @@ class ExportLayersQuery(BaseModel):
     fmt: str = "dxf"               # dxf | geojson | shp | geotiff | jpeg | png
     name: str = "deepseego_site"
     contour_interval_m: float = 5.0
+    basemap: bool = False          # underlay the OSM map, faded
+    furniture: bool = True         # title, legend, scale bar, north arrow
+    title: Optional[str] = None
 
 
 @app.post("/export_layers")
@@ -7185,8 +7369,13 @@ def export_layers(q: ExportLayersQuery):
         return export_shapefile(ExportShapefileQuery(name=safe, features=feats))
 
     if fmt in ("jpeg", "jpg", "png", "geotiff", "tiff"):
-        img, bounds = _render_layers_png(layers, q.lat, q.lon,
-                                         float(q.radius_m), px=2048)
+        img, bounds = _render_layers_png(
+            layers, q.lat, q.lon, float(q.radius_m), px=2048,
+            basemap=bool(q.basemap),
+            # a GeoTIFF must stay pixel-aligned to its bounds, so furniture is
+            # never baked into it - it would corrupt the georeferencing
+            furniture=bool(q.furniture) and q.fmt.lower() not in ("geotiff", "tiff"),
+            title=q.title)
         if fmt in ("geotiff", "tiff"):
             data = _geotiff_bytes(img, bounds, q.lat, q.lon)
             return Response(content=data, media_type="image/tiff",
