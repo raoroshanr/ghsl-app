@@ -247,6 +247,24 @@ a.dsgGoto{display:flex!important;align-items:center;justify-content:center;
   font:700 12px/1 Arial,Helvetica,sans-serif;color:#0B5A49;background:#fff;
   text-decoration:none;white-space:nowrap;margin-top:6px!important}
 a.dsgGoto:hover{background:#f4f7f5;color:#0B5A49}
+a.dsgRoi{display:flex!important;align-items:center;justify-content:center;
+  width:auto!important;min-width:34px;height:30px!important;padding:0 10px;
+  font:700 12px/1 Arial,Helvetica,sans-serif;color:#0B5A49;background:#fff;
+  text-decoration:none;white-space:nowrap;margin-top:6px!important}
+a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
+#roiPanel{position:fixed;top:96px;left:50%;transform:translateX(-50%);
+  z-index:4500;display:none;width:min(430px,94vw);max-height:80vh;
+  overflow-y:auto;padding:14px 16px 16px;background:#0F1A15;
+  border:1px solid #2E3E37;border-radius:12px;
+  box-shadow:0 18px 46px rgba(0,0,0,.45);font-family:Arial,Helvetica,sans-serif}
+#roiPanel.on{display:block}
+#roiHead{display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:8px}
+#roiHead h3{margin:0;font-size:14px;color:#E7EDE8}
+#roiClose{background:none;border:1px solid #2E3E37;border-radius:6px;
+  color:#9FB0A8;cursor:pointer;padding:4px 9px;font-size:11px;
+  font-family:Arial,Helvetica,sans-serif}
+#roiClose:hover{background:#1D2D26;color:#E7EDE8}
 #gotoPanel{position:fixed;top:96px;left:50%;transform:translateX(-50%);
   z-index:4500;display:none;width:min(420px,94vw);padding:14px 16px 16px;
   background:#0F1A15;border:1px solid #2E3E37;border-radius:12px;
@@ -368,6 +386,10 @@ a.dsgGoto:hover{background:#f4f7f5;color:#0B5A49}
   font-family:Arial,Helvetica,sans-serif}
 .slDl button:hover{background:#1D2D26}
 .slDl button:disabled{opacity:.4;cursor:default}
+.slChk{display:flex;align-items:flex-start;gap:7px;margin-top:5px;
+  font-size:11px;line-height:1.4;color:#C9D3CC;
+  font-family:Arial,Helvetica,sans-serif}
+.slChk input{margin-top:1px;flex:0 0 auto}
 .mmBox{padding:0!important;overflow:hidden}
 .mmToggle{width:100%;text-align:left;background:#12201B;border:none;
   border-bottom:1px solid #2A3A33;color:#7FD0BC;cursor:pointer;
@@ -710,78 +732,8 @@ label.chk input{width:auto}
     <div id="tab-explore">
 
     <section>
-      <h2>Region of Interest</h2>
-      <div class="modes">
-        <button class="ghost active" data-mode="draw">Draw</button>
-        <button class="ghost" data-mode="corners">Corners</button>
-        <button class="ghost" data-mode="circles">Circles</button>
-        <button class="ghost" data-mode="admin">Boundary</button>
-        <button class="ghost" data-mode="shape">Shapefile</button>
-        <button class="ghost" data-mode="create">Custom Draw</button>
-      </div>
-
-      <div class="modepane show" id="pane-draw">
-        <p class="hint">Tap the map at one corner, then at the opposite corner, to draw a rectangle.</p>
-        <button id="drawStart" style="width:100%">Start drawing rectangle</button>
-      </div>
-
-      <div class="modepane" id="pane-corners">
-        <p class="hint">Rectangle from lat/lon bounds.</p>
-        <div class="grid2">
-          <div><label class="fld">North lat</label><input type="number" id="cN" step="any" placeholder="13.05"></div>
-          <div><label class="fld">South lat</label><input type="number" id="cS" step="any" placeholder="12.75"></div>
-          <div><label class="fld">West lon</label><input type="number" id="cW" step="any" placeholder="74.70"></div>
-          <div><label class="fld">East lon</label><input type="number" id="cE" step="any" placeholder="75.00"></div>
-        </div>
-        <button id="cornersApply" style="width:100%;margin-top:8px">Apply rectangle</button>
-      </div>
-
-      <div class="modepane" id="pane-circles">
-        <p class="hint">One or more circles — lat, lon, radius (km). ◎ fills a row from a map tap.</p>
-        <div id="circleRows"></div>
-        <div style="display:flex;gap:6px;margin-top:6px">
-          <button id="circleAdd" class="ghost">+ Add circle</button>
-          <button id="circlesApply" style="flex:1">Apply circles</button>
-        </div>
-      </div>
-
-      <div class="modepane" id="pane-admin">
-        <p class="hint">State &amp; district boundaries (FAO GAUL, served from Earth Engine).</p>
-        <label class="fld" for="stateSel">State</label>
-        <select id="stateSel"><option value="">Loading states…</option></select>
-        <label class="fld" for="districtSel">District</label>
-        <select id="districtSel"><option value="">Entire state</option></select>
-        <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
-      </div>
-
-      <div class="modepane" id="pane-create">
-        <p class="hint">Draw your own geometry, use it as the region, and download it as a shapefile (.zip containing .shp/.shx/.dbf/.prj).</p>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button id="crPoly" class="ghost" style="flex:1">&#9648; Polygon</button>
-          <button id="crLine" class="ghost" style="flex:1">&#9585; Line</button>
-          <button id="crPoint" class="ghost" style="flex:1">&#9679; Point</button>
-        </div>
-        <div id="crHint" class="hint" style="min-height:18px;margin-top:6px">Pick a geometry type, then tap the map.</div>
-        <div style="display:flex;gap:6px;margin-top:4px">
-          <button id="crUndo" class="ghost" style="flex:1">Undo point</button>
-          <button id="crFinish" class="ghost" style="flex:1" disabled>Finish</button>
-        </div>
-        <div id="crList" class="hint" style="margin-top:6px"></div>
-        <label class="fld" for="crName" style="margin-top:6px">Layer name</label>
-        <input type="text" id="crName" placeholder="my_shapes" style="width:100%">
-        <div style="display:flex;gap:6px;margin-top:8px">
-          <button id="crUseRegion" style="flex:1" disabled>Use as region</button>
-          <button id="crExport" class="primary" style="flex:1" disabled>&#10515; Shapefile</button>
-        </div>
-        <button id="crClear" class="ghost" style="width:100%;margin-top:6px">Clear drawings</button>
-      </div>
-
-      <div class="modepane" id="pane-shape">
-        <label class="fld" for="shapeSel">Saved shapes</label>
-        <select id="shapeSel"><option value="">Loading&hellip;</option></select>
-        <button id="shapeLoad" style="width:100%;margin-top:6px">Load shape</button>
-      </div>
-
+      <h2>Temporal analysis</h2>
+      <p class="hint">Set the area with the <b>Region of Interest</b> button on the map, then analyse how a dataset changes through time.</p>
       <div id="regionStatus">No region selected yet.</div>
       <div style="display:flex;gap:6px;margin-top:8px">
         <button id="regionClear" class="ghost">Clear</button>
@@ -956,6 +908,9 @@ label.chk input{width:auto}
       <div id="slInfo" class="hint" style="min-height:18px"></div>
 
       <label class="fld">Download</label>
+      <label class="slChk"><input type="checkbox" id="slBasemap"> Include map underlay (faded street map behind the drawing)</label>
+      <label class="slChk"><input type="checkbox" id="slFurniture" checked> Add title, legend, scale bar and north arrow</label>
+      <input type="text" id="slTitle" placeholder="Sheet title (optional)" style="width:100%;box-sizing:border-box;padding:6px 8px;margin-top:5px;font-size:11.5px;background:#12201B;color:#E7EDE8;border:1px solid #2E3E37;border-radius:6px;font-family:Arial,Helvetica,sans-serif">
       <div class="slDl">
         <button data-fmt="dxf">DXF (CAD)</button>
         <button data-fmt="geojson">GeoJSON</button>
@@ -1257,7 +1212,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v107</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v108</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1284,7 +1239,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v107";
+const DSG_VERSION = "deepseego-v108";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1660,6 +1615,20 @@ const GotoBtn = L.Control.extend({
   }
 });
 new GotoBtn({position: 'topleft'}).addTo(map);
+
+// Region of Interest, previously buried in the Explore tab. It defines the
+// area every analysis uses, so it belongs on the map, not inside one tab.
+const RoiBtn = L.Control.extend({
+  onAdd: function(){
+    const a = L.DomUtil.create('a', 'leaflet-bar dsgRoi');
+    a.href = '#'; a.title = 'Define the region of interest';
+    a.innerHTML = 'Region of Interest';
+    L.DomEvent.on(a, 'click', L.DomEvent.stop)
+              .on(a, 'click', () => roiOpen());
+    return a;
+  }
+});
+new RoiBtn({position: 'topleft'}).addTo(map);
 
 L.control.scale({imperial:false, position:'bottomleft'}).addTo(map);
 // "New" button - clears every overlay so a fresh analysis can start.
@@ -2140,6 +2109,7 @@ function setRegion(spec, desc, fit){
   if(spec && spec.type !== 'advanced') baseRoiSpec = spec;
   regionSpec = spec; regionDesc = desc;
   $('regionStatus').textContent = desc;
+  if(typeof roiSync === 'function') roiSync();
   $('runAnalysis').disabled = !spec;
   if(fit && regionLayers.getLayers().length){
     map.fitBounds(regionLayers.getBounds().pad(0.15));
@@ -3410,6 +3380,23 @@ $('strip').addEventListener('click', async ev => {
 const siteLayerGroup = L.featureGroup().addTo(map);
 let SL_DATA = null;
 
+// hypsometric ramp mirrored from the server so the map and the exported
+// sheet use the same colours
+const SL_HYPSO = [[0,[168,198,143]],[0.2,[208,220,150]],[0.4,[233,216,150]],
+                  [0.6,[214,178,120]],[0.75,[188,146,100]],[0.88,[163,130,118]],
+                  [1,[222,222,222]]];
+function slHypso(t){
+  t = Math.max(0, Math.min(1, t));
+  for(let i = 0; i < SL_HYPSO.length - 1; i++){
+    const [a, ca] = SL_HYPSO[i], [b, cb] = SL_HYPSO[i+1];
+    if(t >= a && t <= b){
+      const f = (b === a) ? 0 : (t - a) / (b - a);
+      const c = ca.map((v, k) => Math.round(v + (cb[k] - v) * f));
+      return `rgb(${c[0]},${c[1]},${c[2]})`;
+    }
+  }
+  return 'rgb(222,222,222)';
+}
 const SL_STYLE = {
   contours:  {color:'#7FD0BC', weight:0.9, opacity:.75, fill:false},
   water:     {color:'#2F84C4', weight:2,   fillColor:'#9FCBEA', fillOpacity:.45},
@@ -3473,8 +3460,19 @@ async function slLoad(){
     ['contours','water','roads','buildings'].forEach(k => {
       const block = j.layers[k];
       if(!block || !block.features.length) return;
+      const cm = (j.layers.contours || {}).meta || {};
+      const zlo = cm.min, zhi = cm.max;
       L.geoJSON({type:'FeatureCollection', features: block.features},
-        {style: SL_STYLE[k],
+        {style: (f) => {
+           if(k !== 'contours') return SL_STYLE[k];
+           const e = (f.properties || {}).elevation_m;
+           if(e == null || zhi == null || zhi - zlo < 1e-9) return SL_STYLE.contours;
+           const iv = cm.interval || 5;
+           const isIndex = Math.abs((e / iv) % 5) < 1e-6;
+           return {color: slHypso((e - zlo) / (zhi - zlo)),
+                   weight: isIndex ? 2.0 : 1.0,
+                   opacity: isIndex ? 1 : .8, fill: false};
+         },
          onEachFeature: (f, lyr) => {
            const p = f.properties || {};
            const bits = [];
@@ -3515,6 +3513,9 @@ async function slExport(fmt){
       body: JSON.stringify({lat: SL_DATA.lat, lon: SL_DATA.lon,
         radius_m: SL_DATA.radius_m, layers: SL_DATA.layers, fmt: fmt,
         contour_interval_m: parseFloat($('slInterval').value) || 5,
+        basemap: $('slBasemap').checked,
+        furniture: $('slFurniture').checked,
+        title: ($('slTitle').value || '').trim() || null,
         name: 'DeepSeeGo_site'})});
     if(!r.ok){
       let d=''; try{ d = (await r.json()).detail || ''; }catch(e){}
@@ -3971,12 +3972,30 @@ function gotoOpen(){
   setTimeout(() => { const i = $('gotoSearch'); if(i) i.focus(); }, 30);
 }
 function gotoClose(){ $('gotoPanel').classList.remove('on'); }
+
+function roiOpen(){
+  $('roiPanel').classList.add('on');
+  gotoClose();
+  roiSync();
+}
+function roiClose(){ $('roiPanel').classList.remove('on'); }
+function roiSync(){
+  // mirror the status line into the panel so the state is visible where it is set
+  const m = $('roiStatusMirror'), s = $('regionStatus');
+  if(m && s) m.textContent = s.textContent;
+}
 function gotoInit(){
   if(gotoInit._done) return; gotoInit._done = true;
   attachSearch('gotoSearch', c => gotoShow(c.lat, c.lon, c.label, c.zoom));
   // the lat/lon row lives in its own slot so it lines up under the search
   attachLatLon($('gotoSearch'), (la, lo) => gotoShow(la, lo, null, 15));
   $('gotoClose').addEventListener('click', gotoClose);
+  const rc = $('roiClose');
+  if(rc) rc.addEventListener('click', roiClose);
+  const rp = $('roiPanel');
+  if(rp) rp.addEventListener('click', ev => {
+    if(ev.target && ev.target.id === 'roiPanel') roiClose();
+  });
   $('gotoUse').addEventListener('click', () => {
     const t = GOTO_TARGETS[ACTIVE_TAB];
     if(!t || !GOTO_LAST) return;
@@ -6463,6 +6482,84 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <div id="loginFoot">built by VINAMRAVIGYAN TECHNOLOGIES PRIVATE LIMITED</div>
     </div>
   </div>
+  <div id="roiPanel">
+    <div id="roiHead">
+      <h3>Region of Interest</h3>
+      <button id="roiClose">&#10005;</button>
+    </div>
+      <div class="modes">
+        <button class="ghost active" data-mode="draw">Draw</button>
+        <button class="ghost" data-mode="corners">Corners</button>
+        <button class="ghost" data-mode="circles">Circles</button>
+        <button class="ghost" data-mode="admin">Boundary</button>
+        <button class="ghost" data-mode="shape">Shapefile</button>
+        <button class="ghost" data-mode="create">Custom Draw</button>
+      </div>
+
+      <div class="modepane show" id="pane-draw">
+        <p class="hint">Tap the map at one corner, then at the opposite corner, to draw a rectangle.</p>
+        <button id="drawStart" style="width:100%">Start drawing rectangle</button>
+      </div>
+
+      <div class="modepane" id="pane-corners">
+        <p class="hint">Rectangle from lat/lon bounds.</p>
+        <div class="grid2">
+          <div><label class="fld">North lat</label><input type="number" id="cN" step="any" placeholder="13.05"></div>
+          <div><label class="fld">South lat</label><input type="number" id="cS" step="any" placeholder="12.75"></div>
+          <div><label class="fld">West lon</label><input type="number" id="cW" step="any" placeholder="74.70"></div>
+          <div><label class="fld">East lon</label><input type="number" id="cE" step="any" placeholder="75.00"></div>
+        </div>
+        <button id="cornersApply" style="width:100%;margin-top:8px">Apply rectangle</button>
+      </div>
+
+      <div class="modepane" id="pane-circles">
+        <p class="hint">One or more circles — lat, lon, radius (km). ◎ fills a row from a map tap.</p>
+        <div id="circleRows"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="circleAdd" class="ghost">+ Add circle</button>
+          <button id="circlesApply" style="flex:1">Apply circles</button>
+        </div>
+      </div>
+
+      <div class="modepane" id="pane-admin">
+        <p class="hint">State &amp; district boundaries (FAO GAUL, served from Earth Engine).</p>
+        <label class="fld" for="stateSel">State</label>
+        <select id="stateSel"><option value="">Loading states…</option></select>
+        <label class="fld" for="districtSel">District</label>
+        <select id="districtSel"><option value="">Entire state</option></select>
+        <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
+      </div>
+
+      <div class="modepane" id="pane-create">
+        <p class="hint">Draw your own geometry, use it as the region, and download it as a shapefile (.zip containing .shp/.shx/.dbf/.prj).</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button id="crPoly" class="ghost" style="flex:1">&#9648; Polygon</button>
+          <button id="crLine" class="ghost" style="flex:1">&#9585; Line</button>
+          <button id="crPoint" class="ghost" style="flex:1">&#9679; Point</button>
+        </div>
+        <div id="crHint" class="hint" style="min-height:18px;margin-top:6px">Pick a geometry type, then tap the map.</div>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button id="crUndo" class="ghost" style="flex:1">Undo point</button>
+          <button id="crFinish" class="ghost" style="flex:1" disabled>Finish</button>
+        </div>
+        <div id="crList" class="hint" style="margin-top:6px"></div>
+        <label class="fld" for="crName" style="margin-top:6px">Layer name</label>
+        <input type="text" id="crName" placeholder="my_shapes" style="width:100%">
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button id="crUseRegion" style="flex:1" disabled>Use as region</button>
+          <button id="crExport" class="primary" style="flex:1" disabled>&#10515; Shapefile</button>
+        </div>
+        <button id="crClear" class="ghost" style="width:100%;margin-top:6px">Clear drawings</button>
+      </div>
+
+      <div class="modepane" id="pane-shape">
+        <label class="fld" for="shapeSel">Saved shapes</label>
+        <select id="shapeSel"><option value="">Loading&hellip;</option></select>
+        <button id="shapeLoad" style="width:100%;margin-top:6px">Load shape</button>
+      </div>
+    <div id="roiStatusMirror" class="hint" style="margin-top:8px"></div>
+  </div>
+
   <div id="gotoPanel">
     <div id="gotoHead">
       <h3>Go to location</h3>
