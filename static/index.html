@@ -1212,12 +1212,90 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v108</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v109</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+  <div id="roiPanel">
+    <div id="roiHead">
+      <h3>Region of Interest</h3>
+      <button id="roiClose">&#10005;</button>
+    </div>
+      <div class="modes">
+        <button class="ghost active" data-mode="draw">Draw</button>
+        <button class="ghost" data-mode="corners">Corners</button>
+        <button class="ghost" data-mode="circles">Circles</button>
+        <button class="ghost" data-mode="admin">Boundary</button>
+        <button class="ghost" data-mode="shape">Shapefile</button>
+        <button class="ghost" data-mode="create">Custom Draw</button>
+      </div>
+
+      <div class="modepane show" id="pane-draw">
+        <p class="hint">Tap the map at one corner, then at the opposite corner, to draw a rectangle.</p>
+        <button id="drawStart" style="width:100%">Start drawing rectangle</button>
+      </div>
+
+      <div class="modepane" id="pane-corners">
+        <p class="hint">Rectangle from lat/lon bounds.</p>
+        <div class="grid2">
+          <div><label class="fld">North lat</label><input type="number" id="cN" step="any" placeholder="13.05"></div>
+          <div><label class="fld">South lat</label><input type="number" id="cS" step="any" placeholder="12.75"></div>
+          <div><label class="fld">West lon</label><input type="number" id="cW" step="any" placeholder="74.70"></div>
+          <div><label class="fld">East lon</label><input type="number" id="cE" step="any" placeholder="75.00"></div>
+        </div>
+        <button id="cornersApply" style="width:100%;margin-top:8px">Apply rectangle</button>
+      </div>
+
+      <div class="modepane" id="pane-circles">
+        <p class="hint">One or more circles — lat, lon, radius (km). ◎ fills a row from a map tap.</p>
+        <div id="circleRows"></div>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="circleAdd" class="ghost">+ Add circle</button>
+          <button id="circlesApply" style="flex:1">Apply circles</button>
+        </div>
+      </div>
+
+      <div class="modepane" id="pane-admin">
+        <p class="hint">State &amp; district boundaries (FAO GAUL, served from Earth Engine).</p>
+        <label class="fld" for="stateSel">State</label>
+        <select id="stateSel"><option value="">Loading states…</option></select>
+        <label class="fld" for="districtSel">District</label>
+        <select id="districtSel"><option value="">Entire state</option></select>
+        <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
+      </div>
+
+      <div class="modepane" id="pane-create">
+        <p class="hint">Draw your own geometry, use it as the region, and download it as a shapefile (.zip containing .shp/.shx/.dbf/.prj).</p>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button id="crPoly" class="ghost" style="flex:1">&#9648; Polygon</button>
+          <button id="crLine" class="ghost" style="flex:1">&#9585; Line</button>
+          <button id="crPoint" class="ghost" style="flex:1">&#9679; Point</button>
+        </div>
+        <div id="crHint" class="hint" style="min-height:18px;margin-top:6px">Pick a geometry type, then tap the map.</div>
+        <div style="display:flex;gap:6px;margin-top:4px">
+          <button id="crUndo" class="ghost" style="flex:1">Undo point</button>
+          <button id="crFinish" class="ghost" style="flex:1" disabled>Finish</button>
+        </div>
+        <div id="crList" class="hint" style="margin-top:6px"></div>
+        <label class="fld" for="crName" style="margin-top:6px">Layer name</label>
+        <input type="text" id="crName" placeholder="my_shapes" style="width:100%">
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button id="crUseRegion" style="flex:1" disabled>Use as region</button>
+          <button id="crExport" class="primary" style="flex:1" disabled>&#10515; Shapefile</button>
+        </div>
+        <button id="crClear" class="ghost" style="width:100%;margin-top:6px">Clear drawings</button>
+      </div>
+
+      <div class="modepane" id="pane-shape">
+        <label class="fld" for="shapeSel">Saved shapes</label>
+        <select id="shapeSel"><option value="">Loading&hellip;</option></select>
+        <button id="shapeLoad" style="width:100%;margin-top:6px">Load shape</button>
+      </div>
+    <div id="roiStatusMirror" class="hint" style="margin-top:8px"></div>
+  </div>
+
 <script>
 /* ============================================================
    DeepSeeGo frontend
@@ -1239,7 +1317,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v108";
+const DSG_VERSION = "deepseego-v109";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -6482,84 +6560,6 @@ map.on('click', () => { if(window.innerWidth <= 860) $('panel').classList.remove
       <div id="loginFoot">built by VINAMRAVIGYAN TECHNOLOGIES PRIVATE LIMITED</div>
     </div>
   </div>
-  <div id="roiPanel">
-    <div id="roiHead">
-      <h3>Region of Interest</h3>
-      <button id="roiClose">&#10005;</button>
-    </div>
-      <div class="modes">
-        <button class="ghost active" data-mode="draw">Draw</button>
-        <button class="ghost" data-mode="corners">Corners</button>
-        <button class="ghost" data-mode="circles">Circles</button>
-        <button class="ghost" data-mode="admin">Boundary</button>
-        <button class="ghost" data-mode="shape">Shapefile</button>
-        <button class="ghost" data-mode="create">Custom Draw</button>
-      </div>
-
-      <div class="modepane show" id="pane-draw">
-        <p class="hint">Tap the map at one corner, then at the opposite corner, to draw a rectangle.</p>
-        <button id="drawStart" style="width:100%">Start drawing rectangle</button>
-      </div>
-
-      <div class="modepane" id="pane-corners">
-        <p class="hint">Rectangle from lat/lon bounds.</p>
-        <div class="grid2">
-          <div><label class="fld">North lat</label><input type="number" id="cN" step="any" placeholder="13.05"></div>
-          <div><label class="fld">South lat</label><input type="number" id="cS" step="any" placeholder="12.75"></div>
-          <div><label class="fld">West lon</label><input type="number" id="cW" step="any" placeholder="74.70"></div>
-          <div><label class="fld">East lon</label><input type="number" id="cE" step="any" placeholder="75.00"></div>
-        </div>
-        <button id="cornersApply" style="width:100%;margin-top:8px">Apply rectangle</button>
-      </div>
-
-      <div class="modepane" id="pane-circles">
-        <p class="hint">One or more circles — lat, lon, radius (km). ◎ fills a row from a map tap.</p>
-        <div id="circleRows"></div>
-        <div style="display:flex;gap:6px;margin-top:6px">
-          <button id="circleAdd" class="ghost">+ Add circle</button>
-          <button id="circlesApply" style="flex:1">Apply circles</button>
-        </div>
-      </div>
-
-      <div class="modepane" id="pane-admin">
-        <p class="hint">State &amp; district boundaries (FAO GAUL, served from Earth Engine).</p>
-        <label class="fld" for="stateSel">State</label>
-        <select id="stateSel"><option value="">Loading states…</option></select>
-        <label class="fld" for="districtSel">District</label>
-        <select id="districtSel"><option value="">Entire state</option></select>
-        <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
-      </div>
-
-      <div class="modepane" id="pane-create">
-        <p class="hint">Draw your own geometry, use it as the region, and download it as a shapefile (.zip containing .shp/.shx/.dbf/.prj).</p>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button id="crPoly" class="ghost" style="flex:1">&#9648; Polygon</button>
-          <button id="crLine" class="ghost" style="flex:1">&#9585; Line</button>
-          <button id="crPoint" class="ghost" style="flex:1">&#9679; Point</button>
-        </div>
-        <div id="crHint" class="hint" style="min-height:18px;margin-top:6px">Pick a geometry type, then tap the map.</div>
-        <div style="display:flex;gap:6px;margin-top:4px">
-          <button id="crUndo" class="ghost" style="flex:1">Undo point</button>
-          <button id="crFinish" class="ghost" style="flex:1" disabled>Finish</button>
-        </div>
-        <div id="crList" class="hint" style="margin-top:6px"></div>
-        <label class="fld" for="crName" style="margin-top:6px">Layer name</label>
-        <input type="text" id="crName" placeholder="my_shapes" style="width:100%">
-        <div style="display:flex;gap:6px;margin-top:8px">
-          <button id="crUseRegion" style="flex:1" disabled>Use as region</button>
-          <button id="crExport" class="primary" style="flex:1" disabled>&#10515; Shapefile</button>
-        </div>
-        <button id="crClear" class="ghost" style="width:100%;margin-top:6px">Clear drawings</button>
-      </div>
-
-      <div class="modepane" id="pane-shape">
-        <label class="fld" for="shapeSel">Saved shapes</label>
-        <select id="shapeSel"><option value="">Loading&hellip;</option></select>
-        <button id="shapeLoad" style="width:100%;margin-top:6px">Load shape</button>
-      </div>
-    <div id="roiStatusMirror" class="hint" style="margin-top:8px"></div>
-  </div>
-
   <div id="gotoPanel">
     <div id="gotoHead">
       <h3>Go to location</h3>
