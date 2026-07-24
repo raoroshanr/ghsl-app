@@ -335,6 +335,61 @@ a.dsgGoto:hover{background:#f4f7f5;color:#0B5A49}
   font-family:Arial,Helvetica,sans-serif}
 .aiUpRow input[type=file]::file-selector-button:hover{background:#1D2D26}
 .aiUpRow .ghost{flex:0 0 auto;padding:6px 12px}
+.dxSrc{border:1px solid #2E3E37;border-radius:8px;padding:8px 9px;margin-top:6px;
+  background:#12201B}
+.dxSrcHead{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+.dxSrcHead input[type=text]{flex:1;min-width:0;padding:5px 7px;font-size:11.5px;
+  background:#0F1A15;color:#E7EDE8;border:1px solid #2E3E37;border-radius:5px;
+  font-family:Arial,Helvetica,sans-serif}
+.dxSrcHead button{flex:0 0 auto;padding:3px 8px;font-size:11px;background:none;
+  border:1px solid #2E3E37;border-radius:5px;color:#9FB0A8;cursor:pointer}
+.dxGrid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.dxGrid label{font-size:10px;color:#8A968F;display:block;
+  font-family:Arial,Helvetica,sans-serif}
+.dxGrid input,.dxGrid select{width:100%;box-sizing:border-box;padding:5px 6px;
+  font-size:11px;background:#0F1A15;color:#E7EDE8;border:1px solid #2E3E37;
+  border-radius:5px;font-family:Arial,Helvetica,sans-serif}
+.dxTest{display:flex;gap:8px;padding:6px 8px;border-radius:6px;margin-top:4px;
+  font-size:11px;font-family:Arial,Helvetica,sans-serif;line-height:1.4}
+.dxTest.ok{background:rgba(132,204,22,.10);border:1px solid #3d5a1f;color:#C7E59A}
+.dxTest.bad{background:rgba(228,87,46,.12);border:1px solid #6b2f1c;color:#F0B49E}
+.dxTest b{display:block}
+.dxWhy{color:#8A968F;font-size:10px;margin-top:2px}
+.mmBox{padding:0!important;overflow:hidden}
+.mmToggle{width:100%;text-align:left;background:#12201B;border:none;
+  border-bottom:1px solid #2A3A33;color:#7FD0BC;cursor:pointer;
+  padding:10px 12px;font:700 12px/1.3 Arial,Helvetica,sans-serif}
+.mmToggle:hover{background:#182a23}
+.mmToggle .per{color:#8A968F;font-weight:400;margin-left:6px;font-size:10.5px}
+.mmChev{display:inline-block;transition:transform .15s;margin-right:4px}
+.mmBox.open .mmChev{transform:rotate(90deg)}
+.mmBody{display:none;padding:10px 12px 14px}
+.mmBox.open .mmBody{display:block}
+.mmH{font:700 13px/1.3 Arial,Helvetica,sans-serif;color:#E7EDE8;margin-bottom:8px}
+.mmSec{font:700 10.5px/1.3 Arial,Helvetica,sans-serif;color:#7FD0BC;
+  text-transform:uppercase;letter-spacing:.06em;margin:14px 0 5px;
+  padding-top:8px;border-top:1px solid #22322B}
+.mmEq{margin-bottom:10px}
+.mmEqName{font:700 11.5px/1.4 Arial,Helvetica,sans-serif;color:#E7EDE8;
+  margin-bottom:3px}
+.mmExpr{margin:0;padding:8px 10px;background:#0B1310;border:1px solid #22322B;
+  border-radius:6px;color:#E9C46A;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;
+  white-space:pre-wrap;overflow-x:auto}
+.mmWhere{margin:4px 0 0;padding-left:16px;color:#9FB0A8;
+  font:11px/1.5 Arial,Helvetica,sans-serif}
+.mmNote{color:#8A968F;font:11px/1.5 Arial,Helvetica,sans-serif;margin-top:4px}
+.mmList{margin:0;padding-left:16px;color:#C9D3CC;
+  font:11.5px/1.55 Arial,Helvetica,sans-serif}
+.mmList li{margin-bottom:3px}
+.mmTable td{font-size:11px;vertical-align:top}
+.mmTable .mmSrc{color:#8A968F;font-size:10px}
+.mmVerdict{padding:7px 9px;border-radius:6px;margin:4px 0;
+  font:11.5px/1.45 Arial,Helvetica,sans-serif}
+.mmVerdict.ok{background:rgba(132,204,22,.10);border:1px solid #3d5a1f;color:#C7E59A}
+.mmVerdict.warn{background:rgba(233,196,106,.10);border:1px solid #6b5a1f;color:#E9C46A}
+#dxValData{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
+  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
+  border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
 #aiRef{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
   font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
   border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
@@ -968,6 +1023,70 @@ label.chk input{width:auto}
       </select>
       <button id="aqDisperse" style="margin-top:6px" disabled>Model plume dispersion</button>
       <button id="aqDisperseClear" class="ghost" style="margin-top:6px" hidden>Clear plume</button>
+
+      <div class="stepH" style="margin-top:16px">Advanced dispersion model</div>
+      <p class="hint">Multi-species Gaussian plume with editable emission rates, stack parameters and time-of-day schedules. Every result is traceable to the numbers you set.</p>
+
+      <label class="fld" for="dxSpecies">Pollutant</label>
+      <select id="dxSpecies"></select>
+
+      <label class="fld" for="dxWindMode">Wind</label>
+      <select id="dxWindMode">
+        <option value="current" selected>Current (live)</option>
+        <option value="climatology">Long-term climatology (ERA5)</option>
+        <option value="manual">Enter manually</option>
+      </select>
+      <div id="dxWindManual" hidden>
+        <div class="llRow">
+          <input type="text" id="dxWindSpd" placeholder="speed m/s">
+          <input type="text" id="dxWindDir" placeholder="from °">
+        </div>
+      </div>
+      <div id="dxMonthRow" hidden>
+        <label class="fld" for="dxMonth">Month (climatology)</label>
+        <select id="dxMonth">
+          <option value="">Annual mean</option>
+        </select>
+      </div>
+      <button id="dxRose" class="ghost" style="width:100%;margin-top:6px">Show wind rose for this point</button>
+
+      <label class="fld" for="dxHour">Hour of day &mdash; <span id="dxHourLbl">09:00</span></label>
+      <input type="range" id="dxHour" min="0" max="23" step="1" value="9">
+
+      <label class="fld" for="dxStab">Stability class</label>
+      <select id="dxStab">
+        <option value="" selected>Auto (from wind &amp; sun)</option>
+        <option value="A">A &mdash; very unstable</option>
+        <option value="B">B &mdash; unstable</option>
+        <option value="C">C &mdash; slightly unstable</option>
+        <option value="D">D &mdash; neutral</option>
+        <option value="E">E &mdash; slightly stable</option>
+        <option value="F">F &mdash; stable</option>
+      </select>
+
+      <label class="fld">Emission sources</label>
+      <div id="dxSources"></div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="dxAuto" class="ghost" style="flex:1">Find from OSM</button>
+        <button id="dxAdd" class="ghost" style="flex:1">+ Add source</button>
+      </div>
+
+      <label class="fld" for="dxBg">Background concentration (optional)</label>
+      <input type="text" id="dxBg" placeholder="e.g. 25 (regional baseline)">
+
+      <button id="dxRun" class="primary" style="width:100%;margin-top:10px">Run advanced model</button>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="dxVerify" class="ghost" style="flex:1">Verify code</button>
+        <button id="dxValidate" class="ghost" style="flex:1">Validate vs data</button>
+      </div>
+      <div id="dxValBox" hidden>
+        <label class="fld" for="dxValData">Measured vs modelled pairs</label>
+        <p class="hint" style="font-size:10.5px">One pair per line: <code>observed, modelled</code>. Use your own sensor readings or a monitoring station.</p>
+        <textarea id="dxValData" rows="5" placeholder="42, 38&#10;55, 61&#10;30, 26"></textarea>
+        <button id="dxValRun" class="primary" style="width:100%;margin-top:6px">Compute validation statistics</button>
+      </div>
+      <button id="dxClear" class="ghost" style="width:100%;margin-top:6px">Clear model</button>
+      <div id="dxInfo" class="hint" style="min-height:18px"></div>
     </section>
     </div><!-- /tab-aq -->
 
@@ -1091,7 +1210,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v103</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v105</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1118,7 +1237,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v103";
+const DSG_VERSION = "deepseego-v105";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3236,6 +3355,390 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
+/* ---------- Mathematical Model panel ---------------------------------------
+   Renders the equations, assumptions, data sources, solver and convergence
+   information for THE RUN JUST PERFORMED - with the actual parameter values,
+   not a generic description.
+--------------------------------------------------------------------------- */
+function mathModelHtml(mm){
+  if(!mm) return '';
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const eqs = (mm.governing_equations || []).map((e, i) => `
+    <div class="mmEq">
+      <div class="mmEqName">${i + 1}. ${esc(e.name)}</div>
+      <pre class="mmExpr">${esc(e.expression)}</pre>
+      ${(e.where || []).length
+        ? '<ul class="mmWhere">' + e.where.map(w => `<li>${esc(w)}</li>`).join('') + '</ul>'
+        : ''}
+      ${e.note ? `<div class="mmNote">${esc(e.note)}</div>` : ''}
+    </div>`).join('');
+
+  const params = (mm.parameters_used || [])
+    .filter(p => p.value !== null && p.value !== undefined && p.value !== '')
+    .map(p => `<tr><td>${esc(p.symbol)}</td>
+        <td style="text-align:right"><b>${esc(p.value)}</b> ${esc(p.unit || '')}</td>
+        <td class="mmSrc">${esc(p.source || '')}</td></tr>`).join('');
+
+  const srcs = (mm.data_sources || []).map(d => `
+    <tr><td>${esc(d.name)}</td><td style="text-align:right">${esc(d.resolution || '')}</td></tr>
+    ${d.note ? `<tr><td colspan="2" class="mmSrc">${esc(d.kind ? d.kind + ' \u2014 ' : '')}${esc(d.note)}</td></tr>` : ''}`).join('');
+
+  const conv = mm.convergence || {};
+  const iter = (conv.iterative_parts || []).map(p => `
+    <tr><td>${esc(p.where)}</td><td>${esc(p.method)}</td>
+        <td class="mmSrc">${esc(p.criterion)}</td></tr>`).join('');
+
+  const ver = mm.verification || {};
+
+  return `
+  <div class="siteSec mmBox">
+    <button class="mmToggle" onclick="this.parentNode.classList.toggle('open')">
+      <span class="mmChev">\u25b8</span> Mathematical model
+      <span class="per">equations, assumptions, solver, convergence</span>
+    </button>
+    <div class="mmBody">
+      <div class="mmH">${esc(mm.title)}</div>
+
+      <div class="mmSec">Governing equations</div>
+      ${eqs}
+
+      ${params ? `<div class="mmSec">Parameter values used in this run</div>
+        <table class="aqTable mmTable">${params}</table>` : ''}
+
+      <div class="mmSec">Assumptions</div>
+      <ul class="mmList">${(mm.assumptions || []).map(a => `<li>${esc(a)}</li>`).join('')}</ul>
+
+      ${srcs ? `<div class="mmSec">Data sources</div>
+        <table class="aqTable mmTable">${srcs}</table>` : ''}
+
+      <div class="mmSec">Solver</div>
+      <table class="aqTable mmTable">
+        <tr><td>Type</td><td>${esc((mm.solver || {}).type)}</td></tr>
+        <tr><td>Discretisation</td><td>${esc((mm.solver || {}).discretisation)}</td></tr>
+        <tr><td>Iteration</td><td>${esc((mm.solver || {}).iteration)}</td></tr>
+        <tr><td>Implementation</td><td>${esc((mm.solver || {}).implementation)}</td></tr>
+      </table>
+
+      <div class="mmSec">Convergence criteria</div>
+      <div class="mmVerdict ${conv.applicable ? 'warn' : 'ok'}">
+        ${conv.applicable
+          ? 'This analysis DOES involve a tolerance \u2014 see below.'
+          : 'Not applicable: this is a closed-form solution, not an iterative scheme.'}
+      </div>
+      <div class="mmNote">${esc(conv.explanation)}</div>
+      ${iter ? `<table class="aqTable mmTable">
+        <tr><td><b>Where</b></td><td><b>Method</b></td><td><b>Criterion</b></td></tr>
+        ${iter}</table>` : ''}
+
+      <div class="mmSec">Termination conditions</div>
+      <ul class="mmList">${((mm.termination || {}).conditions || [])
+        .map(t => `<li>${esc(t)}</li>`).join('')}</ul>
+
+      ${ver.status ? `<div class="mmSec">Verification status</div>
+        <div class="mmVerdict ok">${esc(ver.status)}</div>
+        <div class="mmNote"><b>What this proves:</b> ${esc(ver.what_it_proves)}<br>
+        <b>What it does not prove:</b> ${esc(ver.what_it_does_not_prove)}</div>` : ''}
+
+      ${(mm.validity_range || []).length ? `<div class="mmSec">Range of validity</div>
+        <ul class="mmList">${mm.validity_range.map(v => `<li>${esc(v)}</li>`).join('')}</ul>` : ''}
+    </div>
+  </div>`;
+}
+
+/* ---------- advanced dispersion ------------------------------------------
+   Editable sources, species, schedules and wind, plus the two things that make
+   a model result defensible: a VERIFICATION suite (does the code solve the
+   equations?) and a VALIDATION panel (do the equations match measurements?).
+--------------------------------------------------------------------------- */
+const dxLayer = L.featureGroup().addTo(map);
+let DX_META = null, DX_SOURCES = [], dxOverlay = null;
+
+async function dxInit(){
+  if(dxInit._done) return; dxInit._done = true;
+  try{
+    DX_META = await api('/dispersion_meta');
+  }catch(e){ $('dxInfo').textContent = 'Could not load model metadata: ' + e.message; return; }
+
+  $('dxSpecies').innerHTML = DX_META.pollutants
+    .map(p => `<option value="${p.key}">${p.label} (${p.unit})</option>`).join('');
+  const M = ['January','February','March','April','May','June','July',
+             'August','September','October','November','December'];
+  $('dxMonth').innerHTML = '<option value="">Annual mean</option>' +
+    M.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
+
+  $('dxWindMode').addEventListener('change', () => {
+    const v = $('dxWindMode').value;
+    $('dxWindManual').hidden = v !== 'manual';
+    $('dxMonthRow').hidden = v !== 'climatology';
+  });
+  $('dxHour').addEventListener('input', () => {
+    $('dxHourLbl').textContent =
+      String($('dxHour').value).padStart(2, '0') + ':00';
+  });
+  $('dxAdd').addEventListener('click', () => {
+    if(aqState.lat == null) return toast('Pick a point in the Air tab first');
+    DX_SOURCES.push({lat: aqState.lat, lon: aqState.lon, kind: 'industrial',
+                     label: 'New source', schedule: 'continuous', enabled: true});
+    dxRenderSources();
+  });
+  $('dxAuto').addEventListener('click', dxAutoFind);
+  $('dxRun').addEventListener('click', dxRun);
+  $('dxVerify').addEventListener('click', dxVerify);
+  $('dxValidate').addEventListener('click', dxValidateToggle);
+  $('dxValRun').addEventListener('click', dxValidate);
+  $('dxRose').addEventListener('click', dxWindRose);
+  $('dxClear').addEventListener('click', () => {
+    dxLayer.clearLayers();
+    if(dxOverlay){ map.removeLayer(dxOverlay); dxOverlay = null; }
+    $('dxInfo').textContent = '';
+  });
+  dxRenderSources();
+}
+
+function dxRenderSources(){
+  const box = $('dxSources');
+  if(!DX_SOURCES.length){
+    box.innerHTML = '<span class="per">No sources yet. "Find from OSM" scans ' +
+      'for roads, industry and power plants nearby, or add one manually.</span>';
+    return;
+  }
+  box.innerHTML = '';
+  DX_SOURCES.forEach((s, i) => {
+    const t = (DX_META.source_types.find(x => x.key === s.kind)) || {};
+    const isLine = t.kind === 'line';
+    const d = document.createElement('div');
+    d.className = 'dxSrc';
+    d.innerHTML =
+      `<div class="dxSrcHead">
+         <input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled">
+         <input type="text" value="${(s.label || '').replace(/"/g, '&quot;')}" data-f="label">
+         <button data-del="${i}">&#10005;</button>
+       </div>
+       <div class="dxGrid">
+         <div><label>Source type</label>
+           <select data-f="kind">${DX_META.source_types
+             .map(x => `<option value="${x.key}" ${x.key === s.kind ? 'selected' : ''}>${x.label}</option>`).join('')}
+           </select></div>
+         <div><label>Schedule</label>
+           <select data-f="schedule">${DX_META.schedules
+             .map(x => `<option value="${x.key}" ${x.key === s.schedule ? 'selected' : ''}>${x.label}</option>`).join('')}
+           </select></div>
+         ${isLine
+           ? `<div><label>Vehicles / day</label>
+                <input type="text" data-f="veh_per_day" value="${s.veh_per_day ?? t.veh_per_day ?? ''}"></div>
+              <div><label>Road length in cell (m)</label>
+                <input type="text" data-f="length_m" value="${s.length_m ?? 300}"></div>`
+           : `<div><label>Emission rate (g/s)</label>
+                <input type="text" data-f="q_g_s" placeholder="default ${(t.g_per_s || {})[$('dxSpecies').value] ?? '?'}" value="${s.q_g_s ?? ''}"></div>
+              <div><label>Stack height (m)</label>
+                <input type="text" data-f="h_m" value="${s.h_m ?? t.h_m ?? ''}"></div>
+              <div><label>Exit temp (K)</label>
+                <input type="text" data-f="temp_k" value="${s.temp_k ?? t.temp_k ?? ''}"></div>
+              <div><label>Exit velocity (m/s)</label>
+                <input type="text" data-f="vel_m_s" value="${s.vel_m_s ?? t.vel_m_s ?? ''}"></div>`}
+       </div>`;
+    d.querySelectorAll('[data-f]').forEach(el => {
+      el.addEventListener('change', () => {
+        const f = el.dataset.f;
+        if(el.type === 'checkbox') s[f] = el.checked;
+        else if(['label','kind','schedule'].includes(f)){
+          s[f] = el.value;
+          if(f === 'kind') dxRenderSources();
+        } else {
+          const v = parseFloat(el.value);
+          s[f] = isFinite(v) ? v : null;
+        }
+      });
+    });
+    d.querySelector('[data-del]').addEventListener('click', () => {
+      DX_SOURCES.splice(i, 1); dxRenderSources();
+    });
+    box.appendChild(d);
+  });
+}
+
+async function dxAutoFind(){
+  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
+  const b = $('dxAuto'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Scanning\u2026';
+  try{
+    const j = await api('/dispersion_advanced', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon,
+                            pollutant: $('dxSpecies').value,
+                            grid: 30, sources: []})});
+    DX_SOURCES = (j.sources || []).map(s => ({
+      lat: s.lat, lon: s.lon, kind: s.kind, label: s.label,
+      schedule: s.kind.startsWith('road_') ? 'traffic_urban' : 'continuous',
+      enabled: true}));
+    dxRenderSources();
+    toast(DX_SOURCES.length + ' sources found from OpenStreetMap', 5000);
+  }catch(e){ toast('Source scan: ' + e.message, 8000); }
+  b.disabled = false; b.textContent = o;
+}
+
+async function dxRun(){
+  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
+  const btn = $('dxRun'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Modelling\u2026';
+  Progress.start('Advanced dispersion',
+                 'Evaluating the plume grid for every source\u2026', 0);
+  try{
+    const mode = $('dxWindMode').value;
+    const body = {lat: aqState.lat, lon: aqState.lon,
+      pollutant: $('dxSpecies').value, sources: DX_SOURCES,
+      hour: +$('dxHour').value, grid: 90, radius_m: 2500,
+      wind_mode: mode === 'manual' ? 'current' : mode,
+      background: parseFloat($('dxBg').value) || 0};
+    if(mode === 'manual'){
+      body.wind_speed_ms = parseFloat($('dxWindSpd').value);
+      body.wind_from_deg = parseFloat($('dxWindDir').value);
+      if(!isFinite(body.wind_speed_ms) || !isFinite(body.wind_from_deg))
+        throw new Error('Enter both wind speed and direction');
+    }
+    if(mode === 'climatology' && $('dxMonth').value)
+      body.month = +$('dxMonth').value;
+    if($('dxStab').value) body.stability = $('dxStab').value;
+
+    const j = await api('/dispersion_advanced', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+
+    if(dxOverlay) map.removeLayer(dxOverlay);
+    dxOverlay = L.imageOverlay(j.png, j.bounds, {opacity: 0.62}).addTo(map);
+    dxLayer.clearLayers();
+    j.sources.forEach(s => L.circleMarker([s.lat, s.lon],
+        {radius: 5, color: '#fff', weight: 1.5,
+         fillColor: '#E4572E', fillOpacity: .9}).addTo(dxLayer)
+      .bindTooltip(`${s.label}<br>${s.q_g_s} g/s \u00b7 effective height ${s.effective_h_m} m`,
+                   {sticky: true}));
+    map.fitBounds(L.latLngBounds(j.bounds).pad(0.05));
+
+    const lim = Object.entries(j.fraction_of_limit || {})
+      .map(([k, v]) => `<tr><td>${k}</td><td style="text-align:right">${
+        v == null ? '\u2014' : (v >= 1 ? '<b style="color:#E4572E">' + v + '\u00d7</b>' : v + '\u00d7')
+      }</td></tr>`).join('');
+    const srcRows = j.sources.map(s =>
+      `<tr><td>${s.label}</td><td style="text-align:right">${s.q_g_s} g/s</td>` +
+      `<td style="text-align:right">${s.effective_h_m} m</td></tr>`).join('');
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Dispersion \u00b7 ' + j.pollutant.label;
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">${j.pollutant.label} \u00b7 modelled</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Peak concentration</td><td style="text-align:right"><b>${j.max} ${j.pollutant.unit}</b></td></tr>` +
+      `<tr><td>At your point</td><td style="text-align:right">${j.at_site} ${j.pollutant.unit}</td></tr>` +
+      `<tr><td>Wind</td><td style="text-align:right">${j.wind.speed_ms} m/s from ${j.wind.from}</td></tr>` +
+      `<tr><td>Stability class</td><td style="text-align:right">${j.wind.stability}</td></tr>` +
+      `<tr><td>Hour modelled</td><td style="text-align:right">${String(j.hour).padStart(2,'0')}:00</td></tr>` +
+      `</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Peak as a fraction of each limit</div>` +
+      `<table class="aqTable">${lim}</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Sources (ranked by contribution)</div>` +
+      `<table class="aqTable"><tr><td><b>Source</b></td><td style="text-align:right"><b>Rate</b></td>` +
+      `<td style="text-align:right"><b>Eff. height</b></td></tr>${srcRows}</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Assumptions</div>` +
+      `<ul class="srcNote" style="margin:0;padding-left:16px">` +
+      j.assumptions.map(a => `<li>${a}</li>`).join('') + `</ul>` +
+      `<p class="srcNote">Wind source: ${j.wind.source}. ${j.pollutant.note}</p></div>` +
+      mathModelHtml(j.math_model);
+    $('dxInfo').innerHTML = `Peak ${j.max} ${j.pollutant.unit} \u00b7 ` +
+      `${j.sources.length} sources`;
+  }catch(e){
+    $('dxInfo').textContent = e.message;
+    toast('Dispersion: ' + e.message, 10000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
+async function dxVerify(){
+  const btn = $('dxVerify'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Testing\u2026';
+  try{
+    const j = await api('/dispersion_verify');
+    const rows = j.tests.map(t =>
+      `<div class="dxTest ${t.pass ? 'ok' : 'bad'}">
+         <div><b>${t.pass ? '\u2713' : '\u2717'} ${t.name}</b>
+           ${t.detail}<br>
+           <span class="per">expected ${t.expected} \u00b7 got ${t.got}</span>
+           <div class="dxWhy">${t.why}</div>
+         </div></div>`).join('');
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Model verification';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Code verification \u00b7 ` +
+      `${j.passed}/${j.total} passed</div>` +
+      `<p class="srcNote">${j.explains}</p>${rows}</div>`;
+  }catch(e){ toast('Verify: ' + e.message, 8000); }
+  btn.disabled = false; btn.textContent = o;
+}
+
+function dxValidateToggle(){
+  const b = $('dxValBox');
+  b.hidden = !b.hidden;
+  if(!b.hidden) $('dxValData').focus();
+}
+async function dxValidate(){
+  const raw = $('dxValData').value;
+  if(!raw || !raw.trim()) return toast('Enter at least 2 observed/modelled pairs');
+  const obs = [], pred = [], labels = [];
+  raw.split(/\n+/).forEach((line, i) => {
+    const p = line.split(/[,\t;]+/).map(s => parseFloat(s.trim()));
+    if(p.length >= 2 && isFinite(p[0]) && isFinite(p[1])){
+      obs.push(p[0]); pred.push(p[1]); labels.push('pair ' + (i + 1));
+    }
+  });
+  if(obs.length < 2) return toast('Need at least 2 valid pairs');
+  try{
+    const j = await api('/dispersion_validate', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({observed: obs, predicted: pred, labels})});
+    const rows = j.metrics.map(m =>
+      `<div class="dxTest ${m.pass ? 'ok' : 'bad'}">
+         <div><b>${m.pass ? '\u2713' : '\u2717'} ${m.key} \u2014 ${m.name}: ${m.value}</b>
+           ideal ${m.ideal} \u00b7 acceptable ${m.criterion} \u2014 ${m.verdict}
+           <div class="dxWhy">${m.meaning}</div>
+         </div></div>`).join('');
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Model validation';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Validation against ` +
+      `${j.n_pairs} measurements</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Observed mean</td><td style="text-align:right">${j.observed_mean}</td></tr>` +
+      `<tr><td>Modelled mean</td><td style="text-align:right">${j.predicted_mean}</td></tr>` +
+      `</table>${rows}` +
+      `<p class="srcNote">${j.caveat}<br>${j.reference}</p></div>`;
+  }catch(e){ toast('Validate: ' + e.message, 9000); }
+}
+
+async function dxWindRose(){
+  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
+  try{
+    const j = await api('/wind_climatology?lat=' + aqState.lat + '&lon=' + aqState.lon);
+    const rows = j.monthly.map(m =>
+      `<tr><td>${m.month}</td><td style="text-align:right">${m.speed_ms} m/s</td>` +
+      `<td style="text-align:right">${m.from}</td></tr>`).join('');
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Wind climatology';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Wind climatology</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Mean speed (scalar)</td><td style="text-align:right"><b>${j.scalar_mean_ms} m/s</b></td></tr>` +
+      `<tr><td>Vector mean</td><td style="text-align:right">${j.vector_mean_ms} m/s from ${j.vector_from}</td></tr>` +
+      `<tr><td>Steadiness</td><td style="text-align:right">${j.steadiness}</td></tr>` +
+      `</table>` +
+      `<div class="paneLabel" style="margin-top:10px">By month</div>` +
+      `<table class="aqTable">${rows}</table>` +
+      `<p class="srcNote">${j.note}<br>${j.source}</p></div>`;
+  }catch(e){ toast('Wind climatology: ' + e.message, 9000); }
+}
+
 /* ---------- Go To Location (single, global place finder) --------------------
    Replaces the per-tab search boxes. It pans the map and drops a pin, and -
    because the old per-tab boxes also SET the analysis point - it offers to hand
@@ -3628,7 +4131,22 @@ function drawSunPath(){
     `At ${hh}:${mm}: ` + (now.alt > 0
       ? `altitude <b>${now.alt.toFixed(1)}\u00b0</b>, azimuth <b>${now.az.toFixed(1)}\u00b0</b>`
       : `<b>sun is below the horizon</b>`) +
-    `<br><span class="per">Times are LOCAL SOLAR time (noon = sun at its highest), not clock time.</span>`;
+    `<br><span class="per">Times are LOCAL SOLAR time (noon = sun at its highest), not clock time.</span>` +
+    `<br><button id="spMath" class="ghost" style="margin-top:6px;padding:4px 10px;font-size:10.5px">Mathematical model</button>`;
+  const smb = document.getElementById('spMath');
+  if(smb) smb.addEventListener('click', async () => {
+    try{
+      const mm = await api('/math_model', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({kind:'sunpath', lat: lat, lon: lon, date: dateStr})});
+      $('drawer').classList.add('open');
+      if(typeof paneMode === 'function') paneMode('site');
+      $('drawerSub').textContent = 'Sun path \u00b7 mathematical model';
+      $('siteWrap').innerHTML = mathModelHtml(mm);
+      const b = document.querySelector('.mmBox');
+      if(b) b.classList.add('open');
+    }catch(e){ toast('Model docs: ' + e.message, 8000); }
+  });
 }
 
 /* ---------- Building shadows (real footprints x real heights x real sun) ----
@@ -3825,6 +4343,7 @@ async function runSlope(){
       `<div class="paneLabel" style="margin-top:10px">Terrain profile</div>` +
       `<div class="chartBox" style="height:170px"><canvas id="cSlope"></canvas></div>` +
       `<p class="srcNote">${j.note}</p></div>` +
+      mathModelHtml(j.math_model) +
       (typeof provenanceBlock === 'function'
         ? provenanceBlock([], {lat: a.lat, lon: a.lon}) : '');
 
@@ -3868,7 +4387,7 @@ function wipeMapAnalysis(){
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
    slopeLayer, sunPathLayer, shadowLayer, createLayer,
-   weatherGridLayer].forEach(g => {
+   weatherGridLayer, dxLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -3893,7 +4412,7 @@ function showTab(tab){
   document.querySelectorAll('#subBar button').forEach(x =>
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
-  if(tab === 'aq'){ clearAllClimatePoints(); aqInit(); }
+  if(tab === 'aq'){ clearAllClimatePoints(); aqInit(); dxInit(); }
   if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight') sunlightInit();
@@ -4550,6 +5069,18 @@ async function runAdvanced(allYears, tableOnly){
     });
     applyBasemap(th.basemap);
     Progress.step('Done');
+    // mathematical model for this zonal run
+    try{
+      const mm = await api('/math_model', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({kind:'zonal', dataset: ds, stat: stat,
+                              n_zones: runs.length,
+                              n_years: (series || []).length})});
+      const holder = document.createElement('div');
+      holder.innerHTML = mathModelHtml(mm);
+      const cw = $('chartWrap');
+      if(cw && holder.firstElementChild) cw.appendChild(holder.firstElementChild);
+    }catch(e){ /* documentation is optional; never block the result */ }
     if(!allYears) $('zwyBtn').disabled = false;   // year calc done -> unlock
     if(allYears) $('pdfBtn').hidden = false;      // report ready to build
   }catch(e){ toast('Advanced analysis: ' + e.message, 8000); }
