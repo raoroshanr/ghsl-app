@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v106"
+APP_VERSION = "deepseego-v107"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6783,6 +6783,116 @@ def _osm_roads_v(lat, lon, r):
     return feats
 
 
+# ----------------------------------------------------------------------------
+# Marching squares. Implemented directly rather than pulling in matplotlib:
+# a ~50 MB plotting library for one iso-line trace is a poor trade on Cloud Run,
+# and the algorithm is short and exactly testable.
+#
+# Cell corners and the edges between them:
+#     z00 --E0-- z01
+#      |          |
+#     E3         E1
+#      |          |
+#     z10 --E2-- z11
+# The case index is a 4-bit number: bit3=z00, bit2=z01, bit1=z11, bit0=z10,
+# set when that corner is above the contour level.
+# ----------------------------------------------------------------------------
+_MS_CASES = {
+    1: [(2, 3)], 2: [(1, 2)], 3: [(1, 3)], 4: [(0, 1)],
+    5: [(0, 3), (1, 2)],                       # saddle
+    6: [(0, 2)], 7: [(0, 3)], 8: [(0, 3)], 9: [(0, 2)],
+    10: [(0, 1), (2, 3)],                      # saddle
+    11: [(0, 1)], 12: [(1, 3)], 13: [(1, 2)], 14: [(2, 3)],
+}
+
+
+def _ms_edge_point(edge, i, j, Z, xs, ys, level):
+    """Linearly interpolated crossing point on one cell edge."""
+    def lerp(a, b, za, zb):
+        d = (zb - za)
+        t = 0.5 if abs(d) < 1e-12 else (level - za) / d
+        t = min(1.0, max(0.0, t))
+        return a + (b - a) * t
+    z00, z01 = Z[i, j], Z[i, j + 1]
+    z10, z11 = Z[i + 1, j], Z[i + 1, j + 1]
+    if edge == 0:      # top: z00 -> z01, varying x
+        return (lerp(xs[j], xs[j + 1], z00, z01), ys[i])
+    if edge == 1:      # right: z01 -> z11, varying y
+        return (xs[j + 1], lerp(ys[i], ys[i + 1], z01, z11))
+    if edge == 2:      # bottom: z10 -> z11, varying x
+        return (lerp(xs[j], xs[j + 1], z10, z11), ys[i + 1])
+    return (xs[j], lerp(ys[i], ys[i + 1], z00, z10))    # left
+
+
+def _marching_squares(Z, xs, ys, level):
+    """Iso-line segments at `level`. Returns a list of joined polylines."""
+    above = Z > level
+    a00 = above[:-1, :-1]; a01 = above[:-1, 1:]
+    a11 = above[1:, 1:];   a10 = above[1:, :-1]
+    idx = (a00.astype(np.uint8) << 3) | (a01.astype(np.uint8) << 2) | \
+          (a11.astype(np.uint8) << 1) | a10.astype(np.uint8)
+    valid = (np.isfinite(Z[:-1, :-1]) & np.isfinite(Z[:-1, 1:]) &
+             np.isfinite(Z[1:, 1:]) & np.isfinite(Z[1:, :-1]))
+    cells = np.argwhere((idx > 0) & (idx < 15) & valid)
+
+    segs = []
+    for i, j in cells:
+        case = int(idx[i, j])
+        pairs = _MS_CASES.get(case)
+        if not pairs:
+            continue
+        if case in (5, 10):        # resolve the saddle with the cell mean
+            m = (Z[i, j] + Z[i, j + 1] + Z[i + 1, j] + Z[i + 1, j + 1]) / 4.0
+            if (m > level) != (case == 10):
+                pairs = [(pairs[0][0], pairs[1][1]), (pairs[1][0], pairs[0][1])]
+        for e1, e2 in pairs:
+            p1 = _ms_edge_point(e1, i, j, Z, xs, ys, level)
+            p2 = _ms_edge_point(e2, i, j, Z, xs, ys, level)
+            if p1 != p2:
+                segs.append((p1, p2))
+    return _join_segments(segs)
+
+
+def _join_segments(segs, tol=1e-9):
+    """Chain shared endpoints into polylines so the output is drawable."""
+    if not segs:
+        return []
+    key = lambda p: (round(p[0] / tol) * tol, round(p[1] / tol) * tol)
+    adj = {}
+    for a, b in segs:
+        adj.setdefault(key(a), []).append((key(b), b))
+        adj.setdefault(key(b), []).append((key(a), a))
+    used = set()
+    lines = []
+    for a, b in segs:
+        ka, kb = key(a), key(b)
+        if (ka, kb) in used or (kb, ka) in used:
+            continue
+        used.add((ka, kb))
+        line = [a, b]
+        # walk forward, then backward
+        for direction in (0, 1):
+            cur_k, cur_p = (kb, b) if direction == 0 else (ka, a)
+            while True:
+                nxt = None
+                for nk, np_ in adj.get(cur_k, []):
+                    if (cur_k, nk) in used or (nk, cur_k) in used:
+                        continue
+                    nxt = (nk, np_)
+                    break
+                if not nxt:
+                    break
+                used.add((cur_k, nxt[0]))
+                if direction == 0:
+                    line.append(nxt[1])
+                else:
+                    line.insert(0, nxt[1])
+                cur_k, cur_p = nxt
+        if len(line) >= 2:
+            lines.append(line)
+    return lines
+
+
 def _dem_contours(lat, lon, r, dem_key, interval):
     """Sample the DEM on a grid and trace contours with marching squares."""
     dem = DEMS.get(dem_key, DEMS["cop30"])
@@ -6809,9 +6919,6 @@ def _dem_contours(lat, lon, r, dem_key, interval):
     lats = np.linspace(lat1, lat0, rows)     # sampleRectangle is north-to-south
     lons = np.linspace(lon0, lon1, cols)
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     zmin = float(np.nanmin(Z)); zmax = float(np.nanmax(Z))
     if not math.isfinite(zmin) or zmax - zmin < 1e-6:
         return [], {"min": zmin, "max": zmax}
@@ -6820,22 +6927,17 @@ def _dem_contours(lat, lon, r, dem_key, interval):
     levels = np.arange(lo, hi + interval, interval)
     if len(levels) > 200:                    # keep the payload sane
         levels = np.linspace(lo, hi, 200)
-    fig = plt.figure()
-    try:
-        cs = plt.contour(lons, lats, Z, levels=levels)
-        feats = []
-        for lev, seg_list in zip(cs.levels, cs.allsegs):
-            for seg in seg_list:
-                if len(seg) < 2:
-                    continue
-                feats.append({
-                    "type": "Feature",
-                    "geometry": {"type": "LineString",
-                                 "coordinates": [[float(p[0]), float(p[1])]
-                                                 for p in seg]},
-                    "properties": {"elevation_m": round(float(lev), 2)}})
-    finally:
-        plt.close(fig)
+    feats = []
+    for lev in levels:
+        for line in _marching_squares(Z, lons, lats, float(lev)):
+            if len(line) < 2:
+                continue
+            feats.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString",
+                             "coordinates": [[float(p[0]), float(p[1])]
+                                             for p in line]},
+                "properties": {"elevation_m": round(float(lev), 2)}})
     return feats, {"min": round(zmin, 2), "max": round(zmax, 2),
                    "interval": interval, "dem": dem["label"],
                    "res_m": dem["res_m"]}
