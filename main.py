@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v109"
+APP_VERSION = "deepseego-v110"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -7064,10 +7064,13 @@ def _build_dxf(layers, lat, lon, interval=5.0):
 
 # Hypsometric ramp: low ground green, rising through tan to brown, then grey
 # for the highest ground. This is the standard cartographic convention.
+# Deepened from the pale "atlas" convention: on screen a washed-out ramp reads
+# as faded, especially once JPEG has been through it. These keep the standard
+# green-tan-brown progression but with enough saturation to survive export.
 _HYPSO = [
-    (0.00, (168, 198, 143)), (0.20, (208, 220, 150)), (0.40, (233, 216, 150)),
-    (0.60, (214, 178, 120)), (0.75, (188, 146, 100)), (0.88, (163, 130, 118)),
-    (1.00, (222, 222, 222)),
+    (0.00, (122, 176, 108)), (0.18, (168, 198, 118)), (0.36, (214, 205, 126)),
+    (0.54, (206, 166,  96)), (0.72, (176, 128,  78)), (0.88, (140, 105,  86)),
+    (1.00, (205, 205, 205)),
 ]
 
 
@@ -7136,13 +7139,17 @@ def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False,
         fy = (lat1 - c[1]) / max(1e-12, (lat1 - lat0))
         return (fx * px, fy * px)
 
+    # Line weights must scale with the canvas: a 1 px line on a 2048 px sheet is
+    # a hairline that all but disappears. These are tuned at 1024 px and scaled.
+    k = max(1.0, px / 1024.0)
+    W_ = lambda w: max(1, int(round(w * k)))
     style = {
-        "contours":  {"outline": (170, 190, 175), "width": 1,  "fill": None},
-        "water":     {"outline": (60, 130, 190),  "width": 2,
-                      "fill": (200, 225, 245)},
-        "roads":     {"outline": (90, 90, 90),    "width": 2,  "fill": None},
-        "buildings": {"outline": (150, 60, 40),   "width": 1,
-                      "fill": (232, 205, 195)},
+        "contours":  {"outline": (120, 140, 125), "width": W_(0.8), "fill": None},
+        "water":     {"outline": (30, 100, 165),  "width": W_(1.6),
+                      "fill": (170, 210, 240)},
+        "roads":     {"outline": (55, 55, 55),    "width": W_(1.6), "fill": None},
+        "buildings": {"outline": (140, 45, 25),   "width": W_(1.0),
+                      "fill": (226, 190, 178)},
     }
     # 2) optional transparent basemap so the drawing sits in real context
     if basemap:
@@ -7174,6 +7181,19 @@ def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False,
                 groups = [g.get("coordinates", [])]
             elif gt == "MultiLineString":
                 groups = g.get("coordinates", [])
+            # Colour each contour by its elevation, exactly as the map does,
+            # then darken it so the line stands out against its own band.
+            if key == "contours":
+                elev = (f.get("properties") or {}).get("elevation_m")
+                zlo = cmeta.get("min"); zhi = cmeta.get("max")
+                iv = cmeta.get("interval") or 5
+                if elev is not None and zlo is not None and zhi is not None \
+                        and (zhi - zlo) > 1e-9:
+                    base = _hypso_rgb((float(elev) - zlo) / (zhi - zlo))
+                    st = dict(st)
+                    st["outline"] = tuple(int(c * 0.55) for c in base)
+                    is_index = abs((float(elev) / iv) % 5) < 1e-6
+                    st["width"] = W_(1.9) if is_index else W_(0.8)
             for ring in groups:
                 pts = [xy(c) for c in ring if len(c) >= 2]
                 if len(pts) < 2:
@@ -7185,6 +7205,30 @@ def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False,
                         dr.line(pts, fill=st["outline"], width=st["width"])
                 else:
                     dr.line(pts, fill=st["outline"], width=st["width"])
+
+    # elevation labels on index contours
+    if cmeta.get("interval"):
+        f_lab = _font(max(12, px // 130), bold=True)
+        iv = cmeta["interval"]
+        seen = set()
+        for f in (layers.get("contours") or {}).get("features", []):
+            elev = (f.get("properties") or {}).get("elevation_m")
+            if elev is None or abs((float(elev) / iv) % 5) > 1e-6:
+                continue
+            coords = (f.get("geometry") or {}).get("coordinates") or []
+            if len(coords) < 6:
+                continue
+            c = coords[len(coords) // 2]
+            p = xy(c)
+            kk = (round(p[0] / 220), round(p[1] / 220))
+            if kk in seen:                 # avoid stacking labels on top of each other
+                continue
+            seen.add(kk)
+            txt = f"{elev:g}"
+            tw = dr.textlength(txt, font=f_lab)
+            dr.rectangle([p[0] - tw / 2 - 3, p[1] - 9, p[0] + tw / 2 + 3, p[1] + 9],
+                         fill=(255, 255, 255))
+            dr.text((p[0] - tw / 2, p[1] - 7), txt, font=f_lab, fill=(70, 55, 40))
 
     if furniture:
         img = _map_furniture(img, layers, lat, lon, r, cmeta, title)
