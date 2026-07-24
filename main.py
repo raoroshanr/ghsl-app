@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v105"
+APP_VERSION = "deepseego-v106"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6631,6 +6631,555 @@ def road_check(q: RoadCheckQuery):
             "produced the impossible 968 km figure."),
         "source": "OSM (reported) vs GRIP4 (comparison)",
     }
+
+
+# ============================================================================
+# SITE LAYERS - vector extraction for CAD / GIS handoff
+#
+# OpenStreetMap is the default for water, buildings and roads because its
+# geometry is surveyed/traced at metre scale, whereas the global satellite
+# products are 10-100 m raster derivatives. Each layer can be switched to its
+# satellite equivalent for comparison or where OSM coverage is thin.
+# ============================================================================
+LAYER_SOURCES = {
+    "water": [
+        {"key": "osm", "label": "OpenStreetMap (traced outlines)",
+         "res": "metre-scale vector",
+         "note": "Best geometric fidelity; completeness depends on local mapping."},
+        {"key": "jrc", "label": "JRC Global Surface Water",
+         "res": "30 m raster",
+         "note": "Satellite-derived occurrence, 1984-2021. Consistent globally, "
+                 "but blocky and misses narrow channels."},
+    ],
+    "buildings": [
+        {"key": "osm", "label": "OpenStreetMap footprints",
+         "res": "metre-scale vector",
+         "note": "Hand-traced. Carries type/name attributes; coverage varies."},
+        {"key": "open_buildings", "label": "Google Open Buildings",
+         "res": "~0.5 m derived",
+         "note": "ML-detected from satellite. Near-complete in India but "
+                 "untyped and can merge adjacent structures."},
+    ],
+    "roads": [
+        {"key": "osm", "label": "OpenStreetMap highways",
+         "res": "metre-scale vector",
+         "note": "Full class hierarchy down to service roads."},
+        {"key": "grip", "label": "GRIP4 global roads",
+         "res": "generalised vector",
+         "note": "Global consistency, but under-maps local streets."},
+    ],
+    "contours": [
+        {"key": "cop30", "label": "Copernicus GLO-30", "res": "30 m",
+         "note": "Best-quality global DSM."},
+        {"key": "nasadem", "label": "NASADEM", "res": "30 m", "note": "SRTM reprocessed."},
+        {"key": "alos", "label": "ALOS AW3D30", "res": "30 m", "note": "JAXA global DSM."},
+        {"key": "srtm", "label": "SRTM", "res": "30 m", "note": "Classic 2000 mission."},
+    ],
+}
+
+
+class SiteLayersQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 800
+    layers: list = ["water", "buildings", "roads", "contours"]
+    water_source: str = "osm"
+    buildings_source: str = "osm"
+    roads_source: str = "osm"
+    dem: str = "cop30"
+    contour_interval_m: float = 5.0
+
+
+@app.get("/layer_sources")
+def layer_sources():
+    return {"sources": LAYER_SOURCES,
+            "note": ("OSM is the default for water, buildings and roads: it is "
+                     "vector data digitised at metre scale, while the satellite "
+                     "products are raster derivatives at 10-100 m.")}
+
+
+def _osm_water(lat, lon, r):
+    q = (f'[out:json][timeout:40];('
+         f'way["natural"="water"](around:{int(r)},{lat},{lon});'
+         f'relation["natural"="water"](around:{int(r)},{lat},{lon});'
+         f'way["waterway"~"^(river|stream|canal|drain)$"](around:{int(r)},{lat},{lon});'
+         f'way["landuse"="reservoir"](around:{int(r)},{lat},{lon});'
+         f');out geom;')
+    js = _overpass(q)
+    feats = []
+    for el in (js or {}).get("elements", []):
+        g = el.get("geometry") or []
+        if len(g) < 2:
+            continue
+        t = el.get("tags") or {}
+        coords = [[p["lon"], p["lat"]] for p in g]
+        closed = (t.get("natural") == "water" or t.get("landuse") == "reservoir")
+        if closed and coords[0] != coords[-1]:
+            coords.append(coords[0])
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon" if closed else "LineString",
+                         "coordinates": [coords] if closed else coords},
+            "properties": {"name": t.get("name", ""),
+                           "kind": t.get("natural") or t.get("waterway")
+                                   or t.get("landuse", "water")}})
+    return feats
+
+
+def _osm_buildings(lat, lon, r):
+    q = (f'[out:json][timeout:45];('
+         f'way["building"](around:{int(r)},{lat},{lon});'
+         f'relation["building"](around:{int(r)},{lat},{lon});'
+         f');out geom;')
+    js = _overpass(q)
+    feats = []
+    for el in (js or {}).get("elements", []):
+        g = el.get("geometry") or []
+        if len(g) < 3:
+            continue
+        t = el.get("tags") or {}
+        coords = [[p["lon"], p["lat"]] for p in g]
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
+        lv = t.get("building:levels")
+        try:
+            lv = float(lv) if lv is not None else None
+        except Exception:
+            lv = None
+        ht = t.get("height")
+        try:
+            ht = float(str(ht).replace("m", "").strip()) if ht else None
+        except Exception:
+            ht = None
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [coords]},
+            "properties": {"name": t.get("name", ""),
+                           "type": t.get("building", "yes"),
+                           "levels": lv, "height_m": ht}})
+    return feats
+
+
+def _osm_roads_v(lat, lon, r):
+    kinds = ("motorway|trunk|primary|secondary|tertiary|residential|"
+             "unclassified|service|living_street|road|track|footway|path")
+    q = (f'[out:json][timeout:45];'
+         f'way["highway"~"^({kinds})$"](around:{int(r)},{lat},{lon});out geom;')
+    js = _overpass(q)
+    feats = []
+    for el in (js or {}).get("elements", []):
+        g = el.get("geometry") or []
+        if len(g) < 2:
+            continue
+        t = el.get("tags") or {}
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "LineString",
+                         "coordinates": [[p["lon"], p["lat"]] for p in g]},
+            "properties": {"name": t.get("name", ""),
+                           "class": t.get("highway", ""),
+                           "surface": t.get("surface", ""),
+                           "lanes": t.get("lanes", "")}})
+    return feats
+
+
+def _dem_contours(lat, lon, r, dem_key, interval):
+    """Sample the DEM on a grid and trace contours with marching squares."""
+    dem = DEMS.get(dem_key, DEMS["cop30"])
+    img = dem["get"]()
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat))
+    n = 96                                   # grid resolution for tracing
+    lat0, lat1 = lat - r / mlat, lat + r / mlat
+    lon0, lon1 = lon - r / mlon, lon + r / mlon
+    rect = ee.Geometry.Rectangle([lon0, lat0, lon1, lat1], None, False)
+    arr = img.sampleRectangle(region=rect, defaultValue=-9999).getInfo()
+    band = None
+    for k, v in (arr.get("properties") or {}).items():
+        if isinstance(v, list) and v and isinstance(v[0], list):
+            band = v
+            break
+    if not band:
+        return [], None
+    Z = np.array(band, dtype=float)
+    Z[Z <= -9000] = np.nan
+    if np.all(np.isnan(Z)):
+        return [], None
+    rows, cols = Z.shape
+    lats = np.linspace(lat1, lat0, rows)     # sampleRectangle is north-to-south
+    lons = np.linspace(lon0, lon1, cols)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    zmin = float(np.nanmin(Z)); zmax = float(np.nanmax(Z))
+    if not math.isfinite(zmin) or zmax - zmin < 1e-6:
+        return [], {"min": zmin, "max": zmax}
+    lo = math.floor(zmin / interval) * interval
+    hi = math.ceil(zmax / interval) * interval
+    levels = np.arange(lo, hi + interval, interval)
+    if len(levels) > 200:                    # keep the payload sane
+        levels = np.linspace(lo, hi, 200)
+    fig = plt.figure()
+    try:
+        cs = plt.contour(lons, lats, Z, levels=levels)
+        feats = []
+        for lev, seg_list in zip(cs.levels, cs.allsegs):
+            for seg in seg_list:
+                if len(seg) < 2:
+                    continue
+                feats.append({
+                    "type": "Feature",
+                    "geometry": {"type": "LineString",
+                                 "coordinates": [[float(p[0]), float(p[1])]
+                                                 for p in seg]},
+                    "properties": {"elevation_m": round(float(lev), 2)}})
+    finally:
+        plt.close(fig)
+    return feats, {"min": round(zmin, 2), "max": round(zmax, 2),
+                   "interval": interval, "dem": dem["label"],
+                   "res_m": dem["res_m"]}
+
+
+# ----------------------------------------------------------------------------
+# EXPORT
+#
+# On DWG: it is Autodesk's proprietary binary format with no published
+# specification, and no open-source library writes it reliably. DXF is the
+# published interchange format that AutoCAD, BricsCAD, Civil 3D, QGIS and
+# Rhino all open natively - it is what "export to CAD" actually means in
+# practice. We write DXF R12 ASCII, the most widely readable variant.
+#
+# Coordinates are projected to UTM so the drawing is in true metres.
+# ----------------------------------------------------------------------------
+DXF_LAYERS = {
+    "water":     {"colour": 5,  "name": "WATER"},        # blue
+    "buildings": {"colour": 1,  "name": "BUILDINGS"},    # red
+    "roads":     {"colour": 7,  "name": "ROADS"},        # white/black
+    "contours":  {"colour": 3,  "name": "CONTOURS"},     # green
+    "contours_index": {"colour": 2, "name": "CONTOURS_INDEX"},  # yellow
+}
+
+
+def _utm_epsg(lat, lon):
+    zone = int((lon + 180) / 6) + 1
+    return (32600 if lat >= 0 else 32700) + zone, zone
+
+
+def _to_utm(lat, lon):
+    """Return a function converting (lon,lat) -> (easting, northing)."""
+    from pyproj import Transformer
+    epsg, zone = _utm_epsg(lat, lon)
+    tr = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    return tr, epsg, zone
+
+
+def _dxf_polyline(layer, pts, closed, elev=None):
+    """DXF R12 POLYLINE entity. R12 is chosen for maximum compatibility -
+    LWPOLYLINE only exists from R14."""
+    o = ["0", "POLYLINE", "8", layer, "66", "1", "70", "1" if closed else "0"]
+    if elev is not None:
+        o += ["38", f"{elev:.3f}"]
+    for x, y in pts:
+        o += ["0", "VERTEX", "8", layer, "10", f"{x:.4f}", "20", f"{y:.4f}"]
+        if elev is not None:
+            o += ["30", f"{elev:.3f}"]
+    o += ["0", "SEQEND", "8", layer]
+    return o
+
+
+def _build_dxf(layers, lat, lon, interval=5.0):
+    tr, epsg, zone = _to_utm(lat, lon)
+    used = []
+    ents = []
+    for key, block in layers.items():
+        if not block or not block.get("features"):
+            continue
+        base = DXF_LAYERS.get(key, {"colour": 7, "name": key.upper()})
+        for f in block["features"]:
+            g = f.get("geometry") or {}
+            props = f.get("properties") or {}
+            gt = g.get("type")
+            rings = []
+            if gt == "Polygon":
+                rings = [(r, True) for r in g.get("coordinates", [])]
+            elif gt == "MultiPolygon":
+                for poly in g.get("coordinates", []):
+                    rings += [(r, True) for r in poly]
+            elif gt == "LineString":
+                rings = [(g.get("coordinates", []), False)]
+            elif gt == "MultiLineString":
+                rings = [(c, False) for c in g.get("coordinates", [])]
+            else:
+                continue
+            elev = props.get("elevation_m")
+            lname = base["name"]
+            if key == "contours" and elev is not None:
+                # index contours every 5th interval get their own layer
+                if interval > 0 and abs((elev / interval) % 5) < 1e-6:
+                    lname = DXF_LAYERS["contours_index"]["name"]
+            if lname not in used:
+                used.append(lname)
+            for ring, closed in rings:
+                if len(ring) < 2:
+                    continue
+                pts = []
+                for c in ring:
+                    x, y = tr.transform(c[0], c[1])
+                    pts.append((x, y))
+                ents += _dxf_polyline(lname, pts, closed, elev)
+
+    lines = ["0", "SECTION", "2", "HEADER",
+             "9", "$ACADVER", "1", "AC1009",
+             "9", "$INSUNITS", "70", "6",          # metres
+             "0", "ENDSEC",
+             "0", "SECTION", "2", "TABLES",
+             "0", "TABLE", "2", "LAYER", "70", str(max(1, len(used)))]
+    for nm in (used or ["0"]):
+        col = 7
+        for v in DXF_LAYERS.values():
+            if v["name"] == nm:
+                col = v["colour"]
+        lines += ["0", "LAYER", "2", nm, "70", "0", "62", str(col),
+                  "6", "CONTINUOUS"]
+    lines += ["0", "ENDTAB", "0", "ENDSEC",
+              "0", "SECTION", "2", "ENTITIES"]
+    lines += ents
+    lines += ["0", "ENDSEC", "0", "EOF"]
+    return ("\r\n".join(lines) + "\r\n").encode("utf-8"), epsg, zone
+
+
+def _render_layers_png(layers, lat, lon, r, px=2048, jpeg=False):
+    """Render the vector layers to an image, for JPEG/TIFF export."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (px, px), (255, 255, 255))
+    dr = ImageDraw.Draw(img)
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat))
+    lat0, lat1 = lat - r / mlat, lat + r / mlat
+    lon0, lon1 = lon - r / mlon, lon + r / mlon
+
+    def xy(c):
+        fx = (c[0] - lon0) / max(1e-12, (lon1 - lon0))
+        fy = (lat1 - c[1]) / max(1e-12, (lat1 - lat0))
+        return (fx * px, fy * px)
+
+    style = {
+        "contours":  {"outline": (170, 190, 175), "width": 1,  "fill": None},
+        "water":     {"outline": (60, 130, 190),  "width": 2,
+                      "fill": (200, 225, 245)},
+        "roads":     {"outline": (90, 90, 90),    "width": 2,  "fill": None},
+        "buildings": {"outline": (150, 60, 40),   "width": 1,
+                      "fill": (232, 205, 195)},
+    }
+    for key in ("contours", "water", "roads", "buildings"):
+        block = layers.get(key)
+        if not block:
+            continue
+        st = style[key]
+        for f in block.get("features", []):
+            g = f.get("geometry") or {}
+            gt = g.get("type")
+            groups = []
+            if gt == "Polygon":
+                groups = g.get("coordinates", [])
+            elif gt == "MultiPolygon":
+                for poly in g.get("coordinates", []):
+                    groups += poly
+            elif gt == "LineString":
+                groups = [g.get("coordinates", [])]
+            elif gt == "MultiLineString":
+                groups = g.get("coordinates", [])
+            for ring in groups:
+                pts = [xy(c) for c in ring if len(c) >= 2]
+                if len(pts) < 2:
+                    continue
+                if st["fill"] and gt in ("Polygon", "MultiPolygon"):
+                    try:
+                        dr.polygon(pts, fill=st["fill"], outline=st["outline"])
+                    except Exception:
+                        dr.line(pts, fill=st["outline"], width=st["width"])
+                else:
+                    dr.line(pts, fill=st["outline"], width=st["width"])
+    return img, (lon0, lat0, lon1, lat1)
+
+
+def _geotiff_bytes(img, bounds, lat, lon):
+    """Write a GeoTIFF: a TIFF carrying the tags that georeference it."""
+    from PIL import Image, TiffImagePlugin
+    lon0, lat0, lon1, lat1 = bounds
+    w, h = img.size
+    sx = (lon1 - lon0) / w
+    sy = (lat1 - lat0) / h
+    info = TiffImagePlugin.ImageFileDirectory_v2()
+    # ModelPixelScale (33550) and ModelTiepoint (33922) place the raster
+    info[33550] = (float(sx), float(sy), 0.0)
+    info[33922] = (0.0, 0.0, 0.0, float(lon0), float(lat1), 0.0)
+    # GeoKeyDirectory (34735): geographic model, WGS84 (EPSG:4326)
+    info[34735] = (1, 1, 0, 3,
+                   1024, 0, 1, 2,      # GTModelTypeGeoKey = geographic
+                   1025, 0, 1, 1,      # RasterPixelIsArea
+                   2048, 0, 1, 4326)   # GeographicTypeGeoKey = WGS84
+    info.tagtype[33550] = 12           # double
+    info.tagtype[33922] = 12
+    info.tagtype[34735] = 3            # short
+    b = io.BytesIO()
+    # LZW keeps a 2048px site plan around 1 MB instead of ~12 MB uncompressed,
+    # and is universally readable by GIS software.
+    img.save(b, "TIFF", tiffinfo=info, compression="tiff_lzw")
+    return b.getvalue()
+
+
+class ExportLayersQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 800
+    layers: dict = {}              # the GeoJSON blocks from /site_layers
+    fmt: str = "dxf"               # dxf | geojson | shp | geotiff | jpeg | png
+    name: str = "deepseego_site"
+    contour_interval_m: float = 5.0
+
+
+@app.post("/export_layers")
+def export_layers(q: ExportLayersQuery):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", q.name or "site") or "site"
+    layers = q.layers or {}
+    if not any((layers.get(k) or {}).get("features") for k in layers):
+        raise HTTPException(status_code=400,
+                            detail="No layer data to export - run the layers first.")
+    fmt = (q.fmt or "dxf").lower()
+
+    if fmt == "dxf":
+        data, epsg, zone = _build_dxf(layers, q.lat, q.lon,
+                                      float(q.contour_interval_m or 5.0))
+        return Response(content=data, media_type="image/vnd.dxf",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{safe}_UTM{zone}.dxf"',
+                                 "X-CRS": f"EPSG:{epsg}"})
+
+    if fmt == "geojson":
+        fc = {"type": "FeatureCollection", "features": []}
+        for key, block in layers.items():
+            for f in (block or {}).get("features", []):
+                f = dict(f)
+                p = dict(f.get("properties") or {})
+                p["layer"] = key
+                f["properties"] = p
+                fc["features"].append(f)
+        return Response(content=json.dumps(fc).encode(),
+                        media_type="application/geo+json",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{safe}.geojson"'})
+
+    if fmt == "shp":
+        feats = []
+        for key, block in layers.items():
+            for f in (block or {}).get("features", []):
+                g = dict(f)
+                p = dict(g.get("properties") or {})
+                p["name"] = str(p.get("name") or key)[:80]
+                g["properties"] = p
+                feats.append(g)
+        return export_shapefile(ExportShapefileQuery(name=safe, features=feats))
+
+    if fmt in ("jpeg", "jpg", "png", "geotiff", "tiff"):
+        img, bounds = _render_layers_png(layers, q.lat, q.lon,
+                                         float(q.radius_m), px=2048)
+        if fmt in ("geotiff", "tiff"):
+            data = _geotiff_bytes(img, bounds, q.lat, q.lon)
+            return Response(content=data, media_type="image/tiff",
+                            headers={"Content-Disposition":
+                                     f'attachment; filename="{safe}.tif"'})
+        b = io.BytesIO()
+        if fmt == "png":
+            img.save(b, "PNG", optimize=True)
+            mt, ext = "image/png", "png"
+        else:
+            img.save(b, "JPEG", quality=92)
+            mt, ext = "image/jpeg", "jpg"
+        return Response(content=b.getvalue(), media_type=mt,
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{safe}.{ext}"'})
+
+    raise HTTPException(status_code=400, detail=(
+        f"Unknown format '{fmt}'. Use dxf, geojson, shp, geotiff, png or jpeg."))
+
+
+@app.post("/site_layers")
+@ee_errors
+def site_layers(q: SiteLayersQuery):
+    """Water, buildings, roads and DEM contours as GeoJSON, ready for export."""
+    r = max(100.0, min(5000.0, float(q.radius_m)))
+    out = {"lat": q.lat, "lon": q.lon, "radius_m": r, "layers": {}}
+    want = set(q.layers or [])
+
+    if "water" in want:
+        if q.water_source == "osm":
+            f = _osm_water(q.lat, q.lon, r)
+            out["layers"]["water"] = {"features": f, "count": len(f),
+                                      "source": "OpenStreetMap",
+                                      "geometry": "polygon + line"}
+        else:
+            ensure_ee()
+            pt = ee.Geometry.Point([q.lon, q.lat]).buffer(r)
+            occ = (ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select("occurrence")
+                   .gte(50).selfMask())
+            v = occ.reduceToVectors(geometry=pt, scale=30, maxPixels=1e8,
+                                    geometryType="polygon").getInfo()
+            f = [{"type": "Feature", "geometry": ft["geometry"],
+                  "properties": {"kind": "water", "name": ""}}
+                 for ft in v.get("features", [])]
+            out["layers"]["water"] = {"features": f, "count": len(f),
+                                      "source": "JRC Global Surface Water (30 m)",
+                                      "geometry": "polygon"}
+
+    if "buildings" in want:
+        if q.buildings_source == "osm":
+            f = _osm_buildings(q.lat, q.lon, r)
+            src_lbl = "OpenStreetMap"
+        else:
+            ensure_ee()
+            pt = ee.Geometry.Point([q.lon, q.lat]).buffer(r)
+            fc = (ee.FeatureCollection(
+                "GOOGLE/Research/open-buildings/v3/polygons")
+                .filterBounds(pt).limit(3000))
+            v = fc.getInfo()
+            f = [{"type": "Feature", "geometry": ft["geometry"],
+                  "properties": {"confidence":
+                                 (ft.get("properties") or {}).get("confidence"),
+                                 "type": "", "name": ""}}
+                 for ft in v.get("features", [])]
+            src_lbl = "Google Open Buildings v3"
+        out["layers"]["buildings"] = {"features": f, "count": len(f),
+                                      "source": src_lbl, "geometry": "polygon"}
+
+    if "roads" in want:
+        if q.roads_source == "osm":
+            f = _osm_roads_v(q.lat, q.lon, r)
+            src_lbl = "OpenStreetMap"
+        else:
+            ensure_ee()
+            pt = ee.Geometry.Point([q.lon, q.lat]).buffer(r)
+            fc = _vector_fc(DATASETS["roads"]).filterBounds(pt).limit(2000)
+            v = fc.getInfo()
+            f = [{"type": "Feature", "geometry": ft["geometry"],
+                  "properties": {"class": (ft.get("properties") or {})
+                                 .get("GP_RTP", ""), "name": ""}}
+                 for ft in v.get("features", [])]
+            src_lbl = "GRIP4 global roads"
+        out["layers"]["roads"] = {"features": f, "count": len(f),
+                                  "source": src_lbl, "geometry": "line"}
+
+    if "contours" in want:
+        ensure_ee()
+        f, meta = _dem_contours(q.lat, q.lon, r, q.dem,
+                                float(q.contour_interval_m or 5.0))
+        out["layers"]["contours"] = {"features": f, "count": len(f),
+                                     "source": (meta or {}).get("dem", q.dem),
+                                     "geometry": "line", "meta": meta}
+
+    out["totals"] = {k: v["count"] for k, v in out["layers"].items()}
+    return out
 
 
 @app.post("/site_brief")
