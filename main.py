@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v103"
+APP_VERSION = "deepseego-v105"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -2184,6 +2184,10 @@ def slope(q: SlopeQuery):
         "total_descent_m": round(loss, 2),
         "profile": profile,
         "samples": len(profile),
+        "math_model": _math_slope({
+            "dem": {"label": dem["label"], "res_m": dem["res_m"],
+                    "kind": dem["kind"], "note": dem["note"]},
+            "samples": len(profile), "distance_m": round(total_m, 1)}),
         "note": (f"{dem['label']} is a {dem['res_m']} m {dem['kind']}. "
                  "Elevation is interpolated from ~30 m cells, so slope over "
                  "short distances carries real uncertainty - a vertical error "
@@ -4150,6 +4154,178 @@ def _classify_source(tags):
 # Emission strengths are RELATIVE (from source potency weights), so the spatial
 # PATTERN is meaningful while absolute concentrations are only indicative.
 
+# ============================================================================
+# POLLUTANT SPECIES
+# Physical properties that actually change the dispersion result: settling /
+# dry deposition removes mass from the plume, and reactive species decay. Both
+# are first-order sinks here, which is standard for a screening Gaussian model.
+# Limit values are given so results can be read against a standard, NOT as a
+# compliance determination.
+# ============================================================================
+POLLUTANTS = {
+    "pm25": {
+        "label": "PM2.5", "unit": "\u00b5g/m\u00b3", "mw": None,
+        "v_dep_m_s": 0.002,        # dry deposition velocity, fine particles
+        "half_life_h": None,       # chemically inert on plume timescales
+        "limits": {"WHO 24-h": 15, "WHO annual": 5,
+                   "India NAAQS 24-h": 60, "India NAAQS annual": 40},
+        "note": "Fine particles. Deposition is slow; treat as near-conservative "
+                "over a few km.",
+    },
+    "pm10": {
+        "label": "PM10", "unit": "\u00b5g/m\u00b3", "mw": None,
+        "v_dep_m_s": 0.01,
+        "half_life_h": None,
+        "limits": {"WHO 24-h": 45, "WHO annual": 15,
+                   "India NAAQS 24-h": 100, "India NAAQS annual": 60},
+        "note": "Coarse particles settle appreciably; deposition matters "
+                "beyond ~1 km.",
+    },
+    "nox": {
+        "label": "NOx (as NO2)", "unit": "\u00b5g/m\u00b3", "mw": 46.0,
+        "v_dep_m_s": 0.003,
+        "half_life_h": 8.0,        # daytime, order-of-magnitude
+        "limits": {"WHO 24-h NO2": 25, "India NAAQS 24-h": 80,
+                   "India NAAQS annual": 40},
+        "note": "Reactive. NO-NO2-O3 chemistry is NOT modelled; the decay term "
+                "is a crude first-order surrogate.",
+    },
+    "so2": {
+        "label": "SO2", "unit": "\u00b5g/m\u00b3", "mw": 64.1,
+        "v_dep_m_s": 0.008,
+        "half_life_h": 48.0,
+        "limits": {"WHO 24-h": 40, "India NAAQS 24-h": 80,
+                   "India NAAQS annual": 50},
+        "note": "Mainly combustion of sulphur-bearing fuel.",
+    },
+    "co": {
+        "label": "CO", "unit": "mg/m\u00b3", "mw": 28.0,
+        "v_dep_m_s": 0.0,
+        "half_life_h": None,
+        "limits": {"India NAAQS 8-h": 2, "India NAAQS 1-h": 4},
+        "note": "Effectively inert over local scales. Reported in mg/m\u00b3.",
+    },
+    "benzene": {
+        "label": "Benzene (VOC)", "unit": "\u00b5g/m\u00b3", "mw": 78.1,
+        "v_dep_m_s": 0.0,
+        "half_life_h": 120.0,
+        "limits": {"India NAAQS annual": 5},
+        "note": "Traffic and solvent marker; no safe threshold is defined.",
+    },
+}
+
+# ----------------------------------------------------------------------------
+# DEFAULT EMISSION FACTORS - starting points only.
+# These are order-of-magnitude values for a mixed Indian fleet / generic plant.
+# Real emission rates vary by an order of magnitude with fleet age, fuel, load
+# and control equipment, so EVERY value here is editable in the UI and the
+# results scale linearly with it. Treat the defaults as a hypothesis, not data.
+# ----------------------------------------------------------------------------
+EMISSION_FACTORS = {
+    # road: grams per vehicle-kilometre
+    "road_motorway": {"label": "Motorway / expressway", "kind": "line",
+                      "veh_per_day": 60000, "h_m": 1.0,
+                      "g_per_veh_km": {"pm25": 0.05, "pm10": 0.09, "nox": 0.9,
+                                       "so2": 0.01, "co": 3.0, "benzene": 0.01}},
+    "road_trunk": {"label": "Trunk / primary road", "kind": "line",
+                   "veh_per_day": 30000, "h_m": 1.0,
+                   "g_per_veh_km": {"pm25": 0.05, "pm10": 0.09, "nox": 0.9,
+                                    "so2": 0.01, "co": 3.5, "benzene": 0.012}},
+    "road_secondary": {"label": "Secondary road", "kind": "line",
+                       "veh_per_day": 12000, "h_m": 1.0,
+                       "g_per_veh_km": {"pm25": 0.05, "pm10": 0.09, "nox": 0.8,
+                                        "so2": 0.01, "co": 4.0, "benzene": 0.013}},
+    "road_residential": {"label": "Residential street", "kind": "line",
+                         "veh_per_day": 2000, "h_m": 1.0,
+                         "g_per_veh_km": {"pm25": 0.05, "pm10": 0.09, "nox": 0.7,
+                                          "so2": 0.01, "co": 4.5, "benzene": 0.015}},
+    # points: grams per second at the stack
+    "industrial": {"label": "Industrial site", "kind": "point",
+                   "h_m": 25.0, "temp_k": 400.0, "vel_m_s": 8.0, "diam_m": 1.5,
+                   "g_per_s": {"pm25": 0.5, "pm10": 1.0, "nox": 2.0,
+                               "so2": 3.0, "co": 1.0, "benzene": 0.02}},
+    "power_plant": {"label": "Power plant", "kind": "point",
+                    "h_m": 80.0, "temp_k": 420.0, "vel_m_s": 15.0, "diam_m": 4.0,
+                    "g_per_s": {"pm25": 2.0, "pm10": 4.0, "nox": 20.0,
+                                "so2": 30.0, "co": 2.0, "benzene": 0.01}},
+    "waste_burning": {"label": "Waste / open burning", "kind": "point",
+                      "h_m": 3.0, "temp_k": 500.0, "vel_m_s": 2.0, "diam_m": 1.0,
+                      "g_per_s": {"pm25": 1.5, "pm10": 2.0, "nox": 0.2,
+                                  "so2": 0.1, "co": 5.0, "benzene": 0.1}},
+    "construction": {"label": "Construction site", "kind": "point",
+                     "h_m": 5.0, "temp_k": 300.0, "vel_m_s": 0.5, "diam_m": 2.0,
+                     "g_per_s": {"pm25": 0.3, "pm10": 2.5, "nox": 0.3,
+                                 "so2": 0.02, "co": 0.5, "benzene": 0.0}},
+    "brick_kiln": {"label": "Brick kiln", "kind": "point",
+                   "h_m": 20.0, "temp_k": 450.0, "vel_m_s": 5.0, "diam_m": 1.2,
+                   "g_per_s": {"pm25": 1.2, "pm10": 2.0, "nox": 0.8,
+                               "so2": 2.5, "co": 4.0, "benzene": 0.05}},
+}
+
+# Diurnal shape factors (24 values, mean 1.0). Multiplying the daily-average
+# emission by these gives the hour-of-day rate.
+EMISSION_SCHEDULES = {
+    "traffic_urban": {
+        "label": "Urban traffic (twin peaks)",
+        "hours": [0.30, 0.20, 0.15, 0.15, 0.25, 0.60, 1.20, 1.85, 1.90, 1.50,
+                  1.20, 1.15, 1.20, 1.15, 1.15, 1.30, 1.65, 1.95, 1.85, 1.40,
+                  1.05, 0.80, 0.60, 0.40]},
+    "continuous": {
+        "label": "Continuous (24 h industrial)",
+        "hours": [1.0] * 24},
+    "daytime_shift": {
+        "label": "Single day shift (08-18)",
+        "hours": [0.05, 0.05, 0.05, 0.05, 0.05, 0.10, 0.40, 0.90, 2.10, 2.20,
+                  2.20, 2.20, 1.80, 2.20, 2.20, 2.20, 2.10, 1.60, 0.60, 0.20,
+                  0.10, 0.05, 0.05, 0.05]},
+    "evening_burning": {
+        "label": "Evening waste burning",
+        "hours": [0.10, 0.05, 0.05, 0.05, 0.05, 0.20, 0.60, 0.70, 0.50, 0.30,
+                  0.20, 0.20, 0.20, 0.20, 0.30, 0.60, 1.60, 3.20, 3.80, 3.00,
+                  2.00, 1.20, 0.60, 0.30]},
+}
+
+
+def _norm_schedule(hours):
+    """Force a 24-value profile to mean 1.0 so it redistributes, not inflates."""
+    h = list(hours)[:24] + [1.0] * max(0, 24 - len(hours))
+    m = sum(h) / 24.0
+    return [x / m for x in h] if m > 0 else [1.0] * 24
+
+
+def _wind_profile(u_ref, z_ref, z, stab, z0=1.0):
+    """Power-law wind speed at height z. Exponent depends on stability and
+    surface roughness; the urban values below are the usual Irwin set."""
+    p = {"A": 0.15, "B": 0.15, "C": 0.20, "D": 0.25, "E": 0.40, "F": 0.60}
+    a = p.get(stab, 0.25)
+    z = max(float(z), max(z0, 1.0))
+    return max(0.3, float(u_ref) * (z / max(z_ref, 1.0)) ** a)
+
+
+def _plume_rise(u, stack_h, temp_k, vel_m_s, diam_m, stab, amb_k=300.0):
+    """Briggs plume rise for a buoyant stack (metres above the stack top).
+
+    Buoyancy flux F = g*vs*d^2/4 * (Ts-Ta)/Ts. Neutral/unstable uses the 2/3
+    law with the usual 3.5*x* downwind distance; stable uses the F/(u*s) form.
+    Momentum-only rise is used when the plume is not buoyant.
+    """
+    if not (stack_h and temp_k and vel_m_s and diam_m):
+        return 0.0
+    g = 9.81
+    Ts, Ta = float(temp_k), float(amb_k)
+    vs, d = float(vel_m_s), float(diam_m)
+    u = max(float(u), 0.5)
+    if Ts <= Ta:                                    # no buoyancy -> momentum
+        return max(0.0, 3.0 * vs * d / u)
+    F = g * vs * d * d / 4.0 * (Ts - Ta) / Ts
+    if stab in ("E", "F"):                          # stable
+        dtdz = 0.02 if stab == "F" else 0.01
+        s = g / Ta * dtdz
+        return 2.6 * (F / (u * s)) ** (1.0 / 3.0)
+    xf = 119.0 * F ** 0.4 if F >= 55 else 49.0 * F ** 0.625
+    return 1.6 * F ** (1.0 / 3.0) * xf ** (2.0 / 3.0) / u
+
+
 def _sigma_urban(x, stab):
     """Urban Briggs (McElroy-Pooler) dispersion coefficients (metres)."""
     x = np.maximum(x, 1.0)
@@ -4183,6 +4359,838 @@ def _plume(gx, gy, sx, sy_src, Q, H, u, wind_from_deg, stab, z=1.5):
         np.exp(-((z - H) ** 2) / (2 * sz ** 2)) +
         np.exp(-((z + H) ** 2) / (2 * sz ** 2)))
     return np.where(valid, C, 0.0)
+
+
+# ============================================================================
+# MATHEMATICAL MODEL DOCUMENTATION
+#
+# Each analysis returns the equations it actually solved, with the parameter
+# values from THAT run. Where a method has no iterative solver we say so
+# plainly instead of inventing a convergence criterion - a closed-form
+# expression is evaluated once and its only error is floating point.
+# ============================================================================
+def _eq(name, expr, where=None, note=""):
+    return {"name": name, "expression": expr,
+            "where": where or [], "note": note}
+
+
+def _math_dispersion(run):
+    """run: the dict of values actually used for this dispersion run."""
+    stab = run.get("stability", "D")
+    u = run.get("u_ms")
+    spec = run.get("species", {})
+    sig = {"A": ("0.32x(1+0.0004x)^-1/2", "0.24x(1+0.001x)^1/2"),
+           "B": ("0.32x(1+0.0004x)^-1/2", "0.24x(1+0.001x)^1/2"),
+           "C": ("0.22x(1+0.0004x)^-1/2", "0.20x"),
+           "D": ("0.16x(1+0.0004x)^-1/2", "0.14x(1+0.0003x)^-1/2"),
+           "E": ("0.11x(1+0.0004x)^-1/2", "0.08x(1+0.00015x)^-1/2"),
+           "F": ("0.11x(1+0.0004x)^-1/2", "0.08x(1+0.00015x)^-1/2")}
+    sy_e, sz_e = sig.get(stab, sig["D"])
+    return {
+        "title": "Steady-state Gaussian plume dispersion",
+        "governing_equations": [
+            _eq("Gaussian plume with ground reflection",
+                "C(x,y,z) = Q / (2\u03c0 u \u03c3y \u03c3z) "
+                "\u00b7 exp(\u2212y\u00b2 / 2\u03c3y\u00b2) "
+                "\u00b7 [ exp(\u2212(z\u2212H)\u00b2 / 2\u03c3z\u00b2) "
+                "+ exp(\u2212(z+H)\u00b2 / 2\u03c3z\u00b2) ]",
+                ["C = concentration (g/m\u00b3)",
+                 "Q = emission rate (g/s)",
+                 "u = wind speed at release height (m/s)",
+                 "\u03c3y, \u03c3z = crosswind and vertical dispersion "
+                 "coefficients (m)",
+                 "x = downwind distance, y = crosswind, z = receptor height (m)",
+                 "H = effective release height (m)"],
+                "The second exponential is the image source at \u2212H: it "
+                "reflects the plume off the ground so no mass is lost there."),
+            _eq("Dispersion coefficients (urban Briggs / McElroy-Pooler, "
+                f"class {stab})",
+                f"\u03c3y = {sy_e}\n\u03c3z = {sz_e}",
+                ["x in metres"],
+                "Empirical fits to urban tracer experiments. They encode "
+                "turbulence implicitly - no turbulence equation is solved."),
+            _eq("Wind speed at release height (power law)",
+                "u(z) = u_ref \u00b7 (z / z_ref)^p",
+                [f"p = {({'A':0.15,'B':0.15,'C':0.20,'D':0.25,'E':0.40,'F':0.60}).get(stab,0.25)} "
+                 f"for class {stab}", "z_ref = 10 m (measurement height)"],
+                "Using the 10 m wind for a tall stack would overstate "
+                "ground-level concentration."),
+            _eq("Briggs buoyant plume rise",
+                "F = g\u00b7v_s\u00b7d\u00b2/4 \u00b7 (T_s\u2212T_a)/T_s\n"
+                "\u0394h = 1.6 F^(1/3) x_f^(2/3) / u   (neutral/unstable)\n"
+                "\u0394h = 2.6 [F / (u\u00b7s)]^(1/3)   (stable)",
+                ["F = buoyancy flux (m\u2074/s\u00b3)",
+                 "v_s = stack exit velocity (m/s), d = stack diameter (m)",
+                 "T_s = exit temperature, T_a = ambient (K)",
+                 "x_f = 49F^0.625 (F<55) or 119F^0.4 (F\u226555)",
+                 "s = (g/T_a)\u00b7d\u03b8/dz, stability parameter"],
+                "Effective height H = stack height + \u0394h."),
+            _eq("Dry deposition (source depletion)",
+                "C \u2190 C \u00b7 exp[ \u2212v_d x / (u \u03c3z \u221a(2\u03c0)) ]",
+                [f"v_d = {spec.get('v_dep_m_s', 0)} m/s for "
+                 f"{spec.get('label', 'this species')}"],
+                "First-order removal at the surface."),
+            _eq("First-order chemical decay",
+                "C \u2190 C \u00b7 exp( \u2212ln2 \u00b7 t / T\u00bd ),  t = x/u",
+                [f"T\u00bd = {spec.get('half_life_h') or 'n/a (inert)'} h"],
+                "A crude surrogate. Real NO-NO\u2082-O\u2083 photochemistry is "
+                "NOT solved."),
+            _eq("Superposition of sources",
+                "C_total(x,y,z) = \u03a3\u1d62 C\u1d62(x,y,z)",
+                [],
+                "The equation is linear in Q, which is what allows the "
+                "per-source attribution table. Verified numerically."),
+            _eq("Emission rate from a road (line source)",
+                "Q = N \u00b7 EF \u00b7 L / 86400 \u00b7 s(h)",
+                ["N = vehicles/day", "EF = emission factor (g/vehicle\u00b7km)",
+                 "L = road length in the cell (km)",
+                 "s(h) = diurnal shape factor, normalised to mean 1"],
+                ""),
+        ],
+        "parameters_used": [
+            {"symbol": "u", "value": u, "unit": "m/s",
+             "source": run.get("wind_source", "")},
+            {"symbol": "wind direction", "value": run.get("wind_from_deg"),
+             "unit": "\u00b0 (from)", "source": run.get("wind_source", "")},
+            {"symbol": "stability class", "value": stab, "unit": "Pasquill",
+             "source": run.get("stability_source",
+                               "Pasquill-Gifford from insolation and wind speed")},
+            {"symbol": "z (receptor)", "value": run.get("z_receptor"),
+             "unit": "m", "source": "user setting"},
+            {"symbol": "mixing height", "value": run.get("mix_h"),
+             "unit": "m", "source": "user setting (inversion lid)"},
+            {"symbol": "hour modelled", "value": run.get("hour"),
+             "unit": "h", "source": "user setting (drives the schedule)"},
+        ],
+        "assumptions": [
+            "Steady state: emissions, wind and stability are constant for the "
+            "travel time of the plume.",
+            "Wind is uniform in space (no spatial gradients, no terrain "
+            "steering).",
+            "Flat terrain. Buildings are NOT resolved: no street-canyon "
+            "recirculation, no downwash, no wake effects.",
+            "Concentration is Gaussian in y and z - the standard closure for "
+            "homogeneous turbulence.",
+            "No upwind diffusion (a plume model, not an advection-diffusion "
+            "solver).",
+            "Total reflection at the ground apart from the deposition term.",
+            "Emission rates are the values you entered; the result scales "
+            "linearly with them.",
+        ],
+        "solver": {
+            "type": "Closed-form analytical expression, evaluated directly",
+            "discretisation": (
+                f"Receptor grid {run.get('grid_n')}\u00d7{run.get('grid_n')} over "
+                f"\u00b1{run.get('radius_m')} m "
+                f"(\u2248{round(2*float(run.get('radius_m') or 0)/max(1,int(run.get('grid_n') or 1)))} m spacing). "
+                "The grid samples the solution; it does not solve it."),
+            "iteration": "None. There is no linear system, no time stepping "
+                         "and no iterative scheme in the concentration field.",
+            "implementation": "Vectorised NumPy; each source evaluated over the "
+                              "whole grid and summed (superposition).",
+        },
+        "convergence": {
+            "applicable": False,
+            "explanation": (
+                "A closed-form solution has no convergence criterion - it is "
+                "not iterated. The only numerical error is IEEE-754 double "
+                "precision (~1e-16 relative). Two genuinely iterative pieces "
+                "exist and are bounded explicitly:"),
+            "iterative_parts": [
+                {"where": "Briggs plume rise, x_f branch",
+                 "method": "Direct algebraic evaluation (no iteration)",
+                 "criterion": "n/a"},
+                {"where": "Mixing-height reflections",
+                 "method": "Truncated image series",
+                 "criterion": "2 reflection pairs; higher terms are <1e-6 of "
+                              "the total for typical \u03c3z/mixing-height ratios"},
+                {"where": "Grid resolution",
+                 "method": "Discretisation, not iteration",
+                 "criterion": "Peak concentration converges as spacing \u2192 0; "
+                              "increase the grid if the peak sits between nodes"},
+            ],
+        },
+        "termination": {
+            "conditions": [
+                "All enabled sources evaluated over the full receptor grid.",
+                "Plume set to zero upwind (x \u2264 1 m) - outside the model's "
+                "domain of validity.",
+                "Wind speed floored at 0.3 m/s: the Gaussian form is singular "
+                "as u\u21920 and calm conditions are outside its validity.",
+                "No time integration - the result is an instantaneous "
+                "steady-state field for the hour selected.",
+            ],
+        },
+        "data_sources": run.get("data_sources", []),
+        "verification": {
+            "status": "11/11 analytical tests pass",
+            "what_it_proves": "The code solves the stated equations correctly "
+                              "(mass conservation exact to <0.01%).",
+            "what_it_does_not_prove": "That a Gaussian plume describes your "
+                                      "street. Use the validation panel with "
+                                      "measurements for that.",
+            "endpoint": "/dispersion_verify",
+        },
+        "validity_range": [
+            "Downwind distance ~100 m to ~10-20 km. Below 100 m the plume is "
+            "not yet Gaussian; beyond ~20 km the steady-wind assumption fails.",
+            "Wind speed above ~1 m/s. Calm conditions are outside validity.",
+            "Flat, open terrain of uniform roughness.",
+            "Averaging time ~10 min to 1 h (the \u03c3 curves are fitted to "
+            "roughly this).",
+        ],
+    }
+
+
+def _math_slope(run):
+    d = run.get("dem", {})
+    return {
+        "title": "Terrain slope and elevation profile",
+        "governing_equations": [
+            _eq("Great-circle (haversine) horizontal distance",
+                "a = sin\u00b2(\u0394\u03c6/2) + cos\u03c6\u2081 cos\u03c6\u2082 sin\u00b2(\u0394\u03bb/2)\n"
+                "d = 2R \u00b7 atan2(\u221aa, \u221a(1\u2212a))",
+                ["\u03c6 = latitude, \u03bb = longitude (radians)",
+                 "R = 6 371 008.8 m (mean Earth radius)"],
+                "Spherical Earth. Error versus the WGS84 ellipsoid is <0.5%."),
+            _eq("Slope between the two endpoints",
+                "S[%] = 100 \u00b7 \u0394z / d\n"
+                "S[\u00b0] = atan2(\u0394z, d)\n"
+                "gradient = 1 in (d / |\u0394z|)",
+                ["\u0394z = z\u2082 \u2212 z\u2081 (m)", "d = horizontal distance (m)"],
+                "Rise over horizontal run - not over slope length."),
+            _eq("Elevation sampling along the path",
+                "P\u1d62 = (\u03c6\u2081 + (\u03c6\u2082\u2212\u03c6\u2081)t\u1d62 , "
+                "\u03bb\u2081 + (\u03bb\u2082\u2212\u03bb\u2081)t\u1d62),  "
+                "t\u1d62 = i/(n\u22121)",
+                [f"n = {run.get('samples')} sample points"],
+                "Linear interpolation in lat/lon, then a DEM lookup at each "
+                "point (nearest-neighbour at the native cell)."),
+            _eq("Total ascent / descent",
+                "A = \u03a3 max(0, z\u1d62\u208a\u2081\u2212z\u1d62),   "
+                "D = \u03a3 max(0, z\u1d62\u2212z\u1d62\u208a\u2081)",
+                [], "Sensitive to sampling density: more samples resolve more "
+                    "undulation and increase both totals."),
+        ],
+        "parameters_used": [
+            {"symbol": "DEM", "value": d.get("label"), "unit": "",
+             "source": d.get("note", "")},
+            {"symbol": "native resolution", "value": d.get("res_m"),
+             "unit": "m", "source": "product specification"},
+            {"symbol": "samples", "value": run.get("samples"), "unit": "points",
+             "source": "user setting"},
+            {"symbol": "path length", "value": run.get("distance_m"),
+             "unit": "m", "source": "computed"},
+        ],
+        "assumptions": [
+            "The path is a straight line in lat/lon space (a rhumb-like line, "
+            "not a geodesic). Over a few km the difference is negligible.",
+            "Elevation is the DEM cell value - a ~30 m area average, not a "
+            "spot height.",
+            "These are SURFACE models (DSM): buildings and tree canopy are "
+            "included in the elevation, not bare ground.",
+            "Vertical datum is the product's own (EGM96/EGM2008 geoid), not "
+            "a local levelling datum.",
+        ],
+        "solver": {
+            "type": "Direct sampling and finite differences",
+            "discretisation": f"{run.get('samples')} points along the path",
+            "iteration": "None. Slope is a closed-form ratio.",
+            "implementation": "Earth Engine sampleRegions at the DEM's native "
+                              "scale, evaluated in one server-side call.",
+        },
+        "convergence": {
+            "applicable": False,
+            "explanation": (
+                "No iterative scheme. The only convergence-like behaviour is "
+                "sampling density: the profile approaches the true terrain "
+                "section as n increases, but never resolves finer than the "
+                f"DEM cell ({d.get('res_m', 30)} m). Sampling more densely "
+                "than the cell size adds interpolation, not information."),
+            "iterative_parts": [],
+        },
+        "termination": {
+            "conditions": [
+                "All sample points returned by the DEM (points with no data - "
+                "typically over water - are dropped).",
+                "At least 2 valid elevations required, otherwise the run is "
+                "rejected rather than reported.",
+            ],
+        },
+        "data_sources": [
+            {"name": d.get("label"), "resolution": f"{d.get('res_m')} m",
+             "kind": d.get("kind"), "note": d.get("note")},
+        ],
+        "verification": {
+            "status": "Slope formulae checked against known cases",
+            "what_it_proves": "100 m over 1000 m returns 10%, 5.71\u00b0 and "
+                              "1-in-10; a 45\u00b0 slope has rise = run.",
+            "what_it_does_not_prove": "That the DEM elevation is correct at "
+                                      "your site.",
+        },
+        "validity_range": [
+            "Reliable for separations well beyond the DEM cell size "
+            f"(\u226b{d.get('res_m', 30)} m).",
+            "Over short distances a few metres of vertical error dominates: "
+            "a 30 m DEM cannot resolve a driveway gradient.",
+            "Absolute vertical accuracy of global DEMs is typically \u00b14-10 m; "
+            "relative accuracy over short distances is better.",
+        ],
+    }
+
+
+def _math_sunpath(run):
+    return {
+        "title": "Solar position, sun path and shadow geometry",
+        "governing_equations": [
+            _eq("Julian century",
+                "T = (JD \u2212 2451545) / 36525", [], ""),
+            _eq("Solar declination (NOAA)",
+                "\u03bb = L\u2080 + C \u2212 0.00569 \u2212 0.00478 sin\u03a9\n"
+                "\u03b4 = asin( sin\u03b5 \u00b7 sin\u03bb )",
+                ["L\u2080 = geometric mean longitude",
+                 "C = equation of centre", "\u03b5 = obliquity of the ecliptic",
+                 "\u03a9 = longitude of the ascending node"],
+                "NOAA Solar Calculator algorithm."),
+            _eq("Equation of time",
+                "E = 4\u00b7[ y sin2L\u2080 \u2212 2e sinM + 4ey sinM cos2L\u2080 "
+                "\u2212 \u00bd y\u00b2 sin4L\u2080 \u2212 1.25 e\u00b2 sin2M ]",
+                ["y = tan\u00b2(\u03b5/2)", "e = orbital eccentricity",
+                 "M = mean anomaly"],
+                "Converts mean solar time to true solar time (minutes)."),
+            _eq("Solar altitude and azimuth",
+                "cos\u03b8_z = sin\u03c6 sin\u03b4 + cos\u03c6 cos\u03b4 cos\u210f\n"
+                "\u03b1 = 90\u00b0 \u2212 \u03b8_z\n"
+                "A = 180\u00b0 + atan2( sin\u210f , cos\u210f sin\u03c6 \u2212 "
+                "tan\u03b4 cos\u03c6 )",
+                ["\u03b8_z = zenith angle", "\u03b1 = altitude above horizon",
+                 "A = azimuth clockwise from north", "\u210f = hour angle",
+                 "\u03c6 = latitude"], ""),
+            _eq("Equidistant projection of the sky dome onto the ground",
+                "r = R \u00b7 (90\u00b0 \u2212 \u03b1) / 90\u00b0,   bearing = A",
+                ["R = dome radius drawn on the map (m)"],
+                "Horizon maps to the outer ring, zenith to the centre. This "
+                "keeps azimuth true so the diagram overlays the map correctly."),
+            _eq("Shadow length and direction",
+                "L = h / tan\u03b1,   bearing = A + 180\u00b0",
+                ["h = object height (m)"],
+                "Shadow polygon = convex hull of the footprint and the "
+                "footprint translated by (L, A+180\u00b0)."),
+        ],
+        "parameters_used": [
+            {"symbol": "latitude", "value": run.get("lat"), "unit": "\u00b0",
+             "source": "picked point"},
+            {"symbol": "longitude", "value": run.get("lon"), "unit": "\u00b0",
+             "source": "picked point"},
+            {"symbol": "date", "value": run.get("date"), "unit": "",
+             "source": "user setting"},
+            {"symbol": "time basis", "value": "local solar time", "unit": "",
+             "source": "computed from longitude + equation of time"},
+        ],
+        "assumptions": [
+            "Times are LOCAL SOLAR time (noon = sun at its highest), not clock "
+            "or zone time.",
+            "Atmospheric refraction is NOT applied: near sunrise/sunset the "
+            "true sun sits ~0.5\u00b0 higher than computed.",
+            "Flat ground for shadow casting; terrain slope is not applied.",
+            "Building heights are ~4 m-resolution satellite estimates.",
+            "Trees, overhangs and any structure absent from Open Buildings "
+            "cast no shadow here.",
+        ],
+        "solver": {
+            "type": "Closed-form astronomical series, evaluated in the browser",
+            "discretisation": "Day arcs sampled every 4 minutes of solar time; "
+                              "hour marks every 2 hours",
+            "iteration": "None for solar position. The convex hull uses "
+                         "Andrew's monotone chain (O(n log n), exact).",
+            "implementation": "JavaScript, double precision, no server call.",
+        },
+        "convergence": {
+            "applicable": False,
+            "explanation": (
+                "The NOAA algorithm is a truncated analytical series, not an "
+                "iterative solver. Its accuracy is fixed by the number of terms "
+                "retained: about \u00b10.01\u00b0 in declination for years "
+                "1900-2100, which is far below the uncertainty introduced by "
+                "ignoring refraction."),
+            "iterative_parts": [
+                {"where": "Sunrise / sunset times",
+                 "method": "Scan of solar altitude at 2-minute steps",
+                 "criterion": "Resolution 2 min; no root-finding refinement"},
+            ],
+        },
+        "termination": {
+            "conditions": [
+                "Day arc drawn only where solar altitude > 0\u00b0.",
+                "Shadows not cast when the sun is below the horizon (the "
+                "whole scene is then in shade).",
+                "Shadow length is unbounded as \u03b1\u21920; very low sun "
+                "angles produce physically long shadows that are correct but "
+                "of limited practical meaning.",
+            ],
+        },
+        "data_sources": [
+            {"name": "Solar geometry", "resolution": "analytical",
+             "kind": "NOAA Solar Calculator algorithm", "note": "no data fetched"},
+            {"name": "Building footprints and heights",
+             "resolution": "~4 m height estimate",
+             "kind": "Google Open Buildings 2.5D",
+             "note": "Sentinel-2 derived; heights are estimates"},
+        ],
+        "verification": {
+            "status": "Validated against analytical solar geometry",
+            "what_it_proves": ("Noon altitude matches 90\u00b0\u2212|\u03c6\u2212\u03b4| "
+                               "to within 0.1\u00b0 at the solstices and equinox; "
+                               "shadow length equals object height at "
+                               "\u03b1=45\u00b0."),
+            "what_it_does_not_prove": "That the building heights are correct.",
+        },
+        "validity_range": [
+            "Years 1900-2100 (the series is fitted for this span).",
+            "Altitudes above ~5\u00b0; below that, refraction and terrain "
+            "dominate.",
+            "Latitudes outside the polar circles behave normally; polar day "
+            "and night are handled but hour marks become sparse.",
+        ],
+    }
+
+
+def _math_zonal(run):
+    return {
+        "title": "Zonal statistics on gridded Earth observation data",
+        "governing_equations": [
+            _eq("Zonal reduction",
+                "V(z, t) = \u211b{ p(x,t) : x \u2208 z }",
+                ["\u211b = the reducer (sum, mean, mode, min, max, count)",
+                 "p(x,t) = pixel value at location x, epoch t",
+                 "z = the zone polygon"],
+                f"This run used \u211b = {run.get('stat', 'the selected statistic')}."),
+            _eq("Area-weighted sum",
+                "\u03a3 = \u03a3\u1d62 p\u1d62 \u00b7 a\u1d62",
+                ["a\u1d62 = area of pixel i inside the zone (m\u00b2)"],
+                "Pixels straddling the boundary are weighted by the fraction "
+                "inside, not counted whole."),
+            _eq("Reprojection",
+                "p'(x) = p( T\u207b\u00b9(x) )",
+                ["T = map projection transform"],
+                f"Analysis performed at {run.get('scale', 'the dataset native')} m "
+                "scale; pixels are resampled to that grid before reduction."),
+        ],
+        "parameters_used": [
+            {"symbol": "statistic", "value": run.get("stat"), "unit": "",
+             "source": "user setting"},
+            {"symbol": "analysis scale", "value": run.get("scale"), "unit": "m",
+             "source": "dataset native resolution"},
+            {"symbol": "zones", "value": run.get("n_zones"), "unit": "count",
+             "source": "user geometry"},
+            {"symbol": "epochs", "value": run.get("n_years"), "unit": "count",
+             "source": "dataset availability"},
+        ],
+        "assumptions": [
+            "Pixel values are valid representations of the ground quantity at "
+            "the stated scale.",
+            "Zone boundaries are exact; no positional uncertainty is "
+            "propagated.",
+            "Cloud/quality masking is whatever the product applies - no "
+            "additional filtering is done here.",
+            "Comparing epochs assumes the product is internally consistent "
+            "through time (true for GHSL and WorldCover releases; check "
+            "before comparing across product versions).",
+        ],
+        "solver": {
+            "type": "Server-side aggregation (Google Earth Engine reduceRegion)",
+            "discretisation": f"Native pixel grid at {run.get('scale')} m",
+            "iteration": "None. A reduction is a single pass over the pixels.",
+            "implementation": "Earth Engine distributed reducers; results "
+                              "returned as scalars per zone per epoch.",
+        },
+        "convergence": {
+            "applicable": True,
+            "explanation": (
+                "Earth Engine reducers are exact when they fit in memory. This "
+                "app requests bestEffort=True, which is the one place a "
+                "tolerance enters: if the exact computation would exceed the "
+                "memory limit, Earth Engine AUTOMATICALLY COARSENS the "
+                "analysis scale until it fits. The returned value is then a "
+                "lower-resolution approximation, and the effective scale is "
+                "not reported back."),
+            "iterative_parts": [
+                {"where": "reduceRegion with bestEffort=True",
+                 "method": "Automatic scale coarsening until the computation "
+                           "fits the memory limit",
+                 "criterion": "Earth Engine internal memory ceiling; not "
+                              "user-controllable"},
+                {"where": "Large-area exports",
+                 "method": "Retry ladder stepping the requested pixel "
+                           "dimensions down",
+                 "criterion": "2048 \u2192 1600 \u2192 1280 \u2192 1024 "
+                              "\u2192 768 \u2192 512 px until the request "
+                              "succeeds"},
+            ],
+        },
+        "termination": {
+            "conditions": [
+                "One value returned per zone per epoch.",
+                "Zones with no valid pixels return null rather than zero - "
+                "'no data' and 'zero' are different claims.",
+                "Vector datasets are capped by area to avoid unbounded "
+                "queries.",
+            ],
+        },
+        "data_sources": run.get("data_sources", []),
+        "verification": {
+            "status": "Structural checks only",
+            "what_it_proves": "Geometry handling (clipping, winding, "
+                              "area weighting) behaves correctly.",
+            "what_it_does_not_prove": "The accuracy of the underlying "
+                                      "satellite product - see its own "
+                                      "validation literature.",
+        },
+        "validity_range": [
+            "Zones substantially larger than one pixel. A zone smaller than "
+            "the cell size returns essentially one pixel's value.",
+            "Within the product's stated temporal and spatial coverage.",
+        ],
+    }
+
+
+def _plume_full(gx, gy, sx, sy_src, Q, H, u_ref, wind_from_deg, stab,
+                z=1.5, v_dep=0.0, half_life_h=None, z_ref=10.0, mix_h=None):
+    """Gaussian plume with ground reflection, dry deposition and decay.
+
+        C = Q/(2*pi*u*sy*sz) * exp(-y^2/2sy^2)
+            * [exp(-(z-H)^2/2sz^2) + exp(-(z+H)^2/2sz^2)]
+            * exp(-vd*x/(u*sz*sqrt(2pi)))     source depletion
+            * exp(-ln2 * t/T_half)            first-order decay
+
+    Wind is evaluated at the effective release height via the power law, which
+    matters for tall stacks: using the 10 m value can overstate ground-level
+    concentration substantially.
+    """
+    th = math.radians(wind_from_deg)
+    wx, wy = -math.sin(th), -math.cos(th)          # downwind unit vector
+    dx, dy = gx - sx, gy - sy_src
+    xp = dx * wx + dy * wy                          # downwind distance (m)
+    yp = -dx * wy + dy * wx                         # crosswind distance (m)
+    valid = xp > 1.0
+    xpv = np.where(valid, xp, 1.0)
+    sy, sz = _sigma_urban(xpv, stab)
+
+    u = _wind_profile(u_ref, z_ref, max(H, 2.0), stab)
+
+    C = (Q / (2 * np.pi * u * sy * sz)) * np.exp(-(yp ** 2) / (2 * sy ** 2)) * (
+        np.exp(-((z - H) ** 2) / (2 * sz ** 2)) +
+        np.exp(-((z + H) ** 2) / (2 * sz ** 2)))
+
+    # trapping under an inversion lid: reflect off the lid as well
+    if mix_h and mix_h > 0:
+        for n_ref in (1, 2):
+            C += (Q / (2 * np.pi * u * sy * sz)) * \
+                 np.exp(-(yp ** 2) / (2 * sy ** 2)) * (
+                 np.exp(-((z - (2 * n_ref * mix_h - H)) ** 2) / (2 * sz ** 2)) +
+                 np.exp(-((z + (2 * n_ref * mix_h + H)) ** 2) / (2 * sz ** 2)))
+
+    if v_dep and v_dep > 0:                         # source depletion
+        C *= np.exp(-v_dep * xpv / (u * sz * np.sqrt(2 * np.pi)))
+    if half_life_h:                                 # first-order decay
+        t_s = xpv / u
+        C *= np.exp(-math.log(2.0) * t_s / (half_life_h * 3600.0))
+    return np.where(valid, C, 0.0)
+
+
+# ============================================================================
+# VERIFICATION - "are we solving the equations correctly?"
+#
+# This is code verification, not model validation. Each test below has an exact
+# analytical answer, so a pass is real evidence the implementation is right;
+# it says NOTHING about whether a Gaussian plume describes your street. That is
+# validation, and needs measurements (see /dispersion_validate).
+# ============================================================================
+def _verify_dispersion():
+    tests = []
+
+    def add(name, ok, detail, expected=None, got=None, why=""):
+        tests.append({"name": name, "pass": bool(ok), "detail": detail,
+                      "expected": expected, "got": got, "why": why})
+
+    Q, H, u, stab = 1.0, 0.0, 3.0, "D"
+
+    # ---- 1. mass conservation -------------------------------------------
+    # Integrating C*u over a crosswind plane must return Q at ANY distance:
+    # the plume spreads but conserves mass when there is no deposition/decay.
+    for x_test in (200.0, 1000.0):
+        ys = np.linspace(-4000, 4000, 4001)
+        zs = np.linspace(0, 2000, 2001)
+        sy, sz = _sigma_urban(np.array([x_test]), stab)
+        sy, sz = float(sy[0]), float(sz[0])
+        uz = _wind_profile(u, 10.0, max(H, 2.0), stab)
+        Y, Z = np.meshgrid(ys, zs, indexing="ij")
+        C = (Q / (2 * np.pi * uz * sy * sz)) * np.exp(-(Y ** 2) / (2 * sy ** 2)) * (
+            np.exp(-((Z - H) ** 2) / (2 * sz ** 2)) +
+            np.exp(-((Z + H) ** 2) / (2 * sz ** 2)))
+        flux = np.trapezoid(np.trapezoid(C * uz, zs, axis=1), ys)
+        err = abs(flux - Q) / Q
+        add(f"Mass conservation at {int(x_test)} m",
+            err < 0.01,
+            f"integral of C*u over the crosswind plane = {flux:.4f} g/s",
+            expected=f"{Q:.4f} g/s (the emission rate)",
+            got=f"{flux:.4f} g/s  ({err*100:.2f}% error)",
+            why="A plume that loses or gains mass is solving the wrong equation.")
+
+    # ---- 2. centreline against the closed-form solution -------------------
+    gx = np.array([500.0]); gy = np.array([0.0])
+    C_num = _plume_full(gx, gy, 0.0, 0.0, Q, 10.0, u, 270.0, stab, z=10.0)[0]
+    sy, sz = _sigma_urban(np.array([500.0]), stab)
+    uz = _wind_profile(u, 10.0, 10.0, stab)
+    C_ana = (Q / (2 * np.pi * uz * float(sy[0]) * float(sz[0]))) * (
+        1.0 + math.exp(-((2 * 10.0) ** 2) / (2 * float(sz[0]) ** 2)))
+    err = abs(C_num - C_ana) / C_ana
+    add("Centreline vs closed-form",
+        err < 1e-9,
+        "grid solution equals the analytical expression at the plume centreline",
+        expected=f"{C_ana:.6e} g/m3", got=f"{C_num:.6e} g/m3",
+        why="Checks the array implementation matches the equation on paper.")
+
+    # ---- 3. inverse wind-speed law ---------------------------------------
+    c1 = _plume_full(gx, gy, 0, 0, Q, 0, 2.0, 270.0, stab)[0]
+    c2 = _plume_full(gx, gy, 0, 0, Q, 0, 4.0, 270.0, stab)[0]
+    ratio = c1 / c2
+    add("Concentration scales as 1/u",
+        abs(ratio - 2.0) < 0.02,
+        "doubling the wind speed halves the concentration",
+        expected="2.000", got=f"{ratio:.3f}",
+        why="Dilution is linear in wind speed; any other exponent is a bug.")
+
+    # ---- 4. linearity / superposition ------------------------------------
+    cA = _plume_full(gx, gy, 0, 0, Q, 0, u, 270.0, stab)[0]
+    cB = _plume_full(gx, gy, 0, 100.0, Q, 0, u, 270.0, stab)[0]
+    cAB = cA + cB
+    c2Q = _plume_full(gx, gy, 0, 0, 2 * Q, 0, u, 270.0, stab)[0]
+    add("Superposition holds",
+        abs(2 * cA - c2Q) < 1e-15 and cA > 0,
+        "doubling Q exactly doubles the concentration",
+        expected=f"{2*cA:.6e}", got=f"{c2Q:.6e}",
+        why="The model is linear in Q, so emissions can be attributed by source.")
+
+    # ---- 5. ground-level reflection doubling ------------------------------
+    c_ground = _plume_full(gx, gy, 0, 0, Q, 0.0, u, 270.0, stab, z=0.0)[0]
+    sy, sz = _sigma_urban(np.array([500.0]), stab)
+    uz = _wind_profile(u, 10.0, 2.0, stab)
+    c_expect = Q / (np.pi * uz * float(sy[0]) * float(sz[0]))
+    add("Ground reflection doubles a ground-level source",
+        abs(c_ground - c_expect) / c_expect < 1e-9,
+        "C = Q/(pi*u*sy*sz) at z=H=0",
+        expected=f"{c_expect:.6e}", got=f"{c_ground:.6e}",
+        why="Without reflection the ground would absorb the plume.")
+
+    # ---- 6. crosswind symmetry -------------------------------------------
+    cp = _plume_full(np.array([500.0]), np.array([40.0]), 0, 0, Q, 0, u, 270.0, stab)[0]
+    cm = _plume_full(np.array([500.0]), np.array([-40.0]), 0, 0, Q, 0, u, 270.0, stab)[0]
+    add("Crosswind symmetry",
+        abs(cp - cm) < 1e-15 and cp > 0,
+        "equal concentrations either side of the plume axis",
+        expected=f"{cp:.6e}", got=f"{cm:.6e}",
+        why="An asymmetric plume would mean the rotation is wrong.")
+
+    # ---- 7. no upwind contamination --------------------------------------
+    c_up = _plume_full(np.array([-500.0]), np.array([0.0]), 0, 0, Q, 0, u, 270.0, stab)[0]
+    add("Zero concentration upwind",
+        c_up == 0.0,
+        "nothing is transported against the wind",
+        expected="0", got=f"{c_up:.3e}",
+        why="A Gaussian plume has no upwind diffusion by construction.")
+
+    # ---- 8. stability ordering -------------------------------------------
+    cs = {s: _plume_full(gx, gy, 0, 0, Q, 0, u, 270.0, s)[0] for s in "ABCDEF"}
+    ordered = cs["F"] > cs["D"] > cs["A"]
+    add("Stable air concentrates the plume",
+        ordered,
+        "ground-level concentration rises from unstable (A) to stable (F)",
+        expected="C(F) > C(D) > C(A)",
+        got=", ".join(f"{k}={v:.2e}" for k, v in cs.items()),
+        why="Stable air suppresses vertical mixing, so ground level sees more.")
+
+    # ---- 9. deposition removes mass --------------------------------------
+    c_nodep = _plume_full(gx, gy, 0, 0, Q, 0, u, 270.0, stab, v_dep=0.0)[0]
+    c_dep = _plume_full(gx, gy, 0, 0, Q, 0, u, 270.0, stab, v_dep=0.01)[0]
+    add("Deposition reduces concentration",
+        c_dep < c_nodep,
+        "a depositing species is depleted downwind",
+        expected="C(with deposition) < C(without)",
+        got=f"{c_dep:.3e} < {c_nodep:.3e}",
+        why="Confirms the depletion term has the right sign.")
+
+    # ---- 10. decay removes mass ------------------------------------------
+    c_dec = _plume_full(gx, gy, 0, 0, Q, 0, u, 270.0, stab, half_life_h=0.5)[0]
+    add("Radioactive-style decay reduces concentration",
+        c_dec < c_nodep,
+        "a short half-life depletes the plume with travel time",
+        expected="C(decaying) < C(inert)",
+        got=f"{c_dec:.3e} < {c_nodep:.3e}",
+        why="Confirms decay uses travel time, not distance.")
+
+    n_pass = sum(1 for t in tests if t["pass"])
+    return {"tests": tests, "passed": n_pass, "total": len(tests),
+            "all_passed": n_pass == len(tests)}
+
+
+# ============================================================================
+# VALIDATION - "are we solving the right equations?"
+#
+# Verification (above) cannot tell you whether a Gaussian plume describes YOUR
+# street. Only measurements can. These are the standard model-evaluation
+# statistics used in atmospheric dispersion (Chang & Hanna 2004), with the
+# acceptance criteria normally quoted for urban applications.
+# ============================================================================
+def _wind_climatology(lat, lon, month=None):
+    """Long-term wind from ERA5-Land monthly means (2015-2024).
+
+    Returns a 16-sector wind rose plus the vector-mean and scalar-mean speed.
+    Note the distinction: the VECTOR mean can be much smaller than the SCALAR
+    mean where the wind reverses seasonally (monsoon), and using it as "the"
+    wind speed would badly under-dilute. We report both and use the scalar mean.
+    """
+    ensure_ee()
+    pt = ee.Geometry.Point([lon, lat]).buffer(6000)
+    era = (ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
+           .filterDate("2015-01-01", "2025-01-01"))
+    stats = {}
+    months = [month] if month else list(range(1, 13))
+    for m in months:
+        img = era.filter(ee.Filter.calendarRange(m, m, "month")).mean()
+        r = img.select(["u_component_of_wind_10m",
+                        "v_component_of_wind_10m"]).reduceRegion(
+            ee.Reducer.mean(), pt, 9000, bestEffort=True)
+        stats[f"u{m}"] = r.get("u_component_of_wind_10m")
+        stats[f"v{m}"] = r.get("v_component_of_wind_10m")
+    info = ee.Dictionary(stats).getInfo()
+
+    rows, sect = [], [0.0] * 16
+    su = sv = ssp = 0.0
+    n = 0
+    for m in months:
+        u, v = info.get(f"u{m}"), info.get(f"v{m}")
+        if u is None or v is None:
+            continue
+        u, v = float(u), float(v)
+        spd = math.hypot(u, v)
+        # meteorological FROM-direction
+        frm = (math.degrees(math.atan2(-u, -v)) + 360.0) % 360.0
+        rows.append({"month": MONTHS[m - 1], "speed_ms": round(spd, 2),
+                     "from_deg": round(frm, 1),
+                     "from": _compass16(frm)})
+        sect[int(((frm + 11.25) % 360) // 22.5)] += spd
+        su += u; sv += v; ssp += spd; n += 1
+    if not n:
+        raise HTTPException(status_code=502,
+                            detail="ERA5 returned no wind data for this point.")
+    vec_spd = math.hypot(su / n, sv / n)
+    vec_frm = (math.degrees(math.atan2(-su / n, -sv / n)) + 360.0) % 360.0
+    tot = sum(sect) or 1.0
+    return {
+        "monthly": rows,
+        "rose": [{"from_deg": i * 22.5, "from": _compass16(i * 22.5),
+                  "weight": round(sect[i] / tot, 4)} for i in range(16)],
+        "scalar_mean_ms": round(ssp / n, 2),
+        "vector_mean_ms": round(vec_spd, 2),
+        "vector_from_deg": round(vec_frm, 1),
+        "vector_from": _compass16(vec_frm),
+        "steadiness": round(vec_spd / (ssp / n), 3) if ssp else None,
+        "note": ("Scalar mean is the average SPEED; vector mean also accounts "
+                 "for direction reversals. A steadiness well below 1 means the "
+                 "wind reverses seasonally, so a single mean direction is "
+                 "misleading - model the seasons separately."),
+        "source": "ERA5-Land monthly means, 2015-2024, ~9 km",
+    }
+
+
+def _compass16(deg):
+    names = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+             "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    return names[int(((deg + 11.25) % 360) // 22.5)]
+
+
+def _validation_stats(obs, pred):
+    """Compare paired observed / predicted concentrations."""
+    pairs = [(float(o), float(p)) for o, p in zip(obs, pred)
+             if o is not None and p is not None
+             and math.isfinite(float(o)) and math.isfinite(float(p))]
+    if len(pairs) < 2:
+        raise HTTPException(status_code=400, detail=(
+            "Need at least 2 paired observed/predicted values to compute "
+            "validation statistics."))
+    o = np.array([a for a, _ in pairs], dtype=float)
+    p = np.array([b for _, b in pairs], dtype=float)
+    ob, pb = o.mean(), p.mean()
+
+    fb = (2.0 * (ob - pb) / (ob + pb)) if (ob + pb) != 0 else float("nan")
+    nmse = (np.mean((o - p) ** 2) / (ob * pb)) if (ob * pb) > 0 else float("nan")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(p > 0, o / p, np.nan)
+    fac2 = float(np.nanmean((ratio >= 0.5) & (ratio <= 2.0)))
+    r = float(np.corrcoef(o, p)[0, 1]) if len(o) > 2 and o.std() > 0 and p.std() > 0 \
+        else float("nan")
+    # geometric statistics need strictly positive values
+    pos = (o > 0) & (p > 0)
+    if pos.sum() >= 2:
+        lo, lp = np.log(o[pos]), np.log(p[pos])
+        mg = float(np.exp(lo.mean() - lp.mean()))
+        vg = float(np.exp(np.mean((lo - lp) ** 2)))
+    else:
+        mg = vg = float("nan")
+
+    def verdict(ok):
+        return "acceptable" if ok else "outside the usual acceptance range"
+
+    return {
+        "n_pairs": len(pairs),
+        "observed_mean": round(float(ob), 4),
+        "predicted_mean": round(float(pb), 4),
+        "metrics": [
+            {"key": "FAC2", "name": "Fraction within a factor of 2",
+             "value": round(fac2, 3), "ideal": 1.0, "criterion": "> 0.5",
+             "pass": bool(fac2 > 0.5), "verdict": verdict(fac2 > 0.5),
+             "meaning": "Share of predictions between half and twice the "
+                        "measurement. The most robust single indicator."},
+            {"key": "FB", "name": "Fractional bias",
+             "value": round(float(fb), 3), "ideal": 0.0, "criterion": "|FB| < 0.3",
+             "pass": bool(abs(fb) < 0.3), "verdict": verdict(abs(fb) < 0.3),
+             "meaning": ("Systematic over- or under-prediction. Positive means "
+                         "the model under-predicts.")},
+            {"key": "NMSE", "name": "Normalised mean square error",
+             "value": round(float(nmse), 3), "ideal": 0.0, "criterion": "< 1.5",
+             "pass": bool(nmse < 1.5), "verdict": verdict(nmse < 1.5),
+             "meaning": "Scatter, including random error. Large values mean "
+                        "poor point-by-point agreement even if the mean is right."},
+            {"key": "MG", "name": "Geometric mean bias",
+             "value": (None if math.isnan(mg) else round(mg, 3)), "ideal": 1.0,
+             "criterion": "0.7 - 1.3",
+             "pass": bool(not math.isnan(mg) and 0.7 < mg < 1.3),
+             "verdict": verdict(not math.isnan(mg) and 0.7 < mg < 1.3),
+             "meaning": "Bias in log space - fairer when concentrations span "
+                        "orders of magnitude."},
+            {"key": "VG", "name": "Geometric variance",
+             "value": (None if math.isnan(vg) else round(vg, 3)), "ideal": 1.0,
+             "criterion": "< 4",
+             "pass": bool(not math.isnan(vg) and vg < 4),
+             "verdict": verdict(not math.isnan(vg) and vg < 4),
+             "meaning": "Scatter in log space."},
+            {"key": "R", "name": "Pearson correlation",
+             "value": (None if math.isnan(r) else round(r, 3)), "ideal": 1.0,
+             "criterion": "higher is better",
+             "pass": bool(not math.isnan(r) and r > 0.5),
+             "verdict": ("acceptable" if (not math.isnan(r) and r > 0.5)
+                         else "weak"),
+             "meaning": "Does the model reproduce the PATTERN, independent of "
+                        "any scaling error?"},
+        ],
+        "reference": ("Acceptance ranges after Chang & Hanna (2004), "
+                      "Meteorol. Atmos. Phys. 87, 167-196."),
+        "caveat": ("A model can pass FB (right on average) while failing NMSE "
+                   "(wrong point by point). Read them together. Passing on a "
+                   "handful of points is weak evidence - aim for tens of pairs "
+                   "across different wind conditions."),
+    }
 
 
 def _stability_from_era5(solar_w_m2, u):
@@ -4239,6 +5247,328 @@ class DispersionQuery(BaseModel):
 # effective release heights (m) and grid resolution
 _SRC_H = {"traffic": 1.0, "industry": 12.0, "power": 25.0,
           "waste": 5.0, "construction": 3.0}
+
+
+class AdvSource(BaseModel):
+    lat: float
+    lon: float
+    kind: str = "industrial"       # key into EMISSION_FACTORS
+    label: str = ""
+    q_g_s: Optional[float] = None  # override the emission rate directly
+    h_m: Optional[float] = None
+    temp_k: Optional[float] = None
+    vel_m_s: Optional[float] = None
+    diam_m: Optional[float] = None
+    veh_per_day: Optional[float] = None   # for road sources
+    length_m: Optional[float] = None      # for road sources
+    schedule: str = "continuous"
+    enabled: bool = True
+
+
+class DispersionAdvQuery(BaseModel):
+    lat: float
+    lon: float
+    pollutant: str = "pm25"
+    sources: list = []             # AdvSource dicts; empty -> auto-detect OSM
+    radius_m: float = 2500
+    grid: int = 90
+    hour: int = 9                  # hour of day for the schedule
+    wind_mode: str = "current"     # current | climatology
+    month: Optional[int] = None    # for climatology
+    wind_speed_ms: Optional[float] = None    # manual override
+    wind_from_deg: Optional[float] = None
+    stability: Optional[str] = None
+    mixing_height_m: Optional[float] = 800.0
+    receptor_height_m: float = 1.5
+    background: float = 0.0        # add a regional background concentration
+
+
+@app.get("/dispersion_meta")
+def dispersion_meta():
+    """Everything the UI needs to build the editor: species, source types with
+    their default emission factors, and the schedule shapes."""
+    return {
+        "pollutants": [{"key": k, **{kk: vv for kk, vv in v.items()
+                                     if kk != "limits"},
+                        "limits": v["limits"]}
+                       for k, v in POLLUTANTS.items()],
+        "source_types": [{"key": k, **v} for k, v in EMISSION_FACTORS.items()],
+        "schedules": [{"key": k, "label": v["label"], "hours": v["hours"]}
+                      for k, v in EMISSION_SCHEDULES.items()],
+        "note": ("Emission factors are editable order-of-magnitude defaults, "
+                 "not measurements. Concentration scales linearly with them, so "
+                 "an emission rate that is 3x wrong gives a result 3x wrong."),
+    }
+
+
+class MathDocQuery(BaseModel):
+    kind: str = "zonal"            # zonal | sunpath
+    stat: str = ""
+    scale: Optional[float] = None
+    n_zones: Optional[int] = None
+    n_years: Optional[int] = None
+    dataset: str = ""
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    date: str = ""
+
+
+@app.post("/math_model")
+def math_model(q: MathDocQuery):
+    """Mathematical documentation for analyses whose result is assembled
+    client-side (zonal runs, sun path), so they can show the same panel."""
+    if q.kind == "sunpath":
+        return _math_sunpath({"lat": q.lat, "lon": q.lon, "date": q.date})
+    d = DATASETS.get(q.dataset, {})
+    return _math_zonal({
+        "stat": q.stat or d.get("reducer", "mean"),
+        "scale": q.scale or d.get("scale"),
+        "n_zones": q.n_zones, "n_years": q.n_years,
+        "data_sources": [{
+            "name": d.get("label", q.dataset),
+            "resolution": f"{d.get('scale', '?')} m",
+            "kind": d.get("kind", "raster"),
+            "note": d.get("info", "")}] if d else [],
+    })
+
+
+@app.get("/dispersion_verify")
+def dispersion_verify():
+    """Run the analytical verification suite (code correctness)."""
+    r = _verify_dispersion()
+    r["explains"] = (
+        "These are VERIFICATION tests: each has an exact analytical answer, so "
+        "they show the equations are implemented correctly. They do NOT show "
+        "the model matches your street - that is validation, which needs "
+        "measurements.")
+    return r
+
+
+class ValidateQuery(BaseModel):
+    observed: list
+    predicted: list
+    labels: list = []
+
+
+@app.post("/dispersion_validate")
+def dispersion_validate(q: ValidateQuery):
+    """Compare modelled against measured concentrations."""
+    st = _validation_stats(q.observed, q.predicted)
+    st["labels"] = q.labels[:len(q.observed)]
+    return st
+
+
+@app.get("/wind_climatology")
+def wind_climatology(lat: float, lon: float, month: Optional[int] = None):
+    return _wind_climatology(lat, lon, month)
+
+
+@app.post("/dispersion_advanced")
+@ee_errors
+def dispersion_advanced(q: DispersionAdvQuery):
+    """Multi-species Gaussian plume with editable sources and schedules."""
+    ensure_ee()
+    spec = POLLUTANTS.get(q.pollutant)
+    if not spec:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown pollutant '{q.pollutant}'.")
+
+    # ---- wind ----
+    wind_note = ""
+    if q.wind_speed_ms is not None and q.wind_from_deg is not None:
+        u_ms, wdir = float(q.wind_speed_ms), float(q.wind_from_deg)
+        wind_note = "manually specified"
+        solar = 200.0
+    elif q.wind_mode == "climatology":
+        wc = _wind_climatology(q.lat, q.lon, q.month)
+        u_ms = wc["scalar_mean_ms"]
+        wdir = wc["vector_from_deg"]
+        wind_note = ("ERA5 climatology"
+                     + (f", {MONTHS[q.month-1]}" if q.month else ", annual"))
+        solar = 200.0
+    else:
+        try:
+            d = _get_json(f"https://api.open-meteo.com/v1/forecast?"
+                          f"latitude={q.lat}&longitude={q.lon}"
+                          "&current=wind_speed_10m,wind_direction_10m,"
+                          "shortwave_radiation&wind_speed_unit=ms&timezone=auto")
+            cur = d.get("current", {})
+            u_ms = float(cur.get("wind_speed_10m") or 2.0)
+            wdir = float(cur.get("wind_direction_10m") or 270.0)
+            solar = float(cur.get("shortwave_radiation") or 200.0)
+            wind_note = "live observation-assimilated model (Open-Meteo)"
+        except Exception:
+            u_ms, wdir, solar = 2.0, 270.0, 200.0
+            wind_note = "fallback default (live wind unavailable)"
+
+    stab = (q.stability or _stability_from_era5(solar, u_ms)).upper()
+    hour = max(0, min(23, int(q.hour)))
+
+    # ---- sources: use what the user gave us, else scan OSM ----
+    srcs = [AdvSource(**s) if isinstance(s, dict) else s for s in (q.sources or [])]
+    auto = False
+    if not srcs:
+        auto = True
+        srcs = _auto_sources(q.lat, q.lon, q.radius_m)
+
+    # ---- grid ----
+    n = max(30, min(140, int(q.grid)))
+    R = float(q.radius_m)
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(q.lat))
+    ax = np.linspace(-R, R, n)
+    ay = np.linspace(-R, R, n)
+    GX, GY = np.meshgrid(ax, ay)
+    total = np.zeros_like(GX)
+
+    per_source = []
+    for s in srcs:
+        if not s.enabled:
+            continue
+        base = EMISSION_FACTORS.get(s.kind, EMISSION_FACTORS["industrial"])
+        # emission rate in g/s
+        if s.q_g_s is not None:
+            q_gs = float(s.q_g_s)
+        elif base["kind"] == "line":
+            veh = float(s.veh_per_day if s.veh_per_day is not None
+                        else base["veh_per_day"])
+            ef = base["g_per_veh_km"].get(q.pollutant, 0.0)
+            length_km = float(s.length_m or 300.0) / 1000.0
+            q_gs = veh * ef * length_km / 86400.0
+        else:
+            q_gs = float(base.get("g_per_s", {}).get(q.pollutant, 0.0))
+        # schedule
+        sched = EMISSION_SCHEDULES.get(s.schedule or "continuous",
+                                       EMISSION_SCHEDULES["continuous"])
+        q_gs *= _norm_schedule(sched["hours"])[hour]
+        if q_gs <= 0:
+            continue
+
+        h_stack = float(s.h_m if s.h_m is not None else base.get("h_m", 5.0))
+        rise = _plume_rise(u_ms, h_stack,
+                           s.temp_k if s.temp_k is not None else base.get("temp_k"),
+                           s.vel_m_s if s.vel_m_s is not None else base.get("vel_m_s"),
+                           s.diam_m if s.diam_m is not None else base.get("diam_m"),
+                           stab)
+        H_eff = h_stack + rise
+        sx = (s.lon - q.lon) * mlon
+        sy = (s.lat - q.lat) * mlat
+        C = _plume_full(GX, GY, sx, sy, q_gs, H_eff, u_ms, wdir, stab,
+                        z=float(q.receptor_height_m),
+                        v_dep=spec["v_dep_m_s"],
+                        half_life_h=spec["half_life_h"],
+                        mix_h=q.mixing_height_m)
+        total += C
+        per_source.append({
+            "label": s.label or base["label"], "kind": s.kind,
+            "lat": s.lat, "lon": s.lon,
+            "q_g_s": round(q_gs, 6),
+            "stack_h_m": round(h_stack, 1),
+            "plume_rise_m": round(rise, 1),
+            "effective_h_m": round(H_eff, 1),
+            "max_contrib": float(np.max(C)) * 1e6,
+        })
+
+    # g/m3 -> ug/m3 (or mg/m3 for CO)
+    scale = 1e3 if q.pollutant == "co" else 1e6
+    grid = total * scale + float(q.background or 0.0)
+
+    lat0, lat1 = q.lat - R / mlat, q.lat + R / mlat
+    lon0, lon1 = q.lon - R / mlon, q.lon + R / mlon
+    png = _plume_png(grid, float(np.max(grid)) if grid.size else 1.0)
+
+    vmax = float(np.max(grid)) if grid.size else 0.0
+    at_site = float(grid[n // 2, n // 2])
+    limits = spec["limits"]
+    exceed = {k: (round(vmax / v, 2) if v else None) for k, v in limits.items()}
+
+    return {
+        "pollutant": {"key": q.pollutant, "label": spec["label"],
+                      "unit": spec["unit"], "note": spec["note"]},
+        "png": png,
+        "bounds": [[lat0, lon0], [lat1, lon1]],
+        "max": round(vmax, 3),
+        "at_site": round(at_site, 3),
+        "background": q.background,
+        "limits": limits,
+        "fraction_of_limit": exceed,
+        "wind": {"speed_ms": round(u_ms, 2), "from_deg": round(wdir, 1),
+                 "from": _compass16(wdir), "source": wind_note,
+                 "stability": stab},
+        "hour": hour,
+        "sources": sorted(per_source, key=lambda s: -s["max_contrib"]),
+        "auto_detected": auto,
+        "grid_n": n, "radius_m": R,
+        "math_model": _math_dispersion({
+            "stability": stab, "u_ms": round(u_ms, 2),
+            "wind_from_deg": round(wdir, 1), "wind_source": wind_note,
+            "stability_source": ("user override" if q.stability
+                                 else "Pasquill-Gifford from insolation + wind"),
+            "z_receptor": q.receptor_height_m, "mix_h": q.mixing_height_m,
+            "hour": hour, "grid_n": n, "radius_m": R, "species": spec,
+            "data_sources": [
+                {"name": "Wind and insolation", "resolution": "~9-11 km",
+                 "kind": wind_note, "note": "drives dilution and stability"},
+                {"name": "Emission sources", "resolution": "point/line",
+                 "kind": ("OpenStreetMap auto-detected" if auto
+                          else "user-defined"),
+                 "note": "emission rates are editable defaults, not measured"},
+                {"name": "Dispersion coefficients", "resolution": "empirical",
+                 "kind": "Briggs urban (McElroy-Pooler) curves",
+                 "note": "fitted to urban tracer experiments"},
+            ],
+        }),
+        "assumptions": [
+            "Steady-state Gaussian plume: wind constant in space and time.",
+            "Flat terrain; buildings are NOT resolved (no street canyon).",
+            f"Urban Briggs dispersion coefficients, stability class {stab}.",
+            "Emission rates are the editable values shown, not measurements.",
+            ("Deposition velocity %.3f m/s; %s" % (
+                spec["v_dep_m_s"],
+                (f"half-life {spec['half_life_h']} h."
+                 if spec["half_life_h"] else "chemically inert."))),
+            "Concentration scales linearly with emission rate.",
+        ],
+    }
+
+
+def _auto_sources(lat, lon, radius_m):
+    """Find plausible emitters from OpenStreetMap around the point."""
+    out = []
+    try:
+        r = int(radius_m)
+        oq = (f'[out:json][timeout:25];('
+              f'way["highway"~"^(motorway|trunk|primary|secondary)$"](around:{r},{lat},{lon});'
+              f'way["landuse"="industrial"](around:{r},{lat},{lon});'
+              f'way["power"="plant"](around:{r},{lat},{lon});'
+              f'way["man_made"="works"](around:{r},{lat},{lon});'
+              f'way["landuse"="construction"](around:{r},{lat},{lon});'
+              f');out center 60;')
+        js = _overpass(oq)
+        for el in (js or {}).get("elements", []):
+            tags = el.get("tags") or {}
+            c = el.get("center") or {}
+            la, lo = c.get("lat"), c.get("lon")
+            if la is None or lo is None:
+                continue
+            hw = tags.get("highway")
+            if hw:
+                kind = {"motorway": "road_motorway", "trunk": "road_trunk",
+                        "primary": "road_trunk",
+                        "secondary": "road_secondary"}.get(hw, "road_secondary")
+            elif tags.get("power") == "plant":
+                kind = "power_plant"
+            elif tags.get("landuse") == "construction":
+                kind = "construction"
+            else:
+                kind = "industrial"
+            out.append(AdvSource(
+                lat=la, lon=lo, kind=kind,
+                label=tags.get("name") or EMISSION_FACTORS[kind]["label"],
+                schedule=("traffic_urban" if hw else "continuous")))
+    except Exception:
+        pass
+    return out[:40]
 
 
 @app.post("/dispersion")
