@@ -355,6 +355,19 @@ a.dsgGoto:hover{background:#f4f7f5;color:#0B5A49}
 .dxTest.bad{background:rgba(228,87,46,.12);border:1px solid #6b2f1c;color:#F0B49E}
 .dxTest b{display:block}
 .dxWhy{color:#8A968F;font-size:10px;margin-top:2px}
+.slRow{display:flex;align-items:center;gap:7px;margin-top:5px}
+.slRow label{flex:0 0 auto;display:flex;align-items:center;gap:6px;
+  font-size:11.5px;color:#C9D3CC;font-family:Arial,Helvetica,sans-serif;
+  min-width:118px}
+.slRow select{flex:1;min-width:0;padding:5px 6px;font-size:10.5px;
+  background:#12201B;color:#E7EDE8;border:1px solid #2E3E37;border-radius:5px;
+  font-family:Arial,Helvetica,sans-serif}
+.slDl{display:grid;grid-template-columns:1fr 1fr 1fr;gap:5px;margin-top:4px}
+.slDl button{padding:7px 4px;font-size:10.5px;background:#12201B;color:#E7EDE8;
+  border:1px solid #2E3E37;border-radius:6px;cursor:pointer;
+  font-family:Arial,Helvetica,sans-serif}
+.slDl button:hover{background:#1D2D26}
+.slDl button:disabled{opacity:.4;cursor:default}
 .mmBox{padding:0!important;overflow:hidden}
 .mmToggle{width:100%;text-align:left;background:#12201B;border:none;
   border-bottom:1px solid #2A3A33;color:#7FD0BC;cursor:pointer;
@@ -920,6 +933,40 @@ label.chk input{width:auto}
       <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
       <button id="site3dBtn" style="width:100%;margin-top:6px" disabled>3D building view (extruded)</button>
 
+      <div class="stepH" style="margin-top:16px">Site layers &amp; CAD export</div>
+      <p class="hint">Water bodies, building footprints, contours and roads as true vector geometry &mdash; drawn on the map and exportable to CAD or GIS.</p>
+
+      <div class="slRow"><label><input type="checkbox" id="slWater" checked> Water bodies</label>
+        <select id="slWaterSrc"></select></div>
+      <div class="slRow"><label><input type="checkbox" id="slBuildings" checked> Building footprints</label>
+        <select id="slBuildingsSrc"></select></div>
+      <div class="slRow"><label><input type="checkbox" id="slRoads" checked> Road network</label>
+        <select id="slRoadsSrc"></select></div>
+      <div class="slRow"><label><input type="checkbox" id="slContours" checked> DEM contours</label>
+        <select id="slDem"></select></div>
+
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Contour interval (m)</label>
+          <input type="text" id="slInterval" value="5"></div>
+        <div><label>Radius (m)</label>
+          <input type="text" id="slRadius" value="800"></div>
+      </div>
+
+      <button id="slLoad" class="primary" style="width:100%;margin-top:8px" disabled>Extract site layers</button>
+      <div id="slInfo" class="hint" style="min-height:18px"></div>
+
+      <label class="fld">Download</label>
+      <div class="slDl">
+        <button data-fmt="dxf">DXF (CAD)</button>
+        <button data-fmt="geojson">GeoJSON</button>
+        <button data-fmt="shp">Shapefile</button>
+        <button data-fmt="geotiff">GeoTIFF</button>
+        <button data-fmt="jpeg">JPEG</button>
+        <button data-fmt="png">PNG</button>
+      </div>
+      <p class="hint" style="font-size:10.5px">DXF is the published CAD interchange format &mdash; AutoCAD, BricsCAD, Civil&nbsp;3D and QGIS all open it. <b>DWG is proprietary</b> and has no reliable open writer; if you need .dwg, open the DXF and re-save.</p>
+      <button id="slClear" class="ghost" style="width:100%;margin-top:6px">Clear layers</button>
+
     </section>
     </div><!-- /tab-site -->
 
@@ -1210,7 +1257,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v105</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v106</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1237,7 +1284,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v105";
+const DSG_VERSION = "deepseego-v106";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3355,6 +3402,138 @@ $('strip').addEventListener('click', async ev => {
   finally { Progress.done(); }
 });
 
+/* ---------- site layers: water / buildings / contours / roads --------------
+   Vector geometry drawn on the map and exportable. OSM is the default source
+   because it is metre-scale digitised geometry, whereas the satellite products
+   are raster derivatives - but every layer can be switched to compare them.
+--------------------------------------------------------------------------- */
+const siteLayerGroup = L.featureGroup().addTo(map);
+let SL_DATA = null;
+
+const SL_STYLE = {
+  contours:  {color:'#7FD0BC', weight:0.9, opacity:.75, fill:false},
+  water:     {color:'#2F84C4', weight:2,   fillColor:'#9FCBEA', fillOpacity:.45},
+  roads:     {color:'#C9D3CC', weight:2,   opacity:.9, fill:false},
+  buildings: {color:'#E4572E', weight:1,   fillColor:'#E9A48E', fillOpacity:.5},
+};
+
+async function slInit(){
+  if(slInit._done) return; slInit._done = true;
+  try{
+    const j = await api('/layer_sources');
+    const fill = (id, arr) => {
+      const el = $(id);
+      if(el) el.innerHTML = arr.map(s =>
+        `<option value="${s.key}" title="${s.note}">${s.label} \u00b7 ${s.res}</option>`).join('');
+    };
+    fill('slWaterSrc', j.sources.water);
+    fill('slBuildingsSrc', j.sources.buildings);
+    fill('slRoadsSrc', j.sources.roads);
+    fill('slDem', j.sources.contours);
+  }catch(e){ $('slInfo').textContent = 'Could not load source list: ' + e.message; }
+
+  $('slLoad').addEventListener('click', slLoad);
+  $('slClear').addEventListener('click', () => {
+    siteLayerGroup.clearLayers(); SL_DATA = null;
+    $('slInfo').textContent = '';
+    document.querySelectorAll('.slDl button').forEach(b => b.disabled = true);
+  });
+  document.querySelectorAll('.slDl button').forEach(b => {
+    b.disabled = true;
+    b.addEventListener('click', () => slExport(b.dataset.fmt));
+  });
+}
+
+async function slLoad(){
+  if(siteState.lat == null) return toast('Pick a site point first');
+  const want = [];
+  if($('slWater').checked) want.push('water');
+  if($('slBuildings').checked) want.push('buildings');
+  if($('slRoads').checked) want.push('roads');
+  if($('slContours').checked) want.push('contours');
+  if(!want.length) return toast('Tick at least one layer');
+
+  const btn = $('slLoad'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Extracting\u2026';
+  Progress.start('Site layers', 'Fetching vector geometry\u2026', 0);
+  try{
+    const j = await api('/site_layers', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
+        radius_m: parseFloat($('slRadius').value) || 800,
+        layers: want,
+        water_source: $('slWaterSrc').value,
+        buildings_source: $('slBuildingsSrc').value,
+        roads_source: $('slRoadsSrc').value,
+        dem: $('slDem').value,
+        contour_interval_m: parseFloat($('slInterval').value) || 5})}, true);
+    SL_DATA = j;
+    siteLayerGroup.clearLayers();
+    // draw contours first so buildings and roads sit above them
+    ['contours','water','roads','buildings'].forEach(k => {
+      const block = j.layers[k];
+      if(!block || !block.features.length) return;
+      L.geoJSON({type:'FeatureCollection', features: block.features},
+        {style: SL_STYLE[k],
+         onEachFeature: (f, lyr) => {
+           const p = f.properties || {};
+           const bits = [];
+           if(p.name) bits.push('<b>' + p.name + '</b>');
+           if(p.elevation_m != null) bits.push(p.elevation_m + ' m');
+           if(p.class) bits.push(p.class);
+           if(p.type) bits.push(p.type);
+           if(p.levels) bits.push(p.levels + ' levels');
+           if(bits.length) lyr.bindTooltip(bits.join(' \u00b7 '), {sticky:true});
+         }}).addTo(siteLayerGroup);
+    });
+    if(siteLayerGroup.getLayers().length)
+      map.fitBounds(siteLayerGroup.getBounds().pad(0.05));
+
+    const rows = Object.entries(j.layers).map(([k, v]) =>
+      `${k}: <b>${v.count}</b> <span class="per">(${v.source})</span>`).join(' \u00b7 ');
+    const cm = (j.layers.contours || {}).meta;
+    $('slInfo').innerHTML = rows +
+      (cm ? `<br><span class="per">Elevation ${cm.min}\u2013${cm.max} m, ` +
+            `${cm.interval} m interval, ${cm.dem} (${cm.res_m} m)</span>` : '');
+    document.querySelectorAll('.slDl button').forEach(b => b.disabled = false);
+  }catch(e){
+    $('slInfo').textContent = e.message;
+    toast('Site layers: ' + e.message, 10000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
+async function slExport(fmt){
+  if(!SL_DATA) return toast('Extract the layers first');
+  const btns = document.querySelectorAll('.slDl button');
+  btns.forEach(b => b.disabled = true);
+  try{
+    const tok = await authToken();
+    const r = await fetch(BACKEND_URL + '/export_layers', {method:'POST',
+      headers: Object.assign({'Content-Type':'application/json'},
+        tok ? {Authorization: 'Bearer ' + tok} : {}),
+      body: JSON.stringify({lat: SL_DATA.lat, lon: SL_DATA.lon,
+        radius_m: SL_DATA.radius_m, layers: SL_DATA.layers, fmt: fmt,
+        contour_interval_m: parseFloat($('slInterval').value) || 5,
+        name: 'DeepSeeGo_site'})});
+    if(!r.ok){
+      let d=''; try{ d = (await r.json()).detail || ''; }catch(e){}
+      throw new Error(d || ('HTTP ' + r.status));
+    }
+    const blob = await r.blob();
+    const cd = r.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : ('DeepSeeGo_site.' + fmt);
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    const crs = r.headers.get('X-CRS');
+    toast('Downloaded ' + a.download + (crs ? ' \u00b7 ' + crs : ''), 6000);
+  }catch(e){ toast('Export: ' + e.message, 9000); }
+  btns.forEach(b => b.disabled = false);
+}
+
 /* ---------- Mathematical Model panel ---------------------------------------
    Renders the equations, assumptions, data sources, solver and convergence
    information for THE RUN JUST PERFORMED - with the actual parameter values,
@@ -4387,7 +4566,7 @@ function wipeMapAnalysis(){
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
    slopeLayer, sunPathLayer, shadowLayer, createLayer,
-   weatherGridLayer, dxLayer].forEach(g => {
+   weatherGridLayer, dxLayer, siteLayerGroup].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -4417,7 +4596,7 @@ function showTab(tab){
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight') sunlightInit();
   if(tab === 'noise') noiseInit();
-  if(tab === 'site') siteInit();
+  if(tab === 'site'){ siteInit(); slInit(); }
   if(tab === 'weather') wgInit();
   if(tab === 'slope') slopeInit();
 }
@@ -6030,6 +6209,8 @@ function enableSiteRun(){
   if(bb) bb.disabled = (siteState.lat == null);
   const tb = $('site3dBtn');
   if(tb) tb.disabled = (siteState.lat == null);
+  const sl = $('slLoad');
+  if(sl) sl.disabled = (siteState.lat == null);
 }
 const _hasRoiUI = !!$('siteRoiRect');
 function clearSiteRegions(kind){
