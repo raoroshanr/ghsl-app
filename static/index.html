@@ -1154,6 +1154,13 @@ label.chk input{width:auto}
         <option value="700">700 m</option>
       </select>
       <button id="shDraw" class="primary" style="margin-top:8px" disabled>Cast building shadows</button>
+      <div class="stepH" style="margin-top:16px">Rooftop solar potential</div>
+      <p class="hint">Roof segments with orientation, pitch, area and modelled annual irradiance from the Google Solar API. India is covered at BASE quality (0.25&nbsp;m/pixel).</p>
+      <div id="solStatus" class="hint" style="font-size:10.5px"></div>
+      <button id="solRun" class="primary" style="width:100%;margin-top:6px" disabled>Analyse this rooftop</button>
+      <button id="solCompare" class="ghost" style="width:100%;margin-top:6px" disabled>Cross-check against Open Buildings</button>
+      <button id="solClear" class="ghost" style="width:100%;margin-top:6px">Clear roof segments</button>
+      <div id="solInfo" class="hint" style="min-height:18px"></div>
       <button id="shClear" class="ghost" style="width:100%;margin-top:6px">Clear shadows</button>
       <div id="shInfo" class="hint" style="min-height:20px"></div>
     </section>
@@ -1212,7 +1219,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v110</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v111</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1317,7 +1324,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v110";
+const DSG_VERSION = "deepseego-v111";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1975,6 +1982,24 @@ let searchPin = null;
    It is still Nominatim, so not Google-grade, but far more usable.
 --------------------------------------------------------------------------- */
 async function geocode(query, {limit = 8, biasView = true} = {}){
+  // Prefer the backend geocoder: it uses Google Geocoding when the key is set
+  // (far better POI coverage in India) and falls back to Nominatim itself.
+  try{
+    const c = (biasView && typeof map !== 'undefined' && map.getCenter)
+      ? map.getCenter() : null;
+    const j = await api('/geocode', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({q: query, provider: 'auto',
+                            lat: c ? c.lat : null, lon: c ? c.lng : null})});
+    if(j && Array.isArray(j.results) && j.results.length)
+      return j.results.map(r => ({lat: r.lat, lon: r.lon, label: r.label,
+                                  type: r.type, cls: '', importance: 0,
+                                  zoom: r.zoom, provider: r.provider}));
+  }catch(e){ /* fall through to the direct Nominatim path below */ }
+  return _geocodeNominatim(query, {limit, biasView});
+}
+
+async function _geocodeNominatim(query, {limit = 8, biasView = true} = {}){
   // one attempt; returns [] on any failure so callers never see an exception
   async function tryFetch(params){
     try{
@@ -4425,6 +4450,155 @@ function drawSunPath(){
   });
 }
 
+/* ---------- rooftop solar (Google Solar API) --------------------------------
+   Roof segments coloured by orientation, with pitch, area and modelled annual
+   irradiance. Sits alongside the sun path and shadow tools: those tell you WHEN
+   a surface is lit, this tells you how much energy a given roof plane receives.
+
+   Google data is displayed only - it is never written into the CAD/GIS export,
+   which would breach the Maps Platform terms.
+--------------------------------------------------------------------------- */
+const solarLayer = L.featureGroup().addTo(map);
+let SOL_DATA = null, GMAPS_OK = null;
+
+// colour a roof plane by the direction it faces: south is best in the
+// northern hemisphere, north is worst.
+function solAzColour(az){
+  if(az == null) return '#9FB0A8';
+  const d = Math.abs(((az - 180) % 360 + 540) % 360 - 180);  // deviation from S
+  if(d < 30)  return '#E4572E';
+  if(d < 60)  return '#E9C46A';
+  if(d < 105) return '#84CC16';
+  if(d < 150) return '#2A9D8F';
+  return '#00B4D8';
+}
+
+async function solInit(){
+  if(solInit._done) return; solInit._done = true;
+  try{
+    const s = await api('/gmaps_status');
+    GMAPS_OK = s.configured;
+    $('solStatus').innerHTML = s.configured
+      ? '<span style="color:#84CC16">Google Maps Platform connected.</span> ' +
+        '<span class="per">' + s.licensing + '</span>'
+      : '<span style="color:#E9C46A">Not configured</span> \u2014 set ' +
+        s.env + ' on Cloud Run to enable this (see GOOGLE_MAPS_SETUP.md).';
+  }catch(e){ GMAPS_OK = false; $('solStatus').textContent = e.message; }
+  $('solRun').addEventListener('click', solRun);
+  $('solCompare').addEventListener('click', solCompare);
+  $('solClear').addEventListener('click', () => {
+    solarLayer.clearLayers(); SOL_DATA = null; $('solInfo').textContent = '';
+    $('solCompare').disabled = true;
+  });
+  solReady();
+}
+function solReady(){
+  const st = _sunlightTab.state;
+  const btn = $('solRun');
+  if(btn) btn.disabled = !(GMAPS_OK && st.lat != null);
+}
+
+async function solRun(){
+  const st = _sunlightTab.state;
+  if(st.lat == null) return toast('Pick a point in the Sun tab first');
+  const btn = $('solRun'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Querying Solar API\u2026';
+  Progress.start('Rooftop solar', 'Fetching roof geometry and irradiance\u2026', 0);
+  try{
+    const j = await api('/solar_building', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: st.lat, lon: st.lon, quality: 'BASE'})});
+    SOL_DATA = j;
+    solarLayer.clearLayers();
+
+    // draw each roof segment, coloured by orientation
+    j.segments.forEach(s => {
+      if(!s.bbox) return;
+      const col = solAzColour(s.azimuth_deg);
+      L.rectangle(s.bbox, {color: col, weight: 2, fillColor: col,
+                           fillOpacity: .38}).addTo(solarLayer)
+        .bindTooltip(
+          `<b>${s.area_m2} m\u00b2</b> facing ${s.facing} (${s.azimuth_deg}\u00b0)` +
+          `<br>pitch ${s.pitch_deg}\u00b0 \u00b7 ${s.sunshine_h_yr} sun-hours/yr`,
+          {sticky:true});
+      if(s.center)
+        L.circleMarker([s.center.latitude, s.center.longitude],
+          {radius:3, color:'#fff', weight:1, fillColor:col, fillOpacity:1})
+          .addTo(solarLayer);
+    });
+    if(solarLayer.getLayers().length)
+      map.fitBounds(solarLayer.getBounds().pad(0.6));
+
+    const rows = j.segments.map(s =>
+      `<tr><td>${s.facing} (${s.azimuth_deg}\u00b0)</td>` +
+      `<td style="text-align:right">${s.area_m2} m\u00b2</td>` +
+      `<td style="text-align:right">${s.pitch_deg}\u00b0</td>` +
+      `<td style="text-align:right">${s.sunshine_h_yr} h</td></tr>`).join('');
+
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Rooftop solar potential';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Roof summary</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Total roof area</td><td style="text-align:right"><b>${j.roof.area_m2} m\u00b2</b></td></tr>` +
+      `<tr><td>Footprint (ground) area</td><td style="text-align:right">${j.roof.ground_area_m2} m\u00b2</td></tr>` +
+      `<tr><td>Roof planes</td><td style="text-align:right">${j.roof.segments}</td></tr>` +
+      `<tr><td>Best-case sunshine</td><td style="text-align:right">${j.max_sunshine_h_yr} h/yr</td></tr>` +
+      `<tr><td>Usable array area</td><td style="text-align:right">${j.max_array_area_m2} m\u00b2</td></tr>` +
+      `<tr><td>Indicative capacity</td><td style="text-align:right"><b>${j.capacity_kwp} kWp</b> (${j.max_panels} panels)</td></tr>` +
+      `<tr><td>Grid carbon factor</td><td style="text-align:right">${j.carbon_offset_kg_per_mwh} kg/MWh</td></tr>` +
+      `<tr><td>Imagery</td><td style="text-align:right">${j.imagery_quality} \u00b7 ${j.imagery_date || '\u2014'}</td></tr>` +
+      `</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Roof planes (largest first)</div>` +
+      `<table class="aqTable"><tr><td><b>Facing</b></td><td style="text-align:right"><b>Area</b></td>` +
+      `<td style="text-align:right"><b>Pitch</b></td><td style="text-align:right"><b>Sun</b></td></tr>${rows}</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Caveats</div>` +
+      `<ul class="mmList">${j.caveats.map(x => `<li>${x}</li>`).join('')}</ul>` +
+      `<p class="srcNote">${j.source}. ${j.licensing}</p></div>`;
+
+    $('solInfo').innerHTML = `${j.roof.segments} roof planes \u00b7 ` +
+      `${j.capacity_kwp} kWp indicative`;
+    $('solCompare').disabled = false;
+  }catch(e){
+    $('solInfo').textContent = e.message;
+    toast('Solar: ' + e.message, 11000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
+async function solCompare(){
+  const st = _sunlightTab.state;
+  if(st.lat == null) return;
+  const btn = $('solCompare'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Comparing\u2026';
+  Progress.start('Cross-check', 'Comparing Google and Open Buildings\u2026', 0);
+  try{
+    const j = await api('/solar_validate', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: st.lat, lon: st.lon})});
+    const rows = j.comparisons.map(cp => {
+      const cls = cp.agree === null ? '' : (cp.agree ? 'ok' : 'bad');
+      const mark = cp.agree === null ? '\u2014' : (cp.agree ? '\u2713' : '\u2717');
+      return `<div class="dxTest ${cls}"><div>
+        <b>${mark} ${cp.quantity}</b>
+        ${cp.a_label}: <b>${cp.a ?? '\u2014'} ${cp.unit}</b> \u00b7
+        ${cp.b_label}: <b>${cp.b ?? '\u2014'} ${cp.unit}</b>
+        ${cp.diff_pct == null ? '' : ` \u00b7 differ by ${cp.diff_pct}%`}
+        <div class="dxWhy">${cp.note}</div></div></div>`;
+    }).join('');
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Geometry cross-check';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Google Solar vs Open Buildings</div>` +
+      `<div class="mmVerdict ${j.agreed === j.compared && j.compared ? 'ok' : 'warn'}">` +
+      `${j.verdict}</div>${rows}` +
+      `<p class="srcNote">${j.caveat}</p></div>`;
+  }catch(e){ toast('Cross-check: ' + e.message, 10000); }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
 /* ---------- Building shadows (real footprints x real heights x real sun) ----
    Each building's shadow is the area swept as the footprint is projected away
    from the sun: length = height / tan(altitude), bearing = azimuth + 180.
@@ -4663,7 +4837,7 @@ function wipeMapAnalysis(){
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
    slopeLayer, sunPathLayer, shadowLayer, createLayer,
-   weatherGridLayer, dxLayer, siteLayerGroup].forEach(g => {
+   weatherGridLayer, dxLayer, siteLayerGroup, solarLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -4691,7 +4865,7 @@ function showTab(tab){
   if(tab === 'aq'){ clearAllClimatePoints(); aqInit(); dxInit(); }
   if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
-  if(tab === 'sunlight') sunlightInit();
+  if(tab === 'sunlight'){ sunlightInit(); solInit(); }
   if(tab === 'noise') noiseInit();
   if(tab === 'site'){ siteInit(); slInit(); }
   if(tab === 'weather') wgInit();
@@ -5565,6 +5739,7 @@ function climatePointTab(prefix, mode){
     if(prefix === 'su'){
       if($('spDraw')) $('spDraw').disabled = false;
       if($('shDraw')) $('shDraw').disabled = false;
+      if(typeof solReady === 'function') solReady();
     }
     el('Status').textContent = (label ? label + ' \u00b7 ' : '') +
       lat.toFixed(5) + ', ' + lon.toFixed(5);
