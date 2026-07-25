@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v110"
+APP_VERSION = "deepseego-v111"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -7438,6 +7438,363 @@ def export_layers(q: ExportLayersQuery):
 
     raise HTTPException(status_code=400, detail=(
         f"Unknown format '{fmt}'. Use dxf, geojson, shp, geotiff, png or jpeg."))
+
+
+# ============================================================================
+# GOOGLE MAPS PLATFORM
+#
+# LICENSING BOUNDARY - this matters and is enforced, not just documented:
+# Google Maps Platform terms restrict caching and prohibit extracting content.
+# OpenStreetMap (ODbL) permits export with attribution. So Google-derived data
+# is used for IN-APP analysis and display only, and is deliberately NOT wired
+# into /site_layers or /export_layers. Anything you download as DXF, shapefile
+# or GeoTIFF comes from OSM and the open satellite products, never from here.
+#
+# BILLING - Google Maps Platform bills per request with no hard cap by default.
+# Set per-API quota limits in Cloud Console before enabling this.
+# ============================================================================
+GMAPS_KEY_ENV = "GOOGLE_MAPS_API_KEY"
+
+
+def _gmaps_key():
+    return os.environ.get(GMAPS_KEY_ENV, "").strip()
+
+
+@app.get("/gmaps_status")
+def gmaps_status():
+    """Whether Google Maps Platform is configured, and what it unlocks."""
+    return {
+        "configured": bool(_gmaps_key()),
+        "env": GMAPS_KEY_ENV,
+        "features": [
+            {"key": "solar", "label": "Solar API - roof segments and irradiance",
+             "note": "India is covered at BASE quality (0.25 m/pixel enhanced "
+                     "satellite imagery)."},
+            {"key": "geocode", "label": "Geocoding - place search",
+             "note": "10,000 free events per month on the Essentials tier."},
+        ],
+        "licensing": ("Google-derived data is shown in the app only. It is not "
+                      "included in any CAD/GIS export, which would breach the "
+                      "Maps Platform terms. Exports use OpenStreetMap and the "
+                      "open satellite products."),
+    }
+
+
+class SolarQuery(BaseModel):
+    lat: float
+    lon: float
+    quality: str = "BASE"        # HIGH | MEDIUM | BASE (BASE = widest coverage)
+    panel_watts: float = 400.0   # for the capacity estimate
+
+
+def _solar_call(path, params):
+    key = _gmaps_key()
+    if not key:
+        raise HTTPException(status_code=503, detail=(
+            f"Google Maps Platform is not configured. Set {GMAPS_KEY_ENV} on "
+            "the Cloud Run service (see GOOGLE_MAPS_SETUP.md)."))
+    qs = "&".join(f"{k}={_q(str(v))}" for k, v in params.items())
+    url = f"https://solar.googleapis.com/v1/{path}?{qs}&key={key}"
+    try:
+        return _get_json(url)
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        try:
+            body = e.read().decode()[:400]
+            detail = body
+        except Exception:
+            pass
+        low = detail.lower()
+        if "not found" in low or "404" in low:
+            raise HTTPException(status_code=404, detail=(
+                "No solar data for this building. Coverage is building-by-"
+                "building: try a different rooftop, or a denser residential "
+                "area where imagery is available."))
+        if "permission" in low or "403" in low or "api key" in low:
+            raise HTTPException(status_code=403, detail=(
+                "Google rejected the key. Enable the Solar API on the project "
+                "and check any key restrictions."))
+        raise HTTPException(status_code=502, detail=f"Solar API: {detail}")
+
+
+def _compass_from_az(az):
+    return _compass16(float(az) % 360.0)
+
+
+@app.post("/solar_building")
+def solar_building(q: SolarQuery):
+    """Roof segments with orientation, area and irradiance for one building."""
+    d = _solar_call("buildingInsights:findClosest", {
+        "location.latitude": q.lat,
+        "location.longitude": q.lon,
+        "requiredQuality": (q.quality or "BASE").upper(),
+        # EXPANDED_COVERAGE is what makes BASE-quality data available outside
+        # the high-resolution aerial imagery regions - i.e. what covers India.
+        "experiments": "EXPANDED_COVERAGE",
+    })
+    sp = d.get("solarPotential") or {}
+    whole = sp.get("wholeRoofStats") or {}
+    segs_in = sp.get("roofSegmentStats") or []
+
+    def q50(stats):
+        """Median of the sunshine quantile list (hours/year on that surface)."""
+        qs = (stats or {}).get("sunshineQuantiles") or []
+        return float(qs[len(qs) // 2]) if qs else None
+
+    segments = []
+    for i, s in enumerate(segs_in):
+        st = s.get("stats") or {}
+        az = s.get("azimuthDegrees")
+        pitch = s.get("pitchDegrees")
+        area = st.get("areaMeters2")
+        gnd = st.get("groundAreaMeters2")
+        bb = s.get("boundingBox") or {}
+        sw, ne = bb.get("sw") or {}, bb.get("ne") or {}
+        segments.append({
+            "id": i,
+            "azimuth_deg": None if az is None else round(float(az), 1),
+            "facing": None if az is None else _compass_from_az(az),
+            "pitch_deg": None if pitch is None else round(float(pitch), 1),
+            "area_m2": None if area is None else round(float(area), 1),
+            "ground_area_m2": None if gnd is None else round(float(gnd), 1),
+            "sunshine_h_yr": (None if q50(st) is None else round(q50(st))),
+            "plane_height_m": (round(float(s["planeHeightAtCenterMeters"]), 2)
+                               if s.get("planeHeightAtCenterMeters") is not None
+                               else None),
+            "center": s.get("center"),
+            "bbox": ([[sw.get("latitude"), sw.get("longitude")],
+                      [ne.get("latitude"), ne.get("longitude")]]
+                     if sw and ne else None),
+        })
+    segments.sort(key=lambda s: -(s["area_m2"] or 0))
+
+    # capacity estimate from the usable array area Google reports
+    max_area = sp.get("maxArrayAreaMeters2")
+    panel_w = sp.get("panelWidthMeters")
+    panel_h = sp.get("panelHeightMeters")
+    panel_cap = sp.get("panelCapacityWatts")
+    n_panels = sp.get("maxArrayPanelsCount")
+    kwp = None
+    if n_panels and (panel_cap or q.panel_watts):
+        kwp = round(n_panels * float(panel_cap or q.panel_watts) / 1000.0, 2)
+
+    imagery = d.get("imageryDate") or {}
+    return {
+        "found": True,
+        "center": d.get("center"),
+        "imagery_quality": d.get("imageryQuality"),
+        "imagery_date": (f"{imagery.get('year')}-{imagery.get('month'):02d}"
+                         if imagery.get("year") and imagery.get("month")
+                         else None),
+        "roof": {
+            "area_m2": (round(float(whole.get("areaMeters2")), 1)
+                        if whole.get("areaMeters2") is not None else None),
+            "ground_area_m2": (round(float(whole.get("groundAreaMeters2")), 1)
+                               if whole.get("groundAreaMeters2") is not None
+                               else None),
+            "segments": len(segments),
+        },
+        "max_sunshine_h_yr": (round(float(sp["maxSunshineHoursPerYear"]))
+                              if sp.get("maxSunshineHoursPerYear") else None),
+        "max_array_area_m2": (round(float(max_area), 1) if max_area else None),
+        "max_panels": n_panels,
+        "panel": {"capacity_w": panel_cap, "width_m": panel_w, "height_m": panel_h},
+        "capacity_kwp": kwp,
+        "carbon_offset_kg_per_mwh": sp.get("carbonOffsetFactorKgPerMwh"),
+        "segments": segments,
+        "source": "Google Solar API (buildingInsights)",
+        "licensing": ("Google Maps Platform data: in-app display and analysis "
+                      "only. Not included in any export."),
+        "caveats": [
+            "Irradiance is modelled from Google's DSM and imagery, not measured.",
+            "BASE quality is derived from 0.25 m/pixel enhanced satellite "
+            "imagery; HIGH quality (aerial) is not available in India.",
+            "Sunshine hours are the median of the reported quantile "
+            "distribution across the segment, so within-segment shading varies.",
+            "Panel counts assume Google's default module dimensions and a "
+            "standard layout, not a designed system.",
+        ],
+    }
+
+
+class SolarCompareQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 60
+
+
+@app.post("/solar_validate")
+@ee_errors
+def solar_validate(q: SolarCompareQuery):
+    """Cross-check Google's roof geometry against Open Buildings.
+
+    Two independent products measuring the same rooftop. Where they agree, both
+    gain credibility; where they diverge, you know not to trust either number
+    without checking. This is the only genuine accuracy check available without
+    going to site.
+    """
+    g = solar_building(SolarQuery(lat=q.lat, lon=q.lon))
+    ensure_ee()
+    pt = ee.Geometry.Point([q.lon, q.lat])
+    ring = pt.buffer(float(q.radius_m))
+
+    # Open Buildings footprint containing / nearest the point
+    ob_area = ob_conf = None
+    try:
+        fc = (ee.FeatureCollection("GOOGLE/Research/open-buildings/v3/polygons")
+              .filterBounds(ring))
+        best = ee.Feature(fc.map(
+            lambda f: f.set("d", f.geometry().centroid(1).distance(pt, 1))
+        ).sort("d").first())
+        info = best.getInfo()
+        if info:
+            props = info.get("properties") or {}
+            ob_conf = props.get("confidence")
+            ob_area = props.get("area_in_meters")
+    except Exception:
+        pass
+
+    # Open Buildings 2.5D height at the point
+    ob_h = None
+    try:
+        obt = (ee.ImageCollection("GOOGLE/Research/open-buildings-temporal/v1")
+               .filterDate("2023-01-01", "2024-01-01")
+               .mosaic())
+        ob_h = (obt.select("building_height")
+                .reduceRegion(ee.Reducer.mean(), pt.buffer(12), 4,
+                              bestEffort=True).get("building_height").getInfo())
+    except Exception:
+        pass
+
+    rows = []
+
+    def cmp_row(name, a, b, a_lbl, b_lbl, unit, tol_pct):
+        if a is None or b is None:
+            rows.append({"quantity": name, "a": a, "b": b, "a_label": a_lbl,
+                         "b_label": b_lbl, "unit": unit, "diff_pct": None,
+                         "agree": None,
+                         "note": "One source has no value here - no comparison."})
+            return
+        a, b = float(a), float(b)
+        base = max(abs(a), abs(b), 1e-9)
+        d = abs(a - b) / base * 100.0
+        rows.append({"quantity": name, "a": round(a, 2), "b": round(b, 2),
+                     "a_label": a_lbl, "b_label": b_lbl, "unit": unit,
+                     "diff_pct": round(d, 1), "agree": bool(d <= tol_pct),
+                     "note": ("Within tolerance - both products agree."
+                              if d <= tol_pct else
+                              "Divergent. Do not rely on either figure without "
+                              "an independent check.")})
+
+    cmp_row("Roof footprint area", (g.get("roof") or {}).get("ground_area_m2"),
+            ob_area, "Google Solar", "Open Buildings v3", "m2", 20.0)
+
+    # Google reports the roof plane height at segment centre; Open Buildings
+    # reports building height above ground. These are only comparable as a
+    # relative check, which is stated rather than glossed over.
+    gseg = (g.get("segments") or [{}])[0]
+    cmp_row("Height (indicative)", gseg.get("plane_height_m"), ob_h,
+            "Google roof plane", "Open Buildings 2.5D", "m", 35.0)
+
+    n_ok = sum(1 for r in rows if r["agree"] is True)
+    n_cmp = sum(1 for r in rows if r["agree"] is not None)
+    return {
+        "comparisons": rows,
+        "agreed": n_ok, "compared": n_cmp,
+        "google": {"quality": g.get("imagery_quality"),
+                   "date": g.get("imagery_date"),
+                   "segments": g.get("roof", {}).get("segments")},
+        "open_buildings": {"area_m2": ob_area, "confidence": ob_conf,
+                           "height_m": (round(float(ob_h), 1)
+                                        if ob_h is not None else None)},
+        "verdict": ("Independent products agree on this building."
+                    if n_cmp and n_ok == n_cmp else
+                    "The products disagree - treat the geometry as uncertain."
+                    if n_cmp else
+                    "Not enough overlapping data to compare."),
+        "caveat": ("Agreement between two satellite-derived products is not "
+                   "ground truth: both are ML estimates from imagery and can "
+                   "share the same bias. Disagreement is the more informative "
+                   "signal."),
+    }
+
+
+class GeocodeQuery(BaseModel):
+    q: str
+    provider: str = "auto"       # auto | google | nominatim
+    lat: Optional[float] = None  # bias toward the current view
+    lon: Optional[float] = None
+
+
+@app.post("/geocode")
+def geocode(body: GeocodeQuery):
+    """Place search. Google when configured (better POI coverage in India),
+    otherwise Nominatim. Results are for in-app navigation only."""
+    text = (body.q or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty search.")
+    want = (body.provider or "auto").lower()
+    key = _gmaps_key()
+    use_google = key and want in ("auto", "google")
+
+    if use_google:
+        try:
+            params = {"address": text, "region": "in", "language": "en"}
+            if body.lat is not None and body.lon is not None:
+                # a small bounding box biases results toward the current view
+                dd = 0.5
+                params["bounds"] = (f"{body.lat-dd},{body.lon-dd}|"
+                                    f"{body.lat+dd},{body.lon+dd}")
+            qs = "&".join(f"{k}={_q(str(v))}" for k, v in params.items())
+            d = _get_json("https://maps.googleapis.com/maps/api/geocode/json?"
+                          + qs + f"&key={key}")
+            if d.get("status") == "OK":
+                out = []
+                for r in d.get("results", [])[:8]:
+                    loc = ((r.get("geometry") or {}).get("location") or {})
+                    types = r.get("types") or []
+                    zoom = (7 if "country" in types or
+                            "administrative_area_level_1" in types else
+                            12 if "locality" in types else
+                            14 if "sublocality" in types else 17)
+                    out.append({"lat": loc.get("lat"), "lon": loc.get("lng"),
+                                "label": r.get("formatted_address", ""),
+                                "type": (types[0] if types else ""),
+                                "zoom": zoom, "provider": "google"})
+                if out:
+                    return {"results": out, "provider": "google"}
+            elif d.get("status") not in ("ZERO_RESULTS",):
+                # a key or quota problem should be visible, not silently masked
+                if want == "google":
+                    raise HTTPException(status_code=502, detail=(
+                        f"Google Geocoding: {d.get('status')} "
+                        f"{d.get('error_message', '')}"))
+        except HTTPException:
+            raise
+        except Exception:
+            pass                      # fall through to Nominatim
+
+    # Nominatim fallback (keyless, ODbL)
+    try:
+        params = {"format": "jsonv2", "q": text, "limit": "8",
+                  "addressdetails": "1", "accept-language": "en",
+                  "countrycodes": "in"}
+        qs = "&".join(f"{k}={_q(str(v))}" for k, v in params.items())
+        d = _get_json("https://nominatim.openstreetmap.org/search?" + qs)
+        if not isinstance(d, list):
+            d = []
+        out = []
+        for r in d[:8]:
+            t = r.get("type", "")
+            zoom = (7 if t in ("country", "state") else
+                    12 if t in ("city", "town") else
+                    14 if t in ("suburb", "village") else 17)
+            out.append({"lat": float(r["lat"]), "lon": float(r["lon"]),
+                        "label": r.get("display_name", ""), "type": t,
+                        "zoom": zoom, "provider": "nominatim"})
+        return {"results": out, "provider": "nominatim"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Search failed: {e}")
 
 
 @app.post("/site_layers")
