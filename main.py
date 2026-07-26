@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v112"
+APP_VERSION = "deepseego-v113"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -7778,6 +7778,191 @@ def solar_layers(q: SolarLayersQuery):
     out["billing_note"] = ("One dataLayers call covers every raster for this "
                            "location, billed once.")
     return out
+
+
+# ----------------------------------------------------------------------------
+# AREA-WIDE SOLAR
+#
+# The Solar API has no bulk endpoint: buildingInsights is one call per building,
+# and Google states plainly that batch downloads are not offered. So analysing
+# a region of N buildings costs N billable calls.
+#
+# The design consequence: NEVER spend without showing the bill first. A preview
+# pass finds the buildings and reports the count using only free data (Open
+# Buildings / OSM); the paid pass runs only on explicit confirmation, capped.
+# ----------------------------------------------------------------------------
+SOLAR_AREA_HARD_CAP = 300
+
+
+class SolarAreaQuery(BaseModel):
+    region: Optional[RegionSpec] = None
+    lat: Optional[float] = None          # fallback if no region drawn
+    lon: Optional[float] = None
+    radius_m: float = 250
+    preview: bool = True                 # True = count only, no paid calls
+    max_buildings: int = 40
+    min_area_m2: float = 25.0            # skip sheds and noise
+    source: str = "open_buildings"       # open_buildings | osm
+
+
+def _buildings_in_region(region, source, min_area, cap):
+    """Building centroids inside the region, from FREE data only."""
+    out = []
+    if source == "osm":
+        c = region.centroid(5).coordinates().getInfo()
+        b = region.bounds(1).getInfo()["coordinates"][0]
+        lons = [p[0] for p in b]; lats = [p[1] for p in b]
+        mid_lat = (min(lats) + max(lats)) / 2
+        r = max(_haversine_m(mid_lat, min(lons), mid_lat, max(lons)),
+                _haversine_m(min(lats), c[0], max(lats), c[0])) / 2
+        for f in _osm_buildings(c[1], c[0], min(1500, r)):
+            ring = (f["geometry"]["coordinates"] or [[]])[0]
+            if len(ring) < 3:
+                continue
+            xs = [p[0] for p in ring]; ys = [p[1] for p in ring]
+            out.append({"lat": sum(ys) / len(ys), "lon": sum(xs) / len(xs),
+                        "name": (f["properties"] or {}).get("name", ""),
+                        "area_m2": None})
+    else:
+        fc = (ee.FeatureCollection("GOOGLE/Research/open-buildings/v3/polygons")
+              .filterBounds(region)
+              .filter(ee.Filter.gte("area_in_meters", float(min_area))))
+        fc = fc.sort("area_in_meters", False).limit(int(cap))
+        info = fc.getInfo()
+        for f in info.get("features", []):
+            g = f.get("geometry") or {}
+            p = f.get("properties") or {}
+            ring = ((g.get("coordinates") or [[]])[0]
+                    if g.get("type") == "Polygon" else [])
+            if len(ring) < 3:
+                continue
+            xs = [c[0] for c in ring]; ys = [c[1] for c in ring]
+            out.append({"lat": sum(ys) / len(ys), "lon": sum(xs) / len(xs),
+                        "name": "", "area_m2": p.get("area_in_meters"),
+                        "confidence": p.get("confidence")})
+    out.sort(key=lambda b: -(b.get("area_m2") or 0))
+    return out
+
+
+@app.post("/solar_area")
+@ee_errors
+def solar_area(q: SolarAreaQuery):
+    """Rooftop solar across every building in a region.
+
+    Two-phase by design: preview=True counts the buildings from free data and
+    reports what the paid run would cost. preview=False then runs it.
+    """
+    ensure_ee()
+    if q.region is not None:
+        region = build_region(q.region)
+    elif q.lat is not None and q.lon is not None:
+        region = ee.Geometry.Point([q.lon, q.lat]).buffer(float(q.radius_m))
+    else:
+        raise HTTPException(status_code=400, detail=(
+            "Draw a region of interest, or supply a point and radius."))
+
+    cap = max(1, min(SOLAR_AREA_HARD_CAP, int(q.max_buildings or 40)))
+    found = _buildings_in_region(region, q.source, q.min_area_m2,
+                                 SOLAR_AREA_HARD_CAP)
+    n_found = len(found)
+    todo = found[:cap]
+
+    if q.preview:
+        return {
+            "preview": True,
+            "buildings_found": n_found,
+            "would_analyse": len(todo),
+            "capped_at": cap,
+            "hard_cap": SOLAR_AREA_HARD_CAP,
+            "billable_calls": len(todo),
+            "cost_note": (
+                f"Running this makes {len(todo)} Solar API calls - one per "
+                "building, because the API has no bulk endpoint. Google's free "
+                "tier is a fixed number of events per month, so this consumes "
+                f"{len(todo)} of them. Nothing has been spent yet."),
+            "source": ("Google Open Buildings v3" if q.source != "osm"
+                       else "OpenStreetMap"),
+            "buildings": [{"lat": b["lat"], "lon": b["lon"],
+                           "area_m2": b.get("area_m2")} for b in todo],
+            "next": "Set preview=false to run the analysis.",
+        }
+
+    # ---- paid pass ----
+    results, failures = [], []
+
+    def one(b):
+        try:
+            r = solar_building(SolarQuery(lat=b["lat"], lon=b["lon"]))
+            segs = r.get("segments") or []
+            best = segs[0] if segs else {}
+            return {"ok": True, "lat": b["lat"], "lon": b["lon"],
+                    "name": b.get("name", ""),
+                    "roof_area_m2": (r.get("roof") or {}).get("area_m2"),
+                    "ground_area_m2": (r.get("roof") or {}).get("ground_area_m2"),
+                    "segments": len(segs),
+                    "capacity_kwp": r.get("capacity_kwp"),
+                    "max_panels": r.get("max_panels"),
+                    "sunshine_h_yr": r.get("max_sunshine_h_yr"),
+                    "best_facing": best.get("facing"),
+                    "best_azimuth": best.get("azimuth_deg"),
+                    "best_pitch": best.get("pitch_deg"),
+                    "quality": r.get("imagery_quality")}
+        except HTTPException as e:
+            return {"ok": False, "lat": b["lat"], "lon": b["lon"],
+                    "error": str(e.detail)[:120]}
+        except Exception as e:
+            return {"ok": False, "lat": b["lat"], "lon": b["lon"],
+                    "error": f"{type(e).__name__}: {e}"[:120]}
+
+    # modest concurrency - enough to be quick, gentle enough not to trip
+    # Google's per-second quota
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        for r in ex.map(one, todo):
+            (results if r.get("ok") else failures).append(r)
+
+    tot_kwp = sum(r["capacity_kwp"] or 0 for r in results)
+    tot_roof = sum(r["roof_area_m2"] or 0 for r in results)
+    tot_panels = sum(r["max_panels"] or 0 for r in results)
+
+    # orientation mix - which way this neighbourhood's roofs actually face
+    facing = {}
+    for r in results:
+        f = r.get("best_facing")
+        if f:
+            facing[f] = facing.get(f, 0) + 1
+
+    results.sort(key=lambda r: -(r.get("capacity_kwp") or 0))
+    return {
+        "preview": False,
+        "analysed": len(results),
+        "failed": len(failures),
+        "buildings_found": n_found,
+        "billable_calls": len(todo),
+        "totals": {
+            "capacity_kwp": round(tot_kwp, 1),
+            "roof_area_m2": round(tot_roof, 1),
+            "panels": tot_panels,
+            "mean_kwp_per_building": (round(tot_kwp / len(results), 2)
+                                      if results else None),
+        },
+        "orientation_mix": [{"facing": k, "count": v}
+                            for k, v in sorted(facing.items(),
+                                               key=lambda kv: -kv[1])],
+        "buildings": results,
+        "failures": failures[:20],
+        "source": "Google Solar API (buildingInsights, one call per building)",
+        "licensing": ("Google Maps Platform data: in-app analysis only, never "
+                      "written into an export."),
+        "caveats": [
+            "One API call per building - there is no bulk endpoint.",
+            "Buildings with no Solar API coverage are reported as failures, "
+            "not silently dropped.",
+            "Capacity assumes Google's default module and a standard layout, "
+            "not a designed system.",
+            f"Only the {len(todo)} largest buildings were analysed"
+            + (f" of {n_found} found." if n_found > len(todo) else "."),
+        ],
+    }
 
 
 class ShadeCheckQuery(BaseModel):
