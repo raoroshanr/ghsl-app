@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v111"
+APP_VERSION = "deepseego-v112"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -7614,6 +7614,232 @@ def solar_building(q: SolarQuery):
             "Panel counts assume Google's default module dimensions and a "
             "standard layout, not a designed system.",
         ],
+    }
+
+
+# ----------------------------------------------------------------------------
+# dataLayers: the raster half of the Solar API, and by far the richer half.
+# ONE call returns URLs for all of these (billed once regardless of how many
+# you fetch):
+#   dsmUrl          0.1 m/pixel surface model, metres above EGM96
+#   rgbUrl          aligned aerial/satellite image
+#   maskUrl         1 bit per pixel: is this rooftop?
+#   annualFluxUrl   kWh/kW/year, computed everywhere (not only roofs)
+#   monthlyFluxUrl  12 bands, January-December
+#   hourlyShadeUrls 12 URLs (one per month), each 24 bands = one per hour
+#
+# The hourly shade rasters are the scientifically interesting part: they let us
+# check our own shadow model, built from ~4 m Open Buildings height estimates,
+# against Google's 1 m/pixel computed shade for the same instant.
+# ----------------------------------------------------------------------------
+class SolarLayersQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 60          # dataLayers covers an AREA, not just a point
+    pixel_m: float = 0.5          # coarser = smaller payload
+    month: int = 6                # 1-12, for the hourly shade slice
+    hour: int = 12                # 0-23
+
+
+def _fetch_tiff(url):
+    """Fetch a Solar API GeoTIFF and return it as a numpy array."""
+    key = _gmaps_key()
+    sep = "&" if "?" in url else "?"
+    req = UrlRequest(url + f"{sep}key={key}", headers={"User-Agent": _UA})
+    with urlopen(req, timeout=90) as r:
+        raw = r.read()
+    try:
+        import tifffile
+    except ImportError:
+        raise HTTPException(status_code=501, detail=(
+            "Reading Solar API rasters needs the 'tifffile' package - add it "
+            "to requirements.txt and redeploy."))
+    arr = tifffile.imread(io.BytesIO(raw))
+    return np.asarray(arr)
+
+
+def _clean(a):
+    """Google stores no-data as -9999."""
+    a = np.asarray(a, dtype=float)
+    return np.where(a <= -9000, np.nan, a)
+
+
+@app.post("/solar_layers")
+def solar_layers(q: SolarLayersQuery):
+    """Monthly irradiance, surface model and hourly shade for an AREA."""
+    r = max(25.0, min(150.0, float(q.radius_m)))
+    meta = _solar_call("dataLayers:get", {
+        "location.latitude": q.lat,
+        "location.longitude": q.lon,
+        "radiusMeters": r,
+        "view": "FULL_LAYERS",
+        "requiredQuality": "BASE",
+        "pixelSizeMeters": max(0.1, min(2.0, float(q.pixel_m))),
+        "experiments": "EXPANDED_COVERAGE",
+    })
+
+    out = {
+        "radius_m": r,
+        "imagery_quality": meta.get("imageryQuality"),
+        "imagery_date": None,
+        "source": "Google Solar API (dataLayers)",
+        "licensing": ("Google Maps Platform data: in-app analysis only, never "
+                      "written into an export."),
+    }
+    d = meta.get("imageryDate") or {}
+    if d.get("year"):
+        out["imagery_date"] = f"{d['year']}-{d.get('month', 1):02d}"
+
+    # ---- monthly flux: 12 bands, kWh/kW/year apportioned by month ----
+    if meta.get("monthlyFluxUrl"):
+        try:
+            a = _clean(_fetch_tiff(meta["monthlyFluxUrl"]))
+            if a.ndim == 3:
+                # tifffile may return (bands,y,x) or (y,x,bands)
+                if a.shape[0] == 12:
+                    bands = [a[i] for i in range(12)]
+                elif a.shape[-1] == 12:
+                    bands = [a[..., i] for i in range(12)]
+                else:
+                    bands = []
+                if bands:
+                    out["monthly_flux"] = [
+                        {"month": MONTHS[i],
+                         "mean_kwh_kw": (None if np.all(np.isnan(b))
+                                         else round(float(np.nanmean(b)), 1)),
+                         "max_kwh_kw": (None if np.all(np.isnan(b))
+                                        else round(float(np.nanmax(b)), 1))}
+                        for i, b in enumerate(bands)]
+                    tot = sum((m["mean_kwh_kw"] or 0)
+                              for m in out["monthly_flux"])
+                    out["annual_from_monthly_kwh_kw"] = round(tot, 1)
+        except HTTPException:
+            raise
+        except Exception as e:
+            out["monthly_flux_error"] = str(e)[:200]
+
+    # ---- DSM: 0.1 m/pixel surface model ----
+    if meta.get("dsmUrl"):
+        try:
+            a = _clean(_fetch_tiff(meta["dsmUrl"]))
+            if a.ndim == 3:
+                a = a[0] if a.shape[0] < a.shape[-1] else a[..., 0]
+            if not np.all(np.isnan(a)):
+                lo = float(np.nanpercentile(a, 2))
+                hi = float(np.nanpercentile(a, 98))
+                out["dsm"] = {
+                    "min_m": round(float(np.nanmin(a)), 2),
+                    "max_m": round(float(np.nanmax(a)), 2),
+                    "p2_m": round(lo, 2), "p98_m": round(hi, 2),
+                    "relief_m": round(hi - lo, 2),
+                    "pixels": int(a.size),
+                    "note": ("Metres above the EGM96 geoid. Google's DSM is "
+                             "0.1 m/pixel native - roughly 300x finer than the "
+                             "30 m global DEMs used elsewhere in this app."),
+                }
+        except Exception as e:
+            out["dsm_error"] = str(e)[:200]
+
+    # ---- hourly shade for the requested month/hour ----
+    urls = meta.get("hourlyShadeUrls") or []
+    mi = max(1, min(12, int(q.month))) - 1
+    hh = max(0, min(23, int(q.hour)))
+    if len(urls) > mi:
+        try:
+            a = _fetch_tiff(urls[mi])
+            band = None
+            if a.ndim == 3:
+                if a.shape[0] == 24:
+                    band = a[hh]
+                elif a.shape[-1] == 24:
+                    band = a[..., hh]
+            if band is not None:
+                b = _clean(band)
+                valid = ~np.isnan(b)
+                # each band is a bitmask over days of the month; >0 means the
+                # pixel is sunlit for at least one day at that hour
+                lit = float(np.count_nonzero(b[valid] > 0)) / max(1, valid.sum())
+                out["hourly_shade"] = {
+                    "month": MONTHS[mi], "hour": hh,
+                    "sunlit_fraction": round(lit, 3),
+                    "shaded_fraction": round(1.0 - lit, 3),
+                    "pixels": int(valid.sum()),
+                    "note": ("Fraction of the area receiving direct sun at "
+                             f"{hh:02d}:00 in {MONTHS[mi]}, from Google's "
+                             "1 m/pixel computation."),
+                }
+        except Exception as e:
+            out["hourly_shade_error"] = str(e)[:200]
+
+    out["available"] = {k: bool(meta.get(k)) for k in
+                        ("dsmUrl", "rgbUrl", "maskUrl", "annualFluxUrl",
+                         "monthlyFluxUrl")}
+    out["hourly_shade_months"] = len(urls)
+    out["billing_note"] = ("One dataLayers call covers every raster for this "
+                           "location, billed once.")
+    return out
+
+
+class ShadeCheckQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 60
+    month: int = 6
+    hour: int = 12
+    model_sunlit_fraction: Optional[float] = None   # from our own shadow model
+
+
+@app.post("/solar_shade_check")
+def solar_shade_check(q: ShadeCheckQuery):
+    """Check our shadow model against Google's computed shade.
+
+    Our shadows come from Open Buildings heights (~4 m resolution estimates)
+    projected with exact solar geometry. Google computes shade from a 0.1 m DSM
+    that includes every roof detail, parapet and neighbouring structure. If the
+    two agree the height estimates are serviceable; if they diverge, the height
+    data is the likely culprit - our solar geometry is verified analytically.
+    """
+    g = solar_layers(SolarLayersQuery(lat=q.lat, lon=q.lon,
+                                      radius_m=q.radius_m, pixel_m=1.0,
+                                      month=q.month, hour=q.hour))
+    hs = g.get("hourly_shade")
+    if not hs:
+        raise HTTPException(status_code=404, detail=(
+            "Google returned no hourly shade for this location "
+            + (f"({g.get('hourly_shade_error')})" if g.get("hourly_shade_error")
+               else "- it may be outside the covered area.")))
+
+    google_lit = hs["sunlit_fraction"]
+    mine = q.model_sunlit_fraction
+    row = {
+        "month": hs["month"], "hour": hs["hour"],
+        "google_sunlit": google_lit,
+        "model_sunlit": (None if mine is None else round(float(mine), 3)),
+    }
+    if mine is not None:
+        diff = abs(float(mine) - google_lit)
+        row["abs_difference"] = round(diff, 3)
+        row["agree"] = bool(diff <= 0.15)
+        row["verdict"] = (
+            "Close agreement - the Open Buildings heights are adequate here."
+            if diff <= 0.15 else
+            "Divergent. Most likely the ~4 m height estimates, or structures "
+            "Open Buildings does not map (trees, parapets, small extensions). "
+            "Our solar geometry itself is analytically verified, so it is not "
+            "the suspect.")
+    return {
+        "comparison": row,
+        "google": {"quality": g.get("imagery_quality"),
+                   "date": g.get("imagery_date"),
+                   "pixels": hs.get("pixels")},
+        "what_this_tests": (
+            "Two independent estimates of the same shadow pattern: ours from "
+            "Open Buildings heights + NOAA solar position, Google's from a "
+            "0.1 m DSM. This tests the HEIGHT DATA, not the sun geometry."),
+        "caveat": ("Google's shade is computed, not measured. Agreement means "
+                   "two models concur; it is not ground truth. Google's DSM "
+                   "does capture vegetation and roof detail that Open "
+                   "Buildings omits, so it is the better reference of the two."),
     }
 
 
