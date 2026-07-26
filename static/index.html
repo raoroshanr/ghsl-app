@@ -759,8 +759,6 @@ label.chk input{width:auto}
         <option value="alos">ALOS AW3D30 &middot; 30 m</option>
         <option value="srtm">SRTM &middot; 30 m</option>
       </select>
-      <button id="slopePickA" style="width:100%;margin-top:6px">1 &middot; Pick point A</button>
-      <button id="slopePickB" style="width:100%;margin-top:6px" disabled>2 &middot; Pick point B</button>
       <div id="slopeStatus" class="hint" style="min-height:20px">No points selected.</div>
       <button id="slopeRun" class="primary" style="margin-top:8px" disabled>Compute slope</button>
       <button id="slopeClear" class="ghost" style="width:100%;margin-top:6px">Clear points</button>
@@ -871,7 +869,6 @@ label.chk input{width:auto}
     <section>
       <h2>Site Brief</h2>
       <p class="hint">Pick a site and context radius. The brief leads with land-cover use in the region, then climate, humidity, rainfall, wind, solar and mean radiant temperature. (Air quality now lives in the Climate basket.)</p>
-      <button id="sitePick" style="width:100%">Pick site on map</button>
       <label class="fld" for="siteRadius">Context radius</label>
       <select id="siteRadius">
         <option value="10">10 m</option>
@@ -973,7 +970,6 @@ label.chk input{width:auto}
     <section>
       <h2>Live weather</h2>
       <p class="hint">Current conditions at a point from Open-Meteo (keyless, multi-model, assimilating the nearest station observations). Pick a location or search.</p>
-      <button id="wePick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="weStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="weRun" class="primary" style="margin-top:8px" disabled>Get live weather</button>
 
@@ -1006,7 +1002,6 @@ label.chk input{width:auto}
     <section>
       <h2>Live Air Quality</h2>
       <p class="hint">Real-time air quality at a point, from multiple providers. Open-Meteo works with no key. Others activate when their API key is set as a Cloud Run environment variable &mdash; the badge shows which are ready.</p>
-      <button id="aqPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="aqStatus" class="hint" style="min-height:20px">No point selected.</div>
       <label class="fld">Providers</label>
       <div id="aqProviders"></div>
@@ -1096,7 +1091,6 @@ label.chk input{width:auto}
     <section>
       <h2>Thermal environment</h2>
       <p class="hint">Land-surface temperature and air-temperature climatology at a point. Pick a location; results show in the analysis pane.</p>
-      <button id="thPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="thStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="thRun" class="primary" style="margin-top:8px" disabled>Analyse thermal</button>
     </section>
@@ -1106,7 +1100,6 @@ label.chk input{width:auto}
     <section>
       <h2>Sunlight &amp; solar</h2>
       <p class="hint">Monthly solar irradiance (kWh/m&sup2;/day) and approximate mean radiant temperature for a sun-exposed person at the point.</p>
-      <button id="suPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="suStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="suRun" class="primary" style="margin-top:8px" disabled>Analyse sunlight</button>
 
@@ -1159,6 +1152,8 @@ label.chk input{width:auto}
       <div id="solStatus" class="hint" style="font-size:10.5px"></div>
       <button id="solRun" class="primary" style="width:100%;margin-top:6px" disabled>Analyse this rooftop</button>
       <button id="solCompare" class="ghost" style="width:100%;margin-top:6px" disabled>Cross-check against Open Buildings</button>
+      <button id="solLayers" class="ghost" style="width:100%;margin-top:6px" disabled>Monthly irradiance &amp; high-res surface model</button>
+      <button id="solShade" class="ghost" style="width:100%;margin-top:6px" disabled>Validate my shadow model against Google</button>
       <button id="solClear" class="ghost" style="width:100%;margin-top:6px">Clear roof segments</button>
       <div id="solInfo" class="hint" style="min-height:18px"></div>
       <button id="shClear" class="ghost" style="width:100%;margin-top:6px">Clear shadows</button>
@@ -1170,7 +1165,6 @@ label.chk input{width:auto}
     <section>
       <h2>Noise screening</h2>
       <p class="hint">Distance-based screening from mapped noise sources (major roads, railways, industry, airports) via OpenStreetMap. This is a proximity screen, not an acoustic measurement.</p>
-      <button id="noPick" style="width:100%;margin-top:6px">Pick point on map</button>
       <div id="noStatus" class="hint" style="min-height:20px">No point selected.</div>
       <button id="noRun" class="primary" style="margin-top:8px" disabled>Screen noise sources</button>
     </section>
@@ -1219,7 +1213,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v111</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v112</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1237,6 +1231,7 @@ label.chk input{width:auto}
         <button class="ghost" data-mode="admin">Boundary</button>
         <button class="ghost" data-mode="shape">Shapefile</button>
         <button class="ghost" data-mode="create">Custom Draw</button>
+        <button class="ghost" data-mode="point">Point</button>
       </div>
 
       <div class="modepane show" id="pane-draw">
@@ -1271,6 +1266,14 @@ label.chk input{width:auto}
         <label class="fld" for="districtSel">District</label>
         <select id="districtSel"><option value="">Entire state</option></select>
         <button id="adminLoad" style="width:100%;margin-top:8px">Load boundary</button>
+      </div>
+
+      <div class="modepane" id="pane-point">
+        <p class="hint">Set the analysis point for whichever tab is open &mdash; Site Brief, Air, Weather, Heat, Sun, Noise, or Slope (A then B).</p>
+        <div id="ptTarget" class="hint" style="font-weight:700;color:#7FD0BC"></div>
+        <button id="ptPick" class="primary" style="width:100%;margin-top:6px">Tap the map to set the point</button>
+        <div id="ptLatLonSlot"></div>
+        <div id="ptStatus" class="hint" style="min-height:18px;margin-top:6px"></div>
       </div>
 
       <div class="modepane" id="pane-create">
@@ -1324,7 +1327,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v111";
+const DSG_VERSION = "deepseego-v112";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -2244,6 +2247,7 @@ document.querySelectorAll('.modes button').forEach(b => {
     if(b.dataset.mode === 'admin') loadStatesOnce();
     if(b.dataset.mode === 'shape') loadShapesOnce();
     if(b.dataset.mode === 'create') crInit();
+    if(b.dataset.mode === 'point'){ ptInit(); ptRefresh(); }
     else if(typeof crPencil === 'function') crPencil(false);
   });
 });
@@ -2922,6 +2926,12 @@ async function crExport(){
 map.on('click', ev => {
   if(!mapClickMode) return;
   const {lat, lng} = ev.latlng;
+
+  if(mapClickMode === 'roiPoint'){
+    mapClickMode = null;
+    ptSet(lat, lng);
+    return;
+  }
 
   if(mapClickMode === 'create'){
     CR.verts.push([lng, lat]);                 // GeoJSON order: lon, lat
@@ -4079,9 +4089,38 @@ function gotoClose(){ $('gotoPanel').classList.remove('on'); }
 function roiOpen(){
   $('roiPanel').classList.add('on');
   gotoClose();
+  ptInit();
+  ptRefresh();
   roiSync();
 }
 function roiClose(){ $('roiPanel').classList.remove('on'); }
+function ptInit(){
+  if(ptInit._done) return; ptInit._done = true;
+  $('ptPick').addEventListener('click', () => {
+    const t = GOTO_TARGETS[ACTIVE_TAB];
+    if(!t) return toast('This tab does not take a map point');
+    mapClickMode = 'roiPoint';
+    $('ptStatus').textContent = 'Tap the map\u2026';
+  });
+  attachLatLon($('ptPick'), (la, lo) => ptSet(la, lo));
+}
+function ptSet(lat, lon, label){
+  const t = GOTO_TARGETS[ACTIVE_TAB];
+  if(!t) return toast('This tab does not take a map point');
+  t.set(lat, lon, label || null);
+  $('ptStatus').textContent = t.label + ' point set \u00b7 ' +
+    lat.toFixed(5) + ', ' + lon.toFixed(5);
+  map.setView([lat, lon], Math.max(map.getZoom(), 15));
+}
+function ptRefresh(){
+  const t = GOTO_TARGETS[ACTIVE_TAB];
+  const el = $('ptTarget');
+  if(el) el.textContent = t
+    ? 'Setting the point for: ' + t.label
+    : 'The open tab does not use a map point.';
+  const b = $('ptPick');
+  if(b) b.disabled = !t;
+}
 function roiSync(){
   // mirror the status line into the panel so the state is visible where it is set
   const m = $('roiStatusMirror'), s = $('regionStatus');
@@ -4486,6 +4525,8 @@ async function solInit(){
   }catch(e){ GMAPS_OK = false; $('solStatus').textContent = e.message; }
   $('solRun').addEventListener('click', solRun);
   $('solCompare').addEventListener('click', solCompare);
+  $('solLayers').addEventListener('click', solLayersRun);
+  $('solShade').addEventListener('click', solShadeCheck);
   $('solClear').addEventListener('click', () => {
     solarLayer.clearLayers(); SOL_DATA = null; $('solInfo').textContent = '';
     $('solCompare').disabled = true;
@@ -4494,8 +4535,143 @@ async function solInit(){
 }
 function solReady(){
   const st = _sunlightTab.state;
-  const btn = $('solRun');
-  if(btn) btn.disabled = !(GMAPS_OK && st.lat != null);
+  const on = !!(GMAPS_OK && st.lat != null);
+  ['solRun', 'solLayers', 'solShade'].forEach(id => {
+    const b = $(id); if(b) b.disabled = !on;
+  });
+}
+
+async function solLayersRun(){
+  const st = _sunlightTab.state;
+  if(st.lat == null) return toast('Pick a point in the Sun tab first');
+  const btn = $('solLayers'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Fetching rasters\u2026';
+  Progress.start('Solar data layers',
+                 'Downloading surface model, monthly flux and shade\u2026', 0);
+  try{
+    const ds = $('spDate').value || new Date().toISOString().slice(0, 10);
+    const j = await api('/solar_layers', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: st.lat, lon: st.lon, radius_m: 60,
+                            pixel_m: 0.5, month: +ds.slice(5, 7) || 6,
+                            hour: Math.round((+$('spTime').value || 720) / 60)})}, true);
+
+    const mf = j.monthly_flux || [];
+    const rows = mf.map(m =>
+      `<tr><td>${m.month}</td><td style="text-align:right">${m.mean_kwh_kw ?? '\u2014'}</td>` +
+      `<td style="text-align:right">${m.max_kwh_kw ?? '\u2014'}</td></tr>`).join('');
+    const dsm = j.dsm;
+    const hs = j.hourly_shade;
+
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Solar data layers';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Monthly irradiance</div>` +
+      (rows
+        ? `<table class="aqTable"><tr><td><b>Month</b></td>` +
+          `<td style="text-align:right"><b>Mean</b></td>` +
+          `<td style="text-align:right"><b>Max</b></td></tr>${rows}</table>` +
+          `<p class="srcNote">kWh per kW installed. Annual total from the ` +
+          `monthly bands: <b>${j.annual_from_monthly_kwh_kw ?? '\u2014'}</b> kWh/kW.</p>`
+        : `<p class="srcNote">Monthly flux unavailable${
+             j.monthly_flux_error ? ': ' + j.monthly_flux_error : ''}.</p>`) +
+      (dsm
+        ? `<div class="paneLabel" style="margin-top:10px">Surface model (0.1 m native)</div>` +
+          `<table class="aqTable">` +
+          `<tr><td>Elevation range</td><td style="text-align:right">${dsm.min_m}\u2013${dsm.max_m} m</td></tr>` +
+          `<tr><td>Relief (2\u201398 percentile)</td><td style="text-align:right"><b>${dsm.relief_m} m</b></td></tr>` +
+          `<tr><td>Pixels sampled</td><td style="text-align:right">${dsm.pixels.toLocaleString()}</td></tr>` +
+          `</table><p class="srcNote">${dsm.note}</p>` : '') +
+      (hs
+        ? `<div class="paneLabel" style="margin-top:10px">Hourly shade</div>` +
+          `<table class="aqTable">` +
+          `<tr><td>${hs.month}, ${String(hs.hour).padStart(2,'0')}:00</td>` +
+          `<td style="text-align:right"><b>${(hs.sunlit_fraction*100).toFixed(1)}%</b> sunlit</td></tr>` +
+          `</table><p class="srcNote">${hs.note}</p>` : '') +
+      `<p class="srcNote">${j.billing_note} ${j.licensing}</p></div>`;
+    $('solInfo').innerHTML = 'Data layers loaded \u00b7 ' +
+      (j.annual_from_monthly_kwh_kw ?? '?') + ' kWh/kW/yr';
+  }catch(e){
+    $('solInfo').textContent = e.message;
+    toast('Solar layers: ' + e.message, 11000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
+// what fraction of the mapped buildings around the point are lit right now,
+// according to OUR shadow model - the figure Google's raster is compared to
+function myShadowSunlitFraction(){
+  if(typeof SH_BUILDINGS === 'undefined' || !SH_BUILDINGS) return null;
+  const st = _sunlightTab.state;
+  const ds = $('spDate').value || new Date().toISOString().slice(0, 10);
+  const sun = solarPos(solarDate(ds, +$('spTime').value, st.lon), st.lat, st.lon);
+  if(sun.alt <= 0) return 0;
+  const mLat = 110540, mLon = 111320 * Math.cos(st.lat * Math.PI/180);
+  const bearing = ((sun.az + 180) % 360) * Math.PI/180;
+  const tanA = Math.tan(sun.alt * Math.PI/180);
+  const polys = [];
+  SH_BUILDINGS.buildings.forEach(b => {
+    const len = b.h / tanA;
+    const dLat = (len * Math.cos(bearing)) / mLat;
+    const dLon = (len * Math.sin(bearing)) / mLon;
+    const base = b.ring.map(([la, lo]) => [lo, la]);
+    const tip  = b.ring.map(([la, lo]) => [lo + dLon, la + dLat]);
+    const hull = convexHull(base.concat(tip));
+    if(hull.length >= 3) polys.push(hull);
+  });
+  // sample a grid over the same radius Google used and count lit points
+  const R = 60, N = 40;
+  let lit = 0, tot = 0;
+  for(let i = 0; i < N; i++){
+    for(let jj = 0; jj < N; jj++){
+      const dy = (i/(N-1) - 0.5) * 2 * R, dx = (jj/(N-1) - 0.5) * 2 * R;
+      const la = st.lat + dy/mLat, lo = st.lon + dx/mLon;
+      tot++;
+      if(!polys.some(p => pointInPoly([lo, la], p))) lit++;
+    }
+  }
+  return tot ? lit/tot : null;
+}
+
+async function solShadeCheck(){
+  const st = _sunlightTab.state;
+  if(st.lat == null) return toast('Pick a point in the Sun tab first');
+  const mine = myShadowSunlitFraction();
+  if(mine === null)
+    return toast('Cast building shadows first \u2014 that is what gets validated', 8000);
+  const btn = $('solShade'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Comparing\u2026';
+  Progress.start('Shadow validation', 'Fetching Google\u2019s computed shade\u2026', 0);
+  try{
+    const ds = $('spDate').value || new Date().toISOString().slice(0, 10);
+    const j = await api('/solar_shade_check', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: st.lat, lon: st.lon, radius_m: 60,
+                            month: +ds.slice(5, 7) || 6,
+                            hour: Math.round((+$('spTime').value || 720) / 60),
+                            model_sunlit_fraction: mine})}, true);
+    const cp = j.comparison;
+    const ok = cp.agree;
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Shadow model validation';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">My shadow model vs Google</div>` +
+      `<div class="mmVerdict ${ok ? 'ok' : 'warn'}">${cp.verdict}</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>${cp.month}, ${String(cp.hour).padStart(2,'0')}:00</td><td></td></tr>` +
+      `<tr><td>My model (Open Buildings heights)</td>` +
+      `<td style="text-align:right"><b>${(cp.model_sunlit*100).toFixed(1)}%</b> sunlit</td></tr>` +
+      `<tr><td>Google (0.1 m DSM)</td>` +
+      `<td style="text-align:right"><b>${(cp.google_sunlit*100).toFixed(1)}%</b> sunlit</td></tr>` +
+      `<tr><td>Difference</td><td style="text-align:right">${(cp.abs_difference*100).toFixed(1)} points</td></tr>` +
+      `</table>` +
+      `<div class="paneLabel" style="margin-top:10px">What this tests</div>` +
+      `<p class="srcNote">${j.what_this_tests}</p>` +
+      `<p class="srcNote">${j.caveat}</p></div>`;
+  }catch(e){ toast('Shade check: ' + e.message, 11000); }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
 }
 
 async function solRun(){
@@ -4731,7 +4907,7 @@ function slopeDraw(){
     map.fitBounds(L.latLngBounds([[a.lat, a.lon], [b.lat, b.lon]]).pad(0.35));
   }
   $('slopeRun').disabled = !(a && b);
-  $('slopePickB').disabled = !a;
+  if($('slopePickB')) $('slopePickB').disabled = !a;
   $('slopeStatus').textContent =
     !a ? 'No points selected.' :
     !b ? 'A: ' + a.lat.toFixed(5) + ', ' + a.lon.toFixed(5) + ' \u2014 now pick B.' :
@@ -4740,14 +4916,16 @@ function slopeDraw(){
 }
 function slopeInit(){
   if(slopeState.inited) return; slopeState.inited = true;
-  $('slopePickA').addEventListener('click', () => {
-    mapClickMode = 'slopeA';
-    $('slopeStatus').textContent = 'Tap point A on the map\u2026';
-  });
-  $('slopePickB').addEventListener('click', () => {
-    mapClickMode = 'slopeB';
-    $('slopeStatus').textContent = 'Tap point B on the map\u2026';
-  });
+  if($('slopePickA') && $('slopePickB')){
+    $('slopePickA').addEventListener('click', () => {
+      mapClickMode = 'slopeA';
+      $('slopeStatus').textContent = 'Tap point A on the map\u2026';
+    });
+    $('slopePickB').addEventListener('click', () => {
+      mapClickMode = 'slopeB';
+      $('slopeStatus').textContent = 'Tap point B on the map\u2026';
+    });
+  }
   $('slopeClear').addEventListener('click', () => {
     slopeState.a = slopeState.b = null; slopeDraw();
   });
@@ -5725,7 +5903,7 @@ function climatePointTab(prefix, mode){
   const el = id => $(prefix + id);
   function init(){
     if(st.inited) return; st.inited = true;
-    el('Pick').addEventListener('click', () => {
+    if(el('Pick')) el('Pick').addEventListener('click', () => {
       mapClickMode = prefix + 'Pick';
       el('Status').textContent = 'Tap a location on the map\u2026';
     });
@@ -5969,7 +6147,7 @@ function aqSetPoint(lat, lon, label){
   $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
     ' \u2014 or tap the map to adjust';
 }
-$('aqPick').addEventListener('click', () => {
+if($('aqPick')) $('aqPick').addEventListener('click', () => {
   mapClickMode = 'aqPick';
   $('aqStatus').textContent = 'Tap a location on the map\u2026';
 });
@@ -6370,7 +6548,7 @@ function drawSite(){
   addCrosshair(siteLayer, siteState.lat, siteState.lon, '#E4572E');
   map.panTo([siteState.lat, siteState.lon]);
 }
-$('sitePick').addEventListener('click', () => {
+if($('sitePick')) $('sitePick').addEventListener('click', () => {
   mapClickMode = 'sitePick';
   $('siteStatus').textContent = 'Tap the building or plot on the map\u2026';
 });
