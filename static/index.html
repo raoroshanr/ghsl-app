@@ -1154,6 +1154,19 @@ label.chk input{width:auto}
       <button id="solCompare" class="ghost" style="width:100%;margin-top:6px" disabled>Cross-check against Open Buildings</button>
       <button id="solLayers" class="ghost" style="width:100%;margin-top:6px" disabled>Monthly irradiance &amp; high-res surface model</button>
       <button id="solShade" class="ghost" style="width:100%;margin-top:6px" disabled>Validate my shadow model against Google</button>
+
+      <div class="stepH" style="margin-top:14px">All buildings in a region</div>
+      <p class="hint">Analyses every rooftop inside your Region of Interest. The Solar API has <b>no bulk endpoint</b>, so this costs <b>one billable call per building</b> &mdash; you will see the count and confirm before anything is spent.</p>
+      <div class="dxGrid">
+        <div><label>Max buildings</label>
+          <input type="text" id="solMax" value="25"></div>
+        <div><label>Min footprint (m&sup2;)</label>
+          <input type="text" id="solMinArea" value="25"></div>
+      </div>
+      <button id="solAreaPreview" class="ghost" style="width:100%;margin-top:6px" disabled>Count buildings (free)</button>
+      <div id="solAreaCost" class="mmVerdict warn" hidden></div>
+      <button id="solAreaRun" class="primary" style="width:100%;margin-top:6px" hidden>Confirm &amp; analyse</button>
+      <div id="solAreaInfo" class="hint" style="min-height:18px"></div>
       <button id="solClear" class="ghost" style="width:100%;margin-top:6px">Clear roof segments</button>
       <div id="solInfo" class="hint" style="min-height:18px"></div>
       <button id="shClear" class="ghost" style="width:100%;margin-top:6px">Clear shadows</button>
@@ -1213,7 +1226,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v112</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v113</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1327,7 +1340,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v112";
+const DSG_VERSION = "deepseego-v113";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4527,6 +4540,8 @@ async function solInit(){
   $('solCompare').addEventListener('click', solCompare);
   $('solLayers').addEventListener('click', solLayersRun);
   $('solShade').addEventListener('click', solShadeCheck);
+  $('solAreaPreview').addEventListener('click', solAreaPreview);
+  $('solAreaRun').addEventListener('click', solAreaRun);
   $('solClear').addEventListener('click', () => {
     solarLayer.clearLayers(); SOL_DATA = null; $('solInfo').textContent = '';
     $('solCompare').disabled = true;
@@ -4539,6 +4554,136 @@ function solReady(){
   ['solRun', 'solLayers', 'solShade'].forEach(id => {
     const b = $(id); if(b) b.disabled = !on;
   });
+  // the area run needs a REGION, not a point - or a point as fallback
+  const ab = $('solAreaPreview');
+  if(ab) ab.disabled = !(GMAPS_OK && (regionSpec || st.lat != null));
+}
+
+let SOL_AREA_PLAN = null;
+
+function solAreaBody(preview){
+  const st = _sunlightTab.state;
+  const b = {preview: preview,
+             max_buildings: parseInt($('solMax').value) || 25,
+             min_area_m2: parseFloat($('solMinArea').value) || 25,
+             source: 'open_buildings'};
+  if(regionSpec) b.region = regionSpec;
+  else { b.lat = st.lat; b.lon = st.lon; b.radius_m = 250; }
+  return b;
+}
+
+async function solAreaPreview(){
+  const st = _sunlightTab.state;
+  if(!regionSpec && st.lat == null)
+    return toast('Draw a Region of Interest, or pick a point first');
+  const btn = $('solAreaPreview'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Counting\u2026';
+  try{
+    const j = await api('/solar_area', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(solAreaBody(true))}, true);
+    SOL_AREA_PLAN = j;
+    // show the buildings that WOULD be analysed, so the scope is visible
+    solarLayer.clearLayers();
+    (j.buildings || []).forEach(b =>
+      L.circleMarker([b.lat, b.lon], {radius:4, color:'#E9C46A', weight:1,
+        fillColor:'#E9C46A', fillOpacity:.85}).addTo(solarLayer)
+        .bindTooltip(b.area_m2 ? Math.round(b.area_m2) + ' m\u00b2' : 'building'));
+    if(solarLayer.getLayers().length)
+      map.fitBounds(solarLayer.getBounds().pad(0.2));
+
+    const box = $('solAreaCost');
+    box.hidden = false;
+    box.innerHTML =
+      `<b>${j.buildings_found} buildings found</b> in the region ` +
+      `(${j.source}).<br>Analysing ${j.would_analyse} of them costs ` +
+      `<b>${j.billable_calls} Solar API calls</b> \u2014 one per building.` +
+      (j.buildings_found > j.would_analyse
+        ? `<br><span class="per">Only the ${j.would_analyse} largest will be ` +
+          `analysed. Raise "Max buildings" to include more.</span>` : '') +
+      `<br><span class="per">Nothing has been spent yet.</span>`;
+    $('solAreaRun').hidden = false;
+    $('solAreaRun').textContent = `Confirm & analyse ${j.would_analyse} buildings`;
+    $('solAreaInfo').textContent = '';
+  }catch(e){
+    $('solAreaInfo').textContent = e.message;
+    toast('Preview: ' + e.message, 10000);
+  }
+  btn.disabled = false; btn.textContent = o;
+}
+
+async function solAreaRun(){
+  if(!SOL_AREA_PLAN) return toast('Run the count first');
+  const n = SOL_AREA_PLAN.would_analyse;
+  const btn = $('solAreaRun'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = `Analysing ${n} buildings\u2026`;
+  Progress.start('Area solar analysis',
+                 `${n} buildings, one API call each\u2026`, 0);
+  try{
+    const j = await api('/solar_area', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(solAreaBody(false))}, true);
+
+    // draw each rooftop, sized and coloured by capacity
+    solarLayer.clearLayers();
+    const caps = j.buildings.map(b => b.capacity_kwp || 0);
+    const hi = Math.max(1, ...caps);
+    j.buildings.forEach(b => {
+      const t = (b.capacity_kwp || 0) / hi;
+      L.circleMarker([b.lat, b.lon],
+        {radius: 4 + 8*t, color: '#fff', weight: 1,
+         fillColor: solAzColour(b.best_azimuth), fillOpacity: .85})
+        .addTo(solarLayer)
+        .bindTooltip(
+          `<b>${b.capacity_kwp ?? '\u2014'} kWp</b> \u00b7 ${b.roof_area_m2 ?? '?'} m\u00b2` +
+          `<br>best plane faces ${b.best_facing || '?'} at ${b.best_pitch ?? '?'}\u00b0` +
+          `<br>${b.sunshine_h_yr ?? '?'} sun-hours/yr`, {sticky:true});
+    });
+    (j.failures || []).forEach(f =>
+      L.circleMarker([f.lat, f.lon], {radius:4, color:'#6b2f1c', weight:1,
+        fillColor:'#3a1a10', fillOpacity:.7}).addTo(solarLayer)
+        .bindTooltip('No Solar API coverage'));
+    if(solarLayer.getLayers().length)
+      map.fitBounds(solarLayer.getBounds().pad(0.15));
+
+    const t = j.totals;
+    const mix = (j.orientation_mix || []).map(m =>
+      `<tr><td>${m.facing}</td><td style="text-align:right">${m.count}</td></tr>`).join('');
+    const top = j.buildings.slice(0, 15).map((b, i) =>
+      `<tr><td>${i+1}</td><td style="text-align:right">${b.capacity_kwp ?? '\u2014'} kWp</td>` +
+      `<td style="text-align:right">${b.roof_area_m2 ?? '?'} m\u00b2</td>` +
+      `<td style="text-align:right">${b.best_facing || '?'}</td></tr>`).join('');
+
+    $('drawer').classList.add('open');
+    if(typeof paneMode === 'function') paneMode('site');
+    $('drawerSub').textContent = 'Area solar potential';
+    $('siteWrap').innerHTML =
+      `<div class="siteSec"><div class="paneLabel">Region totals</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Buildings analysed</td><td style="text-align:right"><b>${j.analysed}</b>` +
+      (j.failed ? ` <span class="per">(${j.failed} without coverage)</span>` : '') + `</td></tr>` +
+      `<tr><td>Total rooftop capacity</td><td style="text-align:right"><b>${t.capacity_kwp} kWp</b></td></tr>` +
+      `<tr><td>Total roof area</td><td style="text-align:right">${t.roof_area_m2} m\u00b2</td></tr>` +
+      `<tr><td>Total panels</td><td style="text-align:right">${t.panels}</td></tr>` +
+      `<tr><td>Mean per building</td><td style="text-align:right">${t.mean_kwp_per_building} kWp</td></tr>` +
+      `</table>` +
+      (mix ? `<div class="paneLabel" style="margin-top:10px">Best-plane orientation mix</div>` +
+             `<table class="aqTable">${mix}</table>` : '') +
+      `<div class="paneLabel" style="margin-top:10px">Highest-potential rooftops</div>` +
+      `<table class="aqTable"><tr><td><b>#</b></td><td style="text-align:right"><b>Capacity</b></td>` +
+      `<td style="text-align:right"><b>Roof</b></td><td style="text-align:right"><b>Faces</b></td></tr>${top}</table>` +
+      `<div class="paneLabel" style="margin-top:10px">Caveats</div>` +
+      `<ul class="mmList">${j.caveats.map(x => `<li>${x}</li>`).join('')}</ul>` +
+      `<p class="srcNote">${j.source}. ${j.licensing}</p></div>`;
+    $('solAreaInfo').innerHTML = `${j.analysed} rooftops \u00b7 ` +
+      `<b>${t.capacity_kwp} kWp</b> total`;
+    $('solAreaRun').hidden = true;
+    $('solAreaCost').hidden = true;
+  }catch(e){
+    $('solAreaInfo').textContent = e.message;
+    toast('Area solar: ' + e.message, 12000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
 }
 
 async function solLayersRun(){
