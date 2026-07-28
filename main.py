@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v119"
+APP_VERSION = "deepseego-v120"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5411,6 +5411,44 @@ def _sigmas(x, u, sw, sv, zi, convective):
     return sy, min(sz, 0.9 * zi)
 
 
+def _lee_shelter(ring_xy, he, H_bldg, sx, sy_src, rx, ry, wdir):
+    """Does the building of interest itself stand between source and receptor?
+
+    Until now the plume passed straight THROUGH the subject building, so a
+    leeward facade could read almost as high as the windward one - which is
+    physically wrong. A building shelters its own lee side: the direct plume
+    is intercepted by the windward wall, and the lee facade only sees material
+    recirculated into the cavity.
+
+    Returns a multiplier on the direct contribution (1.0 = fully exposed).
+    """
+    if not ring_xy or len(ring_xy) < 3:
+        return 1.0
+    th = math.radians(wdir)
+    wx, wy = -math.sin(th), -math.cos(th)          # downwind unit vector
+    # receptor position along the wind, relative to the building centroid
+    cx = sum(p[0] for p in ring_xy) / len(ring_xy)
+    cy = sum(p[1] for p in ring_xy) / len(ring_xy)
+    rr = (rx - cx) * wx + (ry - cy) * wy            # >0 means leeward
+    if rr <= 0:
+        return 1.0                                  # windward or side: exposed
+    # is the source upwind of the building at all?
+    ss = (sx - cx) * wx + (sy_src - cy) * wy
+    if ss >= rr:
+        return 1.0                                  # source is not upwind
+    # a plume released well above the building passes over the top
+    if he > 1.8 * max(1.0, H_bldg):
+        return 1.0
+    # building half-width across the wind, used as the shelter scale
+    span = max(abs((p[0] - cx) * (-wy) + (p[1] - cy) * wx) for p in ring_xy)
+    span = max(2.0, span)
+    # near-wall sheltering is strongest; it relaxes with distance downwind
+    frac = max(0.0, min(1.0, 1.0 - rr / (3.0 * max(H_bldg, span))))
+    # elevated releases are less affected than ground-level ones
+    lift = max(0.0, min(1.0, he / (1.8 * max(1.0, H_bldg))))
+    return max(0.06, 1.0 - 0.94 * frac * (1.0 - lift))
+
+
 def _building_wake(sx, sy_src, he, rx, ry, wdir, buildings, mlat, mlon,
                    olat, olon):
     """Simplified building downwash (Huber-Snyder style).
@@ -5694,6 +5732,9 @@ class AermodQuery(BaseModel):
     grid: bool = True                   # also compute a concentration map
     grid_n: int = 60
     grid_radius_m: float = 500.0
+    # Concentration is a 3D field C(x,y,z). Sampling several heights shows the
+    # plume rising over the buildings instead of one slice near the ground.
+    grid_levels: list = []              # e.g. [1.5, 10, 20, 40]
     albedo: float = 0.18
     background: float = 0.0
 
@@ -5802,6 +5843,7 @@ def aermod_run(q: AermodQuery):
         dla, dlo = d / mlat, d / mlon
         ring = [[q.lat - dla, q.lon - dlo], [q.lat - dla, q.lon + dlo],
                 [q.lat + dla, q.lon + dlo], [q.lat + dla, q.lon - dlo]]
+    ring_xy = [((p[1] - q.lon) * mlon, (p[0] - q.lat) * mlat) for p in ring]
     recs = _facade_receptors(ring, float(q.building_h_m),
                              levels=max(1, min(8, int(q.levels))))
     if not recs:
@@ -5892,6 +5934,8 @@ def aermod_run(q: AermodQuery):
               sw, sv = _sigma_wv(max(e["he"], 2.0), pbl, conv)
               sy, sz = _sigmas(xd, u_ref, sw, sv, zi, conv)
               he_eff = e["he"]
+              shelter = _lee_shelter(ring_xy, e["he"], float(q.building_h_m),
+                                     e["x"], e["y"], rx, ry, wdir_i)
               if wake_bldgs:
                   dh, ey, ez = _building_wake(e["x"], e["y"], e["he"], rx, ry,
                                               wdir_i, wake_bldgs, mlat, mlon,
@@ -5915,7 +5959,7 @@ def aermod_run(q: AermodQuery):
               if spec.get("half_life_h"):
                   c *= math.exp(-math.log(2) * (xd / max(0.3, u_ref)) /
                                 (spec["half_life_h"] * 3600.0))
-              c *= wgt                              # frequency weight
+              c *= wgt * shelter        # frequency weight x leeward shelter
               total += c
               contrib[e["src"]] += c
         val = total * scale + float(q.background or 0.0)
@@ -5992,6 +6036,51 @@ def aermod_run(q: AermodQuery):
                                  (spec["half_life_h"] * 3600.0))
                 field += np.where(ok, cc, 0.0) * wgt
         field = field * scale + float(q.background or 0.0)
+
+        # ---- additional heights, for the 3D field ----
+        levels_out = []
+        want_levels = [float(z) for z in (q.grid_levels or []) if float(z) > 0]
+        if want_levels:
+            step_v = max(1, gn // 40)
+            for zl in want_levels[:6]:
+                fz = np.zeros_like(GX)
+                for wdir_i, wgt in dirs:
+                    th = math.radians(wdir_i)
+                    wx, wy = -math.sin(th), -math.cos(th)
+                    for e in elements:
+                        dx, dy = GX - e["x"], GY - e["y"]
+                        xd = dx * wx + dy * wy
+                        yd = -dx * wy + dy * wx
+                        ok = xd > 1.0
+                        xv = np.where(ok, xd, 1.0)
+                        sw, sv = _sigma_wv(max(e["he"], 2.0), pbl, conv)
+                        t = xv / max(0.3, u_ref)
+                        Tly = 300.0 if conv else 100.0
+                        Tlz = 200.0 if conv else 50.0
+                        sy = sv * t / np.sqrt(1.0 + t / (2 * Tly))
+                        sz = np.minimum(sw * t / np.sqrt(1.0 + t / (2 * Tlz)),
+                                        0.9 * zi)
+                        lat_f = np.exp(-(yd ** 2) / (2 * sy ** 2)) / \
+                            (np.sqrt(2 * np.pi) * sy)
+                        vert = np.zeros_like(GX)
+                        for m_ in range(-2, 3):
+                            vert += np.exp(-((zl - e["he"] - 2 * m_ * zi) ** 2) /
+                                           (2 * sz ** 2))
+                            vert += np.exp(-((zl + e["he"] + 2 * m_ * zi) ** 2) /
+                                           (2 * sz ** 2))
+                        cc = e["q"] / (np.sqrt(2 * np.pi) * max(0.3, u_ref) *
+                                       sz) * vert * lat_f
+                        fz += np.where(ok, cc, 0.0) * wgt
+                fz = fz * scale + float(q.background or 0.0)
+                fzs = fz[::step_v, ::step_v]
+                levels_out.append({
+                    "height_m": zl,
+                    "max": round(float(np.max(fz)), 3),
+                    "mean": round(float(np.mean(fz)), 3),
+                    "values": [[round(float(v), 4) for v in row] for row in fzs],
+                    "rows": int(fzs.shape[0]), "cols": int(fzs.shape[1]),
+                })
+
         gmax = float(np.max(field))
         png = _plume_png(field, gmax if gmax > 0 else 1.0)
         # downsample the field so it can travel to the browser and be draped
@@ -6008,6 +6097,7 @@ def aermod_run(q: AermodQuery):
             "mean": round(float(np.mean(field)), 3),
             "radius_m": gr, "n": gn,
             "receptor_height_m": zr,
+            "levels": levels_out,
             "note": (f"Ground-level field at {zr} m, on a {gn}x{gn} grid over "
                      f"\u00b1{int(gr)} m. Building downwash is applied at the "
                      "facade receptors but NOT across this grid, which would "
