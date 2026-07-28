@@ -1082,6 +1082,7 @@ label.chk input{width:auto}
         <div><label>Bowen ratio</label><input type="text" id="admBowen" value="1.0"></div>
       </div>
 
+      <label class="slChk"><input type="checkbox" id="admVol"> Compute the field at several heights (3D plume, slower)</label>
       <button id="admRun" class="primary" style="width:100%;margin-top:10px">Run dispersion model</button>
       <div style="display:flex;gap:6px;margin-top:6px">
         <button id="admVerify" class="ghost" style="flex:1">Verify code</button>
@@ -1230,7 +1231,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v119</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v120</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1366,7 +1367,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v119";
+const DSG_VERSION = "deepseego-v120";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4428,8 +4429,14 @@ async function admDraw3D(j){
   rend.setSize(W, H); rend.setPixelRatio(Math.min(2, window.devicePixelRatio||1));
   host.innerHTML = '';
   host.appendChild(rend.domElement);
-  _S3 = {scene, rend, cam: null, conc: null, R: R,
-         terrain: j.scene.terrain || null};
+  _S3 = {scene, rend, cam: null, conc: null, concLevels: [], R: R,
+         terrain: j.scene.terrain || null, terrainMean: 0};
+  if(j.scene.terrain && j.scene.terrain.z){
+    let s = 0, n2 = 0;
+    for(const row of j.scene.terrain.z) for(const v of row)
+      if(v != null && isFinite(v)){ s += v; n2++; }
+    _S3.terrainMean = n2 ? s / n2 : 0;
+  }
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
   const sun = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -4440,11 +4447,17 @@ async function admDraw3D(j){
   if(t && t.z && t.rows > 1){
     const geo = new THREE.PlaneGeometry(t.size_m, t.size_m, t.cols-1, t.rows-1);
     const pos = geo.attributes.position;
+    // fill nodata with the mean rather than zero - a hole at 0 m beside real
+    // ground at 20 m is what split the surface into two decks
+    let sum = 0, cnt = 0;
+    for(const row of t.z) for(const v of row)
+      if(v != null && isFinite(v)){ sum += v; cnt++; }
+    const meanZ = cnt ? sum / cnt : 0;
     let k = 0;
     for(let iy = 0; iy < t.rows; iy++)
       for(let ix = 0; ix < t.cols; ix++){
         const v = t.z[iy][ix];
-        pos.setZ(k++, v == null ? 0 : v);
+        pos.setZ(k++, (v == null || !isFinite(v)) ? meanZ : v);
       }
     geo.computeVertexNormals();
     geo.rotateX(-Math.PI/2);
@@ -4541,6 +4554,21 @@ function admConcColour(t){
   return [214/255, 40/255, 40/255];
 }
 
+function admTerrainAt(t3, fy, fx){
+  // bilinear sample of the terrain grid, with holes filled from the local
+  // mean so the surface never splits onto two vertical datums
+  if(!t3 || !t3.z) return null;
+  const gy = Math.max(0, Math.min(t3.rows - 1, fy * (t3.rows - 1)));
+  const gx = Math.max(0, Math.min(t3.cols - 1, fx * (t3.cols - 1)));
+  const y0 = Math.floor(gy), x0 = Math.floor(gx);
+  const y1 = Math.min(t3.rows - 1, y0 + 1), x1 = Math.min(t3.cols - 1, x0 + 1);
+  const q = [[y0,x0],[y0,x1],[y1,x0],[y1,x1]]
+    .map(([a,b]) => (t3.z[a] ? t3.z[a][b] : null))
+    .filter(v => v != null && isFinite(v));
+  if(!q.length) return null;
+  return q.reduce((s,v) => s+v, 0) / q.length;
+}
+
 function admDrapeConcentration(grid){
   if(!_S3 || !window.THREE || !grid || !grid.values) return false;
   const vals = grid.values;
@@ -4579,14 +4607,10 @@ function admDrapeConcentration(grid){
       alphas[k] = rr > Rlim ? 0.0
                 : (rr > Rlim * 0.94 ? (Rlim - rr) / (Rlim * 0.06) : 1.0);
       // sit just above the terrain so it is visible but not z-fighting
-      let zt = 2.0;
-      if(t3 && t3.z){
-        const ty = Math.min(t3.rows - 1, Math.round(iy / (rows - 1) * (t3.rows - 1)));
-        const tx = Math.min(t3.cols - 1, Math.round(ix / (cols - 1) * (t3.cols - 1)));
-        const tv = t3.z[ty] && t3.z[ty][tx];
-        if(tv != null) zt = tv + 2.0;
-      }
-      pos.setZ(k, zt);
+      // one consistent datum: terrain height where known, the grid mean where
+      // not, so the surface is continuous instead of stepped
+      const tv = admTerrainAt(t3, iy / (rows - 1), ix / (cols - 1));
+      pos.setZ(k, (tv == null ? (_S3.terrainMean || 0) : tv) + 2.0);
       k++;
     }
   }
@@ -4610,6 +4634,46 @@ function admDrapeConcentration(grid){
   _S3.scene.add(mesh);
   _S3.conc = mesh;
 
+  // stacked upper slices: the plume is a 3D field, and a single ground slice
+  // hides the fact that most of the mass is usually aloft
+  (_S3.concLevels || []).forEach(m2 => _S3.scene.remove(m2));
+  _S3.concLevels = [];
+  (grid.levels || []).forEach(L => {
+    if(!L.values || L.height_m <= 2) return;
+    const rr2 = L.rows, cc2 = L.cols;
+    const g2 = new THREE.PlaneGeometry(size, size, cc2 - 1, rr2 - 1);
+    const col2 = new Float32Array(rr2 * cc2 * 3);
+    const al2 = new Float32Array(rr2 * cc2);
+    const p2 = g2.attributes.position;
+    let kk = 0;
+    for(let iy = 0; iy < rr2; iy++){
+      for(let ix = 0; ix < cc2; ix++){
+        const v = L.values[iy][ix];
+        const t = v > 0 ? (Math.log10(v) - lo) / Math.max(1e-9, hi - lo) : 0;
+        const c = admConcColour(t);
+        col2[kk*3] = c[0]; col2[kk*3+1] = c[1]; col2[kk*3+2] = c[2];
+        const px = -Rlim + (ix / (cc2 - 1)) * size;
+        const py = -Rlim + (iy / (rr2 - 1)) * size;
+        const rr3 = Math.hypot(px, py);
+        // only show where there is something to see, else the stack becomes
+        // an opaque sandwich hiding the buildings
+        al2[kk] = (rr3 > Rlim) ? 0 : Math.max(0, Math.min(0.75, t * 0.95));
+        const tv2 = admTerrainAt(t3, iy / (rr2 - 1), ix / (cc2 - 1));
+        p2.setZ(kk, (tv2 == null ? (_S3.terrainMean || 0) : tv2) + L.height_m);
+        kk++;
+      }
+    }
+    g2.setAttribute('color', new THREE.BufferAttribute(col2, 3));
+    g2.setAttribute('alpha', new THREE.BufferAttribute(al2, 1));
+    g2.rotateX(-Math.PI/2);
+    const m3 = new THREE.MeshBasicMaterial({vertexColors:true, transparent:true,
+      opacity:0.5, side:THREE.DoubleSide, depthWrite:false});
+    m3.onBeforeCompile = mat.onBeforeCompile;
+    const mesh2 = new THREE.Mesh(g2, m3);
+    _S3.scene.add(mesh2);
+    _S3.concLevels.push(mesh2);
+  });
+
   // legend
   const g = document.getElementById('admSceneLegend');
   if(g){
@@ -4622,7 +4686,12 @@ function admDrapeConcentration(grid){
       `<span class="ramp" style="background:linear-gradient(90deg,${stops})"></span>` +
       `<span>${mx.toPrecision(3)}</span></div>` +
       `<span class="per">Concentration draped on the terrain (log scale). ` +
-      `Buildings and roads remain visible above it.</span>`;
+      `Buildings and roads remain visible above it.` +
+      ((grid.levels || []).length
+        ? ` Plus ${grid.levels.length} slices aloft at ` +
+          grid.levels.map(L => L.height_m + ' m').join(', ') +
+          ' \u2014 the plume is a 3D field, not one sheet.'
+        : '') + `</span>`;
   }
   return true;
 }
@@ -4898,6 +4967,9 @@ async function admRun(){
       grid: true,
       grid_n: 60,
       grid_radius_m: SCENE ? SCENE.radius_m : 500,
+      grid_levels: $('admVol').checked
+        ? [1.5, 10, 25, 50, 100].filter(z => z <= Math.max(60, (parseFloat($('admH').value)||12) * 4))
+        : [],
       downwash: true,
       // individual building geometry from the extracted scene, so each
       // building's own height affects the plume
