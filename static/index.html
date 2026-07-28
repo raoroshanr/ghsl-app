@@ -434,6 +434,12 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
 #admDrawerHead .per{display:block;font-size:10.5px;color:#8A968F;margin-top:2px}
 #admDrawerHead button{padding:4px 9px;font-size:11px}
 #admDrawerBody{flex:1 1 auto;overflow-y:auto;padding:12px 14px 20px}
+#admScene3D{width:100%;height:320px;background:#0B1310;border:1px solid #2A3A33;
+  border-radius:8px;position:relative;overflow:hidden}
+#admScenePane{margin-bottom:12px}
+.admLegend{display:flex;align-items:center;gap:8px;margin-top:5px}
+.admLegend .ramp{flex:1;height:12px;border-radius:3px;border:1px solid #2A3A33}
+.admLegend span{font-size:10px;color:#9FB0A8;white-space:nowrap}
 .admFace{display:flex;align-items:center;gap:8px;margin-bottom:4px}
 .admFaceName{flex:0 0 46px;font-size:11.5px;font-weight:700;color:#E7EDE8}
 .admBar{flex:1;height:16px;background:#12201B;border:1px solid #2A3A33;
@@ -1224,7 +1230,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v117</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v118</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1241,7 +1247,15 @@ label.chk input{width:auto}
         <button id="admDrawerClose" class="ghost">&#10005;</button>
       </div>
     </div>
-    <div id="admDrawerBody"></div>
+    <div id="admDrawerBody">
+      <div id="admScenePane" hidden>
+        <div class="paneLabel" id="admSceneTitle">3D scene</div>
+        <div id="admScene3D"></div>
+        <div id="admSceneLegend" class="hint" style="font-size:10.5px;margin-top:4px"></div>
+        <div id="admSceneMeta" class="hint" style="font-size:10.5px"></div>
+      </div>
+      <div id="admResults"></div>
+    </div>
   </div>
 
   <div id="roiPanel">
@@ -1352,7 +1366,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v117";
+const DSG_VERSION = "deepseego-v118";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4245,7 +4259,8 @@ function drawSunPath(){
    provenance, so the inputs to the dispersion run are inspectable before the
    model is run rather than being invisible defaults.
 --------------------------------------------------------------------------- */
-let SCENE = null, _three = null, _sceneAnim = null;
+let SCENE = null, _sceneAnim = null;
+let _S3 = null;   // {scene, cam, rend, ground, conc}
 
 function ensureThree(){
   if(window.THREE) return Promise.resolve();
@@ -4300,6 +4315,17 @@ async function admSceneRun(){
 }
 
 function admRenderScenePanel(j){
+  $('admScenePane').hidden = false;
+  $('admSceneTitle').textContent = `3D scene \u00b7 ${j.radius_m} m radius`;
+  $('admSceneMeta').innerHTML =
+    (j.scene.building_count === 0
+      ? `<span style="color:#E9C46A">No buildings returned` +
+        (j.scene.building_error ? ` \u2014 ${j.scene.building_error}` : '') + `</span>`
+      : `${j.scene.building_count} buildings from <b>${j.scene.building_source}</b>` +
+        (j.scene.height_stats
+          ? ` \u00b7 heights ${j.scene.height_stats.min}\u2013${j.scene.height_stats.max} m ` +
+            `(${j.scene.height_stats.individual} individually measured)` : '')) +
+    ` \u00b7 ${j.scene.road_count} roads \u00b7 drag to orbit, scroll to zoom`;
   const d = j.derived, b = j.built, t = j.terrain;
   const lulcRows = j.lulc.slice(0, 8).map(l =>
     `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;
@@ -4322,24 +4348,8 @@ function admRenderScenePanel(j){
     ? Math.max(d.z0_morphometric_m, d.z0_from_landcover_m) /
       Math.max(1e-6, Math.min(d.z0_morphometric_m, d.z0_from_landcover_m)) : 1;
 
-  $('admDrawerBody').innerHTML =
-    `<div class="paneLabel">3D scene \u00b7 ${j.radius_m} m radius</div>` +
-    (j.scene.building_count === 0
-      ? `<div class="mmVerdict warn" style="font-size:11px">No buildings returned` +
-        (j.scene.building_error ? ` \u2014 ${j.scene.building_error}` : '') +
-        `. The 3D view will show terrain and roads only.</div>`
-      : `<div class="hint" style="font-size:10.5px">${j.scene.building_count} buildings ` +
-        `from <b>${j.scene.building_source}</b>` +
-        (j.scene.height_stats
-          ? ` \u00b7 heights ${j.scene.height_stats.min}\u2013${j.scene.height_stats.max} m ` +
-            `(mean ${j.scene.height_stats.mean}), ${j.scene.height_stats.individual} with ` +
-            `individually measured heights` : '') + `</div>`) +
-    `<div id="admScene3D" style="width:100%;height:340px;background:#0B1310;
-       border:1px solid #2A3A33;border-radius:8px;position:relative">
-       <div style="position:absolute;bottom:6px;left:8px;font-size:10px;color:#8A968F">
-         drag to orbit \u00b7 scroll to zoom</div></div>` +
-
-    `<div class="paneLabel" style="margin-top:12px">Derived model inputs</div>` +
+  $('admResults').innerHTML =
+    `<div class="paneLabel">Derived model inputs</div>` +
     `<table class="aqTable">` +
     `<tr><td>Roughness z\u2080 \u2014 from land cover</td>` +
     `<td style="text-align:right">${d.z0_from_landcover_m} m</td></tr>` +
@@ -4416,7 +4426,10 @@ async function admDraw3D(j){
   let camAz = -0.6, camEl = 0.55, camR = R * 2.6;
   const rend = new THREE.WebGLRenderer({antialias:true});
   rend.setSize(W, H); rend.setPixelRatio(Math.min(2, window.devicePixelRatio||1));
+  host.innerHTML = '';
   host.appendChild(rend.domElement);
+  _S3 = {scene, rend, cam: null, conc: null, R: R,
+         terrain: j.scene.terrain || null};
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
   const sun = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -4508,7 +4521,89 @@ async function admDraw3D(j){
     place();
   }, {passive:false});
 
+  _S3.cam = cam;
   (function loop(){ _sceneAnim = requestAnimationFrame(loop); rend.render(scene, cam); })();
+}
+
+/* ---- drape the modelled concentration over the 3D scene ---------------- */
+// Colour ramp matching the map overlay, so the two read the same way.
+function admConcColour(t){
+  t = Math.max(0, Math.min(1, t));
+  const stops = [[0,[20,60,90]],[0.25,[42,157,143]],[0.5,[233,196,106]],
+                 [0.75,[228,120,60]],[1,[214,40,40]]];
+  for(let i = 0; i < stops.length - 1; i++){
+    const [a, ca] = stops[i], [b, cb] = stops[i+1];
+    if(t >= a && t <= b){
+      const f = (b === a) ? 0 : (t - a) / (b - a);
+      return ca.map((v, k) => (v + (cb[k] - v) * f) / 255);
+    }
+  }
+  return [214/255, 40/255, 40/255];
+}
+
+function admDrapeConcentration(grid){
+  if(!_S3 || !window.THREE || !grid || !grid.values) return false;
+  const vals = grid.values;
+  const rows = vals.length, cols = vals[0].length;
+  if(rows < 2 || cols < 2) return false;
+
+  // remove any previous concentration surface
+  if(_S3.conc){ _S3.scene.remove(_S3.conc); _S3.conc = null; }
+
+  // log scale: concentration spans orders of magnitude, so a linear ramp
+  // would show one hot pixel and nothing else
+  let mx = 0;
+  for(const r of vals) for(const v of r) if(isFinite(v) && v > mx) mx = v;
+  if(mx <= 0) return false;
+  const lo = Math.log10(Math.max(1e-4, mx * 1e-3)), hi = Math.log10(mx);
+
+  const size = 2 * grid.radius_m;
+  const geo = new THREE.PlaneGeometry(size, size, cols - 1, rows - 1);
+  const colours = new Float32Array(rows * cols * 3);
+  const pos = geo.attributes.position;
+  const t3 = _S3.terrain;
+  let k = 0;
+  for(let iy = 0; iy < rows; iy++){
+    for(let ix = 0; ix < cols; ix++){
+      const v = vals[iy][ix];
+      const t = v > 0 ? (Math.log10(v) - lo) / Math.max(1e-9, hi - lo) : 0;
+      const c = admConcColour(t);
+      colours[k*3] = c[0]; colours[k*3+1] = c[1]; colours[k*3+2] = c[2];
+      // sit just above the terrain so it is visible but not z-fighting
+      let zt = 2.0;
+      if(t3 && t3.z){
+        const ty = Math.min(t3.rows - 1, Math.round(iy / (rows - 1) * (t3.rows - 1)));
+        const tx = Math.min(t3.cols - 1, Math.round(ix / (cols - 1) * (t3.cols - 1)));
+        const tv = t3.z[ty] && t3.z[ty][tx];
+        if(tv != null) zt = tv + 2.0;
+      }
+      pos.setZ(k, zt);
+      k++;
+    }
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+  geo.rotateX(-Math.PI/2);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.62,
+    side: THREE.DoubleSide, depthWrite: false}));
+  _S3.scene.add(mesh);
+  _S3.conc = mesh;
+
+  // legend
+  const g = document.getElementById('admSceneLegend');
+  if(g){
+    const stops = [0,0.25,0.5,0.75,1].map(t => {
+      const c = admConcColour(t).map(v => Math.round(v*255));
+      return `rgb(${c[0]},${c[1]},${c[2]})`;
+    }).join(',');
+    g.innerHTML =
+      `<div class="admLegend"><span>${(mx*1e-3).toPrecision(2)}</span>` +
+      `<span class="ramp" style="background:linear-gradient(90deg,${stops})"></span>` +
+      `<span>${mx.toPrecision(3)}</span></div>` +
+      `<span class="per">Concentration draped on the terrain (log scale). ` +
+      `Buildings and roads remain visible above it.</span>`;
+  }
+  return true;
 }
 
 /* ---------- Air Dispersion Model (AERMOD formulation) ----------------------
@@ -4761,6 +4856,8 @@ function admDrawScene(){
 async function admRun(){
   if(!ADM.building) return toast('Pick the building of interest first');
   if(!ADM.sources.length) return toast('Add at least one emission source');
+  if(!SCENE) toast('Tip: run "Extract scene" first so buildings, terrain and ' +
+                   'derived inputs are used', 7000);
   const btn = $('admRun'); const o = btn.textContent;
   btn.disabled = true; btn.textContent = 'Running\u2026';
   Progress.start('Air dispersion model',
@@ -4835,12 +4932,16 @@ async function admRun(){
     const m = j.met;
 
     admOpen(`${j.pollutant.label} \u00b7 ${m.regime} \u00b7 ${m.wind_from} ${m.u_ref_ms} m/s`);
-    $('admDrawerBody').innerHTML =
+    // keep the 3D scene and drape the modelled field over it
+    let draped = false;
+    if(j.grid) draped = admDrapeConcentration(j.grid);
+    $('admResults').innerHTML =
       `<div class="mmVerdict warn" style="font-size:11px">${j.model}. Not for compliance.</div>` +
       (j.grid ? `<div class="paneLabel">Concentration map</div>` +
-        `<p class="srcNote">Drawn on the map at ${j.grid.receptor_height_m} m above ground, ` +
-        `\u00b1${j.grid.radius_m} m. Peak in the field ${j.grid.max} ${j.pollutant.unit}, ` +
-        `mean ${j.grid.mean}. ${j.grid.note}</p>` : '') +
+        `<p class="srcNote">Shown on the 2D map and` +
+        (draped ? ` <b>draped over the 3D scene above</b>` : ` (3D drape unavailable)`) +
+        `, at ${j.grid.receptor_height_m} m above ground over \u00b1${j.grid.radius_m} m. ` +
+        `Peak ${j.grid.max} ${j.pollutant.unit}, mean ${j.grid.mean}. ${j.grid.note}</p>` : '') +
       (j.downwash ? `<div class="mmVerdict ${j.downwash.applied ? 'ok' : 'warn'}" style="font-size:11px">` +
         (j.downwash.applied
           ? `Building downwash applied using <b>${j.downwash.buildings} individual buildings</b> from the extracted scene. ${j.downwash.note}`
@@ -4892,7 +4993,7 @@ async function admVerify(){
          <span class="per">expected ${t.expected} \u00b7 got ${t.got}</span>
          <div class="dxWhy">${t.why}</div></div></div>`).join('');
     admOpen('code verification');
-    $('admDrawerBody').innerHTML =
+    $('admResults').innerHTML =
       `<div class="paneLabel">Verification \u00b7 ${j.passed}/${j.total} passed</div>` +
       `<p class="srcNote">${j.explains}</p>${rows}`;
   }catch(e){ toast('Verify: ' + e.message, 9000); }
