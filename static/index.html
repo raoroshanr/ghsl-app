@@ -436,6 +436,19 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
 #admDrawerBody{flex:1 1 auto;overflow-y:auto;padding:12px 14px 20px}
 #admScene3D{width:100%;height:320px;background:#0B1310;border:1px solid #2A3A33;
   border-radius:8px;position:relative;overflow:hidden}
+#admSection{width:100%;height:240px;background:#0B1310;border:1px solid #2A3A33;
+  border-radius:8px;display:block}
+#admViewBar{margin-bottom:6px}
+.admViewModes{display:flex;gap:4px}
+.admViewModes button{flex:1;padding:5px 6px;font-size:11px;background:#12201B;
+  color:#9FB0A8;border:1px solid #2E3E37;border-radius:6px;cursor:pointer;
+  font-family:Arial,Helvetica,sans-serif}
+.admViewModes button:hover{background:#1D2D26;color:#E7EDE8}
+.admViewModes button.active{background:#0B5A49;color:#fff;border-color:#0B5A49}
+#admSliceRow{display:flex;align-items:center;gap:8px;margin-top:6px}
+#admSliceRow span{font-size:11px;color:#9FB0A8}
+#admSliceRow b{font-size:11px;color:#E9C46A;min-width:52px;text-align:right}
+#admSliceZ{flex:1;accent-color:#E9C46A}
 #admScenePane{margin-bottom:12px}
 .admLegend{display:flex;align-items:center;gap:8px;margin-top:5px}
 .admLegend .ramp{flex:1;height:12px;border-radius:3px;border:1px solid #2A3A33}
@@ -1082,7 +1095,7 @@ label.chk input{width:auto}
         <div><label>Bowen ratio</label><input type="text" id="admBowen" value="1.0"></div>
       </div>
 
-      <label class="slChk"><input type="checkbox" id="admVol"> Compute the field at several heights (3D plume, slower)</label>
+      <label class="slChk"><input type="checkbox" id="admVol" checked> Compute the field at several heights &mdash; enables the height slider (slower)</label>
       <button id="admRun" class="primary" style="width:100%;margin-top:10px">Run dispersion model</button>
       <div style="display:flex;gap:6px;margin-top:6px">
         <button id="admVerify" class="ghost" style="flex:1">Verify code</button>
@@ -1231,7 +1244,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v120</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v121</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1251,7 +1264,21 @@ label.chk input{width:auto}
     <div id="admDrawerBody">
       <div id="admScenePane" hidden>
         <div class="paneLabel" id="admSceneTitle">3D scene</div>
+        <div id="admViewBar" hidden>
+          <div class="admViewModes">
+            <button data-view="ground" class="active">Ground</button>
+            <button data-view="slice">Slice</button>
+            <button data-view="stack">Stack</button>
+            <button data-view="section">Section</button>
+          </div>
+          <div id="admSliceRow" hidden>
+            <span>Height</span>
+            <input type="range" id="admSliceZ" min="0" max="4" step="1" value="0">
+            <b id="admSliceLbl">1.5 m</b>
+          </div>
+        </div>
         <div id="admScene3D"></div>
+        <canvas id="admSection" hidden></canvas>
         <div id="admSceneLegend" class="hint" style="font-size:10.5px;margin-top:4px"></div>
         <div id="admSceneMeta" class="hint" style="font-size:10.5px"></div>
       </div>
@@ -1367,7 +1394,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v120";
+const DSG_VERSION = "deepseego-v121";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4538,6 +4565,103 @@ async function admDraw3D(j){
   (function loop(){ _sceneAnim = requestAnimationFrame(loop); rend.render(scene, cam); })();
 }
 
+/* ---- interactive view modes -------------------------------------------
+   Stacked translucent planes are hard to read. Four modes instead:
+     Ground  - the field at 1.5 m, draped on the terrain
+     Slice   - ONE plane you move up and down with a slider
+     Stack   - all levels at once (the previous behaviour)
+     Section - a vertical cut along the wind, which is how a plume is
+               conventionally read: distance downwind against height
+--------------------------------------------------------------------- */
+let ADM_VIEW = 'ground', ADM_GRID = null;
+
+function admSetView(v){
+  ADM_VIEW = v;
+  document.querySelectorAll('.admViewModes button').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === v));
+  $('admSliceRow').hidden = (v !== 'slice');
+  const sec = $('admSection'), sc3 = $('admScene3D');
+  if(sec) sec.hidden = (v !== 'section');
+  if(sc3) sc3.style.display = (v === 'section') ? 'none' : '';
+  if(v === 'section'){ admDrawSection(); return; }
+  admApplyView();
+}
+
+function admApplyView(){
+  if(!_S3) return;
+  const lv = _S3.concLevels || [];
+  if(_S3.conc) _S3.conc.visible = (ADM_VIEW === 'ground');
+  if(ADM_VIEW === 'stack'){
+    lv.forEach(m => m.visible = true);
+  } else if(ADM_VIEW === 'slice'){
+    const i = +$('admSliceZ').value;
+    lv.forEach((m, k) => m.visible = (k === i));
+    if(_S3.conc) _S3.conc.visible = (i === 0 && lv.length === 0);
+  } else {
+    lv.forEach(m => m.visible = false);
+  }
+}
+
+function admDrawSection(){
+  const cv = $('admSection');
+  const s = ADM_GRID && ADM_GRID.section;
+  if(!cv || !s || !s.values){ return; }
+  const W = cv.clientWidth || 420, H = 240;
+  cv.width = W * 2; cv.height = H * 2;            // crisp on retina
+  const g = cv.getContext('2d');
+  g.setTransform(2, 0, 0, 2, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const rows = s.values.length, cols = s.values[0].length;
+  const pad = {l: 44, r: 10, t: 10, b: 24};
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  let mx = 0;
+  for(const r of s.values) for(const v of r) if(v > mx) mx = v;
+  const lo = Math.log10(Math.max(1e-4, mx * 1e-4)), hi = Math.log10(Math.max(1e-3, mx));
+  // the field itself
+  const cw = pw / cols, chh = ph / rows;
+  for(let iz = 0; iz < rows; iz++){
+    for(let ix = 0; ix < cols; ix++){
+      const v = s.values[iz][ix];
+      if(v <= 0) continue;
+      const t = (Math.log10(v) - lo) / Math.max(1e-9, hi - lo);
+      if(t <= 0) continue;
+      const c = admConcColour(t).map(x => Math.round(x * 255));
+      g.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${Math.min(1, 0.15 + t)})`;
+      // rows are ascending height, so draw from the bottom up
+      g.fillRect(pad.l + ix * cw, pad.t + ph - (iz + 1) * chh,
+                 Math.ceil(cw) + 0.5, Math.ceil(chh) + 0.5);
+    }
+  }
+  // ground line and axes
+  g.strokeStyle = '#5c6b64'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(pad.l, pad.t + ph); g.lineTo(pad.l + pw, pad.t + ph);
+  g.moveTo(pad.l, pad.t); g.lineTo(pad.l, pad.t + ph); g.stroke();
+  g.fillStyle = '#9FB0A8';
+  g.font = '10px Arial, Helvetica, sans-serif';
+  const zmax = s.z_m[s.z_m.length - 1];
+  [0, 0.5, 1].forEach(f => {
+    const zv = Math.round(zmax * f);
+    g.fillText(zv + ' m', 4, pad.t + ph - f * ph + 3);
+  });
+  const xr = s.x_m[s.x_m.length - 1];
+  [[0, '-' + Math.round(xr) + ' m'], [0.5, '0'], [1, '+' + Math.round(xr) + ' m']]
+    .forEach(([f, lab]) => g.fillText(lab, pad.l + f * pw - 14, H - 8));
+  g.fillStyle = '#8A968F';
+  g.fillText('upwind \u2190   distance along the wind   \u2192 downwind',
+             pad.l + 6, pad.t + 11);
+  // release heights, so the plume origin is obvious
+  g.strokeStyle = '#E9C46A'; g.setLineDash([4, 3]);
+  (s.release_heights_m || []).forEach(hz => {
+    const y = pad.t + ph - (hz / zmax) * ph;
+    if(y > pad.t && y < pad.t + ph){
+      g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + pw, y); g.stroke();
+      g.fillStyle = '#E9C46A';
+      g.fillText(Math.round(hz) + ' m release', pad.l + pw - 78, y - 3);
+    }
+  });
+  g.setLineDash([]);
+}
+
 /* ---- drape the modelled concentration over the 3D scene ---------------- */
 // Colour ramp matching the map overlay, so the two read the same way.
 function admConcColour(t){
@@ -4771,6 +4895,14 @@ async function admInit(){
     $('admBldg').textContent = 'Pick a point \u2014 the footprint comes from OpenStreetMap.';
     admClose(); admRenderSources();
   });
+  document.querySelectorAll('.admViewModes button').forEach(b =>
+    b.addEventListener('click', () => admSetView(b.dataset.view)));
+  $('admSliceZ').addEventListener('input', () => {
+    const lv = (ADM_GRID && ADM_GRID.levels) || [];
+    const i = +$('admSliceZ').value;
+    $('admSliceLbl').textContent = lv[i] ? lv[i].height_m + ' m' : '1.5 m';
+    admApplyView();
+  });
   $('admDrawerClose').addEventListener('click', admClose);
   $('admDrawerWide').addEventListener('click', () =>
     $('admDrawer').classList.toggle('wide'));
@@ -4967,9 +5099,14 @@ async function admRun(){
       grid: true,
       grid_n: 60,
       grid_radius_m: SCENE ? SCENE.radius_m : 500,
+      // heights scaled to the building, so the slider spans what matters:
+      // pavement, mid-facade, roof, just above roof, and well aloft
       grid_levels: $('admVol').checked
-        ? [1.5, 10, 25, 50, 100].filter(z => z <= Math.max(60, (parseFloat($('admH').value)||12) * 4))
+        ? (() => { const H = Math.max(6, parseFloat($('admH').value) || 12);
+                   return [1.5, H*0.5, H, H*1.5, H*3].map(v => Math.round(v*10)/10); })()
         : [],
+      section: true,
+      section_top_m: Math.max(80, (parseFloat($('admH').value) || 12) * 8),
       downwash: true,
       // individual building geometry from the extracted scene, so each
       // building's own height affects the plume
@@ -5027,7 +5164,23 @@ async function admRun(){
     admOpen(`${j.pollutant.label} \u00b7 ${m.regime} \u00b7 ${m.wind_from} ${m.u_ref_ms} m/s`);
     // keep the 3D scene and drape the modelled field over it
     let draped = false;
+    ADM_GRID = j.grid || null;
     if(j.grid) draped = admDrapeConcentration(j.grid);
+    if(j.grid){
+      $('admViewBar').hidden = false;
+      const lv = j.grid.levels || [];
+      const sl = $('admSliceZ');
+      sl.max = String(Math.max(0, lv.length - 1));
+      sl.value = '0';
+      $('admSliceLbl').textContent = lv[0] ? lv[0].height_m + ' m' : '1.5 m';
+      // no extra levels -> only Ground and Section make sense
+      document.querySelectorAll('.admViewModes button').forEach(b => {
+        b.disabled = (!lv.length && (b.dataset.view === 'slice' ||
+                                     b.dataset.view === 'stack'));
+        b.style.opacity = b.disabled ? '.4' : '';
+      });
+      admSetView(lv.length ? 'slice' : 'ground');
+    }
     const warnHtml = (j.warnings || []).map(w =>
       `<div class="mmVerdict ${w.level === 'high' ? 'warn' : 'warn'}"
          style="font-size:11px;${w.level === 'high'
