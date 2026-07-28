@@ -730,7 +730,6 @@ label.chk input{width:auto}
       <button data-tab="adv">Zonal Analysis</button>
       <button data-tab="slope">Slope Analysis</button>
       <button data-tab="weather">Weather</button>
-      <button data-tab="aq">Air</button>
       <button data-tab="adm">Air Dispersion Model</button>
       <button data-tab="thermal">Heat</button>
       <button data-tab="sunlight">Sun</button>
@@ -1017,92 +1016,6 @@ label.chk input{width:auto}
     </section>
     </div><!-- /tab-weather -->
 
-    <div id="tab-aq" hidden>
-    <section>
-      <h2>Live Air Quality</h2>
-      <p class="hint">Real-time air quality at a point, from multiple providers. Open-Meteo works with no key. Others activate when their API key is set as a Cloud Run environment variable &mdash; the badge shows which are ready.</p>
-      <div id="aqStatus" class="hint" style="min-height:20px">No point selected.</div>
-      <label class="fld">Providers</label>
-      <div id="aqProviders"></div>
-      <button id="aqRun" class="primary" style="margin-top:8px" disabled>Get live air quality</button>
-      <p class="hint">Source scan covers a fixed 500 m radius around the point — every road and mapped feature within it.</p>
-      <label class="fld" for="dispStability" style="margin-top:8px">Dispersion &mdash; atmospheric stability</label>
-      <select id="dispStability">
-        <option value="" selected>Auto (from ERA5 sun &amp; wind)</option>
-        <option value="A">A &middot; very unstable</option>
-        <option value="B">B &middot; unstable</option>
-        <option value="C">C &middot; slightly unstable</option>
-        <option value="D">D &middot; neutral</option>
-        <option value="E">E &middot; stable</option>
-        <option value="F">F &middot; very stable</option>
-      </select>
-
-      <div class="stepH" style="margin-top:16px">Advanced dispersion model</div>
-      <p class="hint">Multi-species Gaussian plume with editable emission rates, stack parameters and time-of-day schedules. Every result is traceable to the numbers you set.</p>
-
-      <label class="fld" for="dxSpecies">Pollutant</label>
-      <select id="dxSpecies"></select>
-
-      <label class="fld" for="dxWindMode">Wind</label>
-      <select id="dxWindMode">
-        <option value="current" selected>Current (live)</option>
-        <option value="climatology">Long-term climatology (ERA5)</option>
-        <option value="manual">Enter manually</option>
-      </select>
-      <div id="dxWindManual" hidden>
-        <div class="llRow">
-          <input type="text" id="dxWindSpd" placeholder="speed m/s">
-          <input type="text" id="dxWindDir" placeholder="from °">
-        </div>
-      </div>
-      <div id="dxMonthRow" hidden>
-        <label class="fld" for="dxMonth">Month (climatology)</label>
-        <select id="dxMonth">
-          <option value="">Annual mean</option>
-        </select>
-      </div>
-      <button id="dxRose" class="ghost" style="width:100%;margin-top:6px">Show wind rose for this point</button>
-
-      <label class="fld" for="dxHour">Hour of day &mdash; <span id="dxHourLbl">09:00</span></label>
-      <input type="range" id="dxHour" min="0" max="23" step="1" value="9">
-
-      <label class="fld" for="dxStab">Stability class</label>
-      <select id="dxStab">
-        <option value="" selected>Auto (from wind &amp; sun)</option>
-        <option value="A">A &mdash; very unstable</option>
-        <option value="B">B &mdash; unstable</option>
-        <option value="C">C &mdash; slightly unstable</option>
-        <option value="D">D &mdash; neutral</option>
-        <option value="E">E &mdash; slightly stable</option>
-        <option value="F">F &mdash; stable</option>
-      </select>
-
-      <label class="fld">Emission sources</label>
-      <div id="dxSources"></div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button id="dxAuto" class="ghost" style="flex:1">Find from OSM</button>
-        <button id="dxAdd" class="ghost" style="flex:1">+ Add source</button>
-      </div>
-
-      <label class="fld" for="dxBg">Background concentration (optional)</label>
-      <input type="text" id="dxBg" placeholder="e.g. 25 (regional baseline)">
-
-      <button id="dxRun" class="primary" style="width:100%;margin-top:10px">Run advanced model</button>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <button id="dxVerify" class="ghost" style="flex:1">Verify code</button>
-        <button id="dxValidate" class="ghost" style="flex:1">Validate vs data</button>
-      </div>
-      <div id="dxValBox" hidden>
-        <label class="fld" for="dxValData">Measured vs modelled pairs</label>
-        <p class="hint" style="font-size:10.5px">One pair per line: <code>observed, modelled</code>. Use your own sensor readings or a monitoring station.</p>
-        <textarea id="dxValData" rows="5" placeholder="42, 38&#10;55, 61&#10;30, 26"></textarea>
-        <button id="dxValRun" class="primary" style="width:100%;margin-top:6px">Compute validation statistics</button>
-      </div>
-      <button id="dxClear" class="ghost" style="width:100%;margin-top:6px">Clear model</button>
-      <div id="dxInfo" class="hint" style="min-height:18px"></div>
-    </section>
-    </div><!-- /tab-aq -->
-
     <div id="tab-adm" hidden>
     <section>
       <h2>Air Dispersion Model</h2>
@@ -1127,8 +1040,9 @@ label.chk input{width:auto}
         <button id="admAddArea" class="ghost" style="flex:1">+ Area</button>
       </div>
 
-      <label class="fld">3 &middot; Pollutant</label>
+      <label class="fld">3 &middot; Pollutant to model</label>
       <select id="admSpecies"></select>
+      <p class="hint" style="font-size:10.5px">Selects which species is transported. Each source has its <b>own emission rate for each pollutant</b> &mdash; set them in the source cards above. Changing this also changes the deposition velocity, decay rate and the limits compared against.</p>
 
       <label class="fld">4 &middot; Meteorology</label>
       <select id="admMet">
@@ -1141,8 +1055,15 @@ label.chk input{width:auto}
       </div>
       <label class="fld" for="admHour">Hour of day &mdash; <span id="admHourLbl">12:00</span></label>
       <input type="range" id="admHour" min="0" max="23" step="1" value="12">
+      <label class="fld" for="admSurface">5 &middot; Surface around the site</label>
+      <select id="admSurface"></select>
+      <p class="hint" id="admSurfaceNote" style="font-size:10.5px"></p>
+      <details style="margin-top:4px">
+        <summary style="cursor:pointer;font-size:11px;color:#7FD0BC">What do these mean?</summary>
+        <div id="admSurfaceHelp" class="hint" style="font-size:10.5px;margin-top:6px"></div>
+      </details>
       <div class="dxGrid" style="margin-top:6px">
-        <div><label>Roughness z&#8320; (m)</label><input type="text" id="admZ0" value="1.0"></div>
+        <div><label>Roughness z&#8320; (m)</label><input type="text" id="admZ0" value="0.5"></div>
         <div><label>Bowen ratio</label><input type="text" id="admBowen" value="1.0"></div>
       </div>
 
@@ -1294,7 +1215,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v114</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v115</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1422,7 +1343,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v114";
+const DSG_VERSION = "deepseego-v115";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1848,7 +1769,6 @@ function resetForNewAnalysis(){
   try { if(typeof searchPin !== 'undefined' && searchPin){ map.removeLayer(searchPin); searchPin = null; } } catch(e){}
   try { if(ghslLayer){ map.removeLayer(ghslLayer); ghslLayer = null; } } catch(e){}
   try { if(typeof resetFragments === 'function') resetFragments(); } catch(e){}
-  try { if(typeof clearDispersion === 'function') clearDispersion(); } catch(e){}
   // reset the wizard + close the analysis pane
   try { if(typeof wiz !== 'undefined'){ wiz.lines = []; wiz.buffer = null;
         wiz.reach = null; wiz.zoneRuns = null; } } catch(e){}
@@ -3068,7 +2988,6 @@ map.on('click', ev => {
   if(mapClickMode === 'noPick'){ mapClickMode = null; _noiseTab.setPoint(lat, lng); return; }
   if(mapClickMode === 'aqPick'){
     mapClickMode = null;
-    aqState.lat = lat; aqState.lon = lng;
     aqLayer.clearLayers();
     L.circleMarker([lat, lng], {radius: 6, color: '#00B4D8',
       fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer);
@@ -3849,289 +3768,12 @@ function mathModelHtml(mm){
 const dxLayer = L.featureGroup().addTo(map);
 let DX_META = null, DX_SOURCES = [], dxOverlay = null;
 
-async function dxInit(){
-  if(dxInit._done) return; dxInit._done = true;
-  try{
-    DX_META = await api('/dispersion_meta');
-  }catch(e){ $('dxInfo').textContent = 'Could not load model metadata: ' + e.message; return; }
 
-  $('dxSpecies').innerHTML = DX_META.pollutants
-    .map(p => `<option value="${p.key}">${p.label} (${p.unit})</option>`).join('');
-  const M = ['January','February','March','April','May','June','July',
-             'August','September','October','November','December'];
-  $('dxMonth').innerHTML = '<option value="">Annual mean</option>' +
-    M.map((m, i) => `<option value="${i+1}">${m}</option>`).join('');
 
-  $('dxWindMode').addEventListener('change', () => {
-    const v = $('dxWindMode').value;
-    $('dxWindManual').hidden = v !== 'manual';
-    $('dxMonthRow').hidden = v !== 'climatology';
-  });
-  $('dxHour').addEventListener('input', () => {
-    $('dxHourLbl').textContent =
-      String($('dxHour').value).padStart(2, '0') + ':00';
-  });
-  $('dxAdd').addEventListener('click', () => {
-    if(aqState.lat == null) return toast('Pick a point in the Air tab first');
-    DX_SOURCES.push({lat: aqState.lat, lon: aqState.lon, kind: 'industrial',
-                     label: 'New source', schedule: 'continuous', enabled: true});
-    dxRenderSources();
-  });
-  $('dxAuto').addEventListener('click', dxAutoFind);
-  $('dxRun').addEventListener('click', dxRun);
-  $('dxVerify').addEventListener('click', dxVerify);
-  $('dxValidate').addEventListener('click', dxValidateToggle);
-  $('dxValRun').addEventListener('click', dxValidate);
-  $('dxRose').addEventListener('click', dxWindRose);
-  $('dxClear').addEventListener('click', () => {
-    dxLayer.clearLayers();
-    if(dxOverlay){ map.removeLayer(dxOverlay); dxOverlay = null; }
-    $('dxInfo').textContent = '';
-  });
-  dxRenderSources();
-}
 
-function dxRenderSources(){
-  const box = $('dxSources');
-  if(!DX_SOURCES.length){
-    box.innerHTML = '<span class="per">No sources yet. "Find from OSM" scans ' +
-      'for roads, industry and power plants nearby, or add one manually.</span>';
-    return;
-  }
-  box.innerHTML = '';
-  DX_SOURCES.forEach((s, i) => {
-    const t = (DX_META.source_types.find(x => x.key === s.kind)) || {};
-    const isLine = t.kind === 'line';
-    const d = document.createElement('div');
-    d.className = 'dxSrc';
-    d.innerHTML =
-      `<div class="dxSrcHead">
-         <input type="checkbox" ${s.enabled !== false ? 'checked' : ''} data-f="enabled">
-         <input type="text" value="${(s.label || '').replace(/"/g, '&quot;')}" data-f="label">
-         <button data-del="${i}">&#10005;</button>
-       </div>
-       <div class="dxGrid">
-         <div><label>Source type</label>
-           <select data-f="kind">${DX_META.source_types
-             .map(x => `<option value="${x.key}" ${x.key === s.kind ? 'selected' : ''}>${x.label}</option>`).join('')}
-           </select></div>
-         <div><label>Schedule</label>
-           <select data-f="schedule">${DX_META.schedules
-             .map(x => `<option value="${x.key}" ${x.key === s.schedule ? 'selected' : ''}>${x.label}</option>`).join('')}
-           </select></div>
-         ${isLine
-           ? `<div><label>Vehicles / day</label>
-                <input type="text" data-f="veh_per_day" value="${s.veh_per_day ?? t.veh_per_day ?? ''}"></div>
-              <div><label>Road length in cell (m)</label>
-                <input type="text" data-f="length_m" value="${s.length_m ?? 300}"></div>`
-           : `<div><label>Emission rate (g/s)</label>
-                <input type="text" data-f="q_g_s" placeholder="default ${(t.g_per_s || {})[$('dxSpecies').value] ?? '?'}" value="${s.q_g_s ?? ''}"></div>
-              <div><label>Stack height (m)</label>
-                <input type="text" data-f="h_m" value="${s.h_m ?? t.h_m ?? ''}"></div>
-              <div><label>Exit temp (K)</label>
-                <input type="text" data-f="temp_k" value="${s.temp_k ?? t.temp_k ?? ''}"></div>
-              <div><label>Exit velocity (m/s)</label>
-                <input type="text" data-f="vel_m_s" value="${s.vel_m_s ?? t.vel_m_s ?? ''}"></div>`}
-       </div>`;
-    d.querySelectorAll('[data-f]').forEach(el => {
-      el.addEventListener('change', () => {
-        const f = el.dataset.f;
-        if(el.type === 'checkbox') s[f] = el.checked;
-        else if(['label','kind','schedule'].includes(f)){
-          s[f] = el.value;
-          if(f === 'kind') dxRenderSources();
-        } else {
-          const v = parseFloat(el.value);
-          s[f] = isFinite(v) ? v : null;
-        }
-      });
-    });
-    d.querySelector('[data-del]').addEventListener('click', () => {
-      DX_SOURCES.splice(i, 1); dxRenderSources();
-    });
-    box.appendChild(d);
-  });
-}
 
-async function dxAutoFind(){
-  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
-  const b = $('dxAuto'); const o = b.textContent;
-  b.disabled = true; b.textContent = 'Scanning\u2026';
-  try{
-    const j = await api('/dispersion_advanced', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon,
-                            pollutant: $('dxSpecies').value,
-                            grid: 30, sources: []})});
-    DX_SOURCES = (j.sources || []).map(s => ({
-      lat: s.lat, lon: s.lon, kind: s.kind, label: s.label,
-      schedule: s.kind.startsWith('road_') ? 'traffic_urban' : 'continuous',
-      enabled: true}));
-    dxRenderSources();
-    toast(DX_SOURCES.length + ' sources found from OpenStreetMap', 5000);
-  }catch(e){ toast('Source scan: ' + e.message, 8000); }
-  b.disabled = false; b.textContent = o;
-}
 
-async function dxRun(){
-  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
-  const btn = $('dxRun'); const o = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Modelling\u2026';
-  Progress.start('Advanced dispersion',
-                 'Evaluating the plume grid for every source\u2026', 0);
-  try{
-    const mode = $('dxWindMode').value;
-    const body = {lat: aqState.lat, lon: aqState.lon,
-      pollutant: $('dxSpecies').value, sources: DX_SOURCES,
-      hour: +$('dxHour').value, grid: 90, radius_m: 2500,
-      wind_mode: mode === 'manual' ? 'current' : mode,
-      background: parseFloat($('dxBg').value) || 0};
-    if(mode === 'manual'){
-      body.wind_speed_ms = parseFloat($('dxWindSpd').value);
-      body.wind_from_deg = parseFloat($('dxWindDir').value);
-      if(!isFinite(body.wind_speed_ms) || !isFinite(body.wind_from_deg))
-        throw new Error('Enter both wind speed and direction');
-    }
-    if(mode === 'climatology' && $('dxMonth').value)
-      body.month = +$('dxMonth').value;
-    if($('dxStab').value) body.stability = $('dxStab').value;
 
-    const j = await api('/dispersion_advanced', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-
-    if(dxOverlay) map.removeLayer(dxOverlay);
-    dxOverlay = L.imageOverlay(j.png, j.bounds, {opacity: 0.62}).addTo(map);
-    dxLayer.clearLayers();
-    j.sources.forEach(s => L.circleMarker([s.lat, s.lon],
-        {radius: 5, color: '#fff', weight: 1.5,
-         fillColor: '#E4572E', fillOpacity: .9}).addTo(dxLayer)
-      .bindTooltip(`${s.label}<br>${s.q_g_s} g/s \u00b7 effective height ${s.effective_h_m} m`,
-                   {sticky: true}));
-    map.fitBounds(L.latLngBounds(j.bounds).pad(0.05));
-
-    const lim = Object.entries(j.fraction_of_limit || {})
-      .map(([k, v]) => `<tr><td>${k}</td><td style="text-align:right">${
-        v == null ? '\u2014' : (v >= 1 ? '<b style="color:#E4572E">' + v + '\u00d7</b>' : v + '\u00d7')
-      }</td></tr>`).join('');
-    const srcRows = j.sources.map(s =>
-      `<tr><td>${s.label}</td><td style="text-align:right">${s.q_g_s} g/s</td>` +
-      `<td style="text-align:right">${s.effective_h_m} m</td></tr>`).join('');
-    $('drawer').classList.add('open');
-    if(typeof paneMode === 'function') paneMode('site');
-    $('drawerSub').textContent = 'Dispersion \u00b7 ' + j.pollutant.label;
-    $('siteWrap').innerHTML =
-      `<div class="siteSec"><div class="paneLabel">${j.pollutant.label} \u00b7 modelled</div>` +
-      `<table class="aqTable">` +
-      `<tr><td>Peak concentration</td><td style="text-align:right"><b>${j.max} ${j.pollutant.unit}</b></td></tr>` +
-      `<tr><td>At your point</td><td style="text-align:right">${j.at_site} ${j.pollutant.unit}</td></tr>` +
-      `<tr><td>Wind</td><td style="text-align:right">${j.wind.speed_ms} m/s from ${j.wind.from}</td></tr>` +
-      `<tr><td>Stability class</td><td style="text-align:right">${j.wind.stability}</td></tr>` +
-      `<tr><td>Hour modelled</td><td style="text-align:right">${String(j.hour).padStart(2,'0')}:00</td></tr>` +
-      `</table>` +
-      `<div class="paneLabel" style="margin-top:10px">Peak as a fraction of each limit</div>` +
-      `<table class="aqTable">${lim}</table>` +
-      `<div class="paneLabel" style="margin-top:10px">Sources (ranked by contribution)</div>` +
-      `<table class="aqTable"><tr><td><b>Source</b></td><td style="text-align:right"><b>Rate</b></td>` +
-      `<td style="text-align:right"><b>Eff. height</b></td></tr>${srcRows}</table>` +
-      `<div class="paneLabel" style="margin-top:10px">Assumptions</div>` +
-      `<ul class="srcNote" style="margin:0;padding-left:16px">` +
-      j.assumptions.map(a => `<li>${a}</li>`).join('') + `</ul>` +
-      `<p class="srcNote">Wind source: ${j.wind.source}. ${j.pollutant.note}</p></div>` +
-      mathModelHtml(j.math_model);
-    $('dxInfo').innerHTML = `Peak ${j.max} ${j.pollutant.unit} \u00b7 ` +
-      `${j.sources.length} sources`;
-  }catch(e){
-    $('dxInfo').textContent = e.message;
-    toast('Dispersion: ' + e.message, 10000);
-  }
-  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
-}
-
-async function dxVerify(){
-  const btn = $('dxVerify'); const o = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Testing\u2026';
-  try{
-    const j = await api('/dispersion_verify');
-    const rows = j.tests.map(t =>
-      `<div class="dxTest ${t.pass ? 'ok' : 'bad'}">
-         <div><b>${t.pass ? '\u2713' : '\u2717'} ${t.name}</b>
-           ${t.detail}<br>
-           <span class="per">expected ${t.expected} \u00b7 got ${t.got}</span>
-           <div class="dxWhy">${t.why}</div>
-         </div></div>`).join('');
-    $('drawer').classList.add('open');
-    if(typeof paneMode === 'function') paneMode('site');
-    $('drawerSub').textContent = 'Model verification';
-    $('siteWrap').innerHTML =
-      `<div class="siteSec"><div class="paneLabel">Code verification \u00b7 ` +
-      `${j.passed}/${j.total} passed</div>` +
-      `<p class="srcNote">${j.explains}</p>${rows}</div>`;
-  }catch(e){ toast('Verify: ' + e.message, 8000); }
-  btn.disabled = false; btn.textContent = o;
-}
-
-function dxValidateToggle(){
-  const b = $('dxValBox');
-  b.hidden = !b.hidden;
-  if(!b.hidden) $('dxValData').focus();
-}
-async function dxValidate(){
-  const raw = $('dxValData').value;
-  if(!raw || !raw.trim()) return toast('Enter at least 2 observed/modelled pairs');
-  const obs = [], pred = [], labels = [];
-  raw.split(/\n+/).forEach((line, i) => {
-    const p = line.split(/[,\t;]+/).map(s => parseFloat(s.trim()));
-    if(p.length >= 2 && isFinite(p[0]) && isFinite(p[1])){
-      obs.push(p[0]); pred.push(p[1]); labels.push('pair ' + (i + 1));
-    }
-  });
-  if(obs.length < 2) return toast('Need at least 2 valid pairs');
-  try{
-    const j = await api('/dispersion_validate', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({observed: obs, predicted: pred, labels})});
-    const rows = j.metrics.map(m =>
-      `<div class="dxTest ${m.pass ? 'ok' : 'bad'}">
-         <div><b>${m.pass ? '\u2713' : '\u2717'} ${m.key} \u2014 ${m.name}: ${m.value}</b>
-           ideal ${m.ideal} \u00b7 acceptable ${m.criterion} \u2014 ${m.verdict}
-           <div class="dxWhy">${m.meaning}</div>
-         </div></div>`).join('');
-    $('drawer').classList.add('open');
-    if(typeof paneMode === 'function') paneMode('site');
-    $('drawerSub').textContent = 'Model validation';
-    $('siteWrap').innerHTML =
-      `<div class="siteSec"><div class="paneLabel">Validation against ` +
-      `${j.n_pairs} measurements</div>` +
-      `<table class="aqTable">` +
-      `<tr><td>Observed mean</td><td style="text-align:right">${j.observed_mean}</td></tr>` +
-      `<tr><td>Modelled mean</td><td style="text-align:right">${j.predicted_mean}</td></tr>` +
-      `</table>${rows}` +
-      `<p class="srcNote">${j.caveat}<br>${j.reference}</p></div>`;
-  }catch(e){ toast('Validate: ' + e.message, 9000); }
-}
-
-async function dxWindRose(){
-  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
-  try{
-    const j = await api('/wind_climatology?lat=' + aqState.lat + '&lon=' + aqState.lon);
-    const rows = j.monthly.map(m =>
-      `<tr><td>${m.month}</td><td style="text-align:right">${m.speed_ms} m/s</td>` +
-      `<td style="text-align:right">${m.from}</td></tr>`).join('');
-    $('drawer').classList.add('open');
-    if(typeof paneMode === 'function') paneMode('site');
-    $('drawerSub').textContent = 'Wind climatology';
-    $('siteWrap').innerHTML =
-      `<div class="siteSec"><div class="paneLabel">Wind climatology</div>` +
-      `<table class="aqTable">` +
-      `<tr><td>Mean speed (scalar)</td><td style="text-align:right"><b>${j.scalar_mean_ms} m/s</b></td></tr>` +
-      `<tr><td>Vector mean</td><td style="text-align:right">${j.vector_mean_ms} m/s from ${j.vector_from}</td></tr>` +
-      `<tr><td>Steadiness</td><td style="text-align:right">${j.steadiness}</td></tr>` +
-      `</table>` +
-      `<div class="paneLabel" style="margin-top:10px">By month</div>` +
-      `<table class="aqTable">${rows}</table>` +
-      `<p class="srcNote">${j.note}<br>${j.source}</p></div>`;
-  }catch(e){ toast('Wind climatology: ' + e.message, 9000); }
-}
 
 /* ---------- Go To Location (single, global place finder) --------------------
    Replaces the per-tab search boxes. It pans the map and drops a pin, and -
@@ -4149,7 +3791,6 @@ const GOTO_TARGETS = {
               if(typeof enableSiteRun === 'function') enableSiteRun();
               $('siteStatus').textContent = (lb ? lb + ' \u00b7 ' : '') +
                 la.toFixed(5) + ', ' + lo.toFixed(5); }},
-  aq:       {label: 'Air Quality',   set: (la, lo, lb) => aqSetPoint(la, lo, lb)},
   weather:  {label: 'Weather',       set: (la, lo, lb) => _weatherTab.setPoint(la, lo, lb)},
   thermal:  {label: 'Heat',          set: (la, lo, lb) => _thermalTab.setPoint(la, lo, lb)},
   sunlight: {label: 'Sun',           set: (la, lo, lb) => _sunlightTab.setPoint(la, lo, lb)},
@@ -4595,6 +4236,7 @@ function drawSunPath(){
    Results open in their own extendable drawer so the map stays usable.
 --------------------------------------------------------------------------- */
 const admLayer = L.featureGroup().addTo(map);
+let ADM_SPECIES = [], ADM_SURFACES = [];
 let ADM = {building: null, ring: null, sources: [], last: null};
 
 function admOpen(sub){
@@ -4607,14 +4249,38 @@ async function admInit(){
   if(admInit._done) return; admInit._done = true;
   try{
     const meta = await api('/dispersion_meta');
+    ADM_SPECIES = meta.pollutants;
     $('admSpecies').innerHTML = meta.pollutants
       .map(p => `<option value="${p.key}">${p.label} (${p.unit})</option>`).join('');
   }catch(e){ $('admInfo').textContent = e.message; }
+  try{
+    const sp = await api('/surface_presets');
+    ADM_SURFACES = sp.presets;
+    $('admSurface').innerHTML = sp.presets
+      .map(p => `<option value="${p.key}"${p.key==='suburban'?' selected':''}>${p.label}</option>`).join('');
+    const applySurface = () => {
+      const p = ADM_SURFACES.find(x => x.key === $('admSurface').value);
+      if(!p) return;
+      $('admZ0').value = p.z0;
+      $('admBowen').value = p.bowen;
+      $('admSurfaceNote').innerHTML =
+        `z\u2080 = <b>${p.z0} m</b> \u00b7 Bowen = <b>${p.bowen}</b> \u2014 ${p.note}`;
+    };
+    $('admSurface').addEventListener('change', applySurface);
+    applySurface();
+    const e = sp.explain;
+    $('admSurfaceHelp').innerHTML = Object.values(e).map(x =>
+      `<div style="margin-bottom:8px"><b>${x.name}</b> (${x.unit})<br>` +
+      `${x.what}<br><span class="per"><b>Why it matters:</b> ${x.why}</span><br>` +
+      `<span class="per"><b>Rule of thumb:</b> ${x.rule} Range: ${x.range}</span></div>`
+    ).join('') + `<span class="per">${sp.note}</span>`;
+  }catch(e){ /* presets are a convenience; the numeric fields still work */ }
   const M = ['January','February','March','April','May','June','July',
              'August','September','October','November','December'];
   $('admMonth').innerHTML = '<option value="">Annual mean</option>' +
     M.map((m,i) => `<option value="${i+1}">${m}</option>`).join('');
 
+  $('admSpecies').addEventListener('change', () => { admRenderSources(); admDrawScene(); });
   $('admMet').addEventListener('change', () => {
     $('admMonthRow').hidden = $('admMet').value !== 'climatology';
   });
@@ -4681,8 +4347,15 @@ async function admSetBuilding(lat, lon){
 function admAdd(kind){
   const st = ADM.building;
   const base = st ? [st.lat + 0.002, st.lon - 0.002] : [map.getCenter().lat, map.getCenter().lng];
+  // starting emission rates, roughly typical for each source type. Every
+  // value is editable - they are a starting point, not data.
+  const seed = kind === 'point'
+    ? {pm25: 0.5, pm10: 1.0, nox: 2.0, so2: 1.0, co: 1.0}
+    : kind === 'line'
+      ? {pm25: 0.05, pm10: 0.09, nox: 0.6, so2: 0.01, co: 2.0}
+      : {pm25: 0.3, pm10: 2.0, nox: 0.2, so2: 0.05, co: 0.5};
   const s = {kind, label: kind[0].toUpperCase() + kind.slice(1) + ' source',
-             q_g_s: kind === 'point' ? 1.0 : 5.0,
+             emissions: seed,
              h_m: kind === 'point' ? 15 : 1, schedule: 'continuous', enabled: true};
   if(kind === 'point'){ s.lat = base[0]; s.lon = base[1]; }
   if(kind === 'line'){ s.points = [[base[0], base[1]], [base[0]+0.001, base[1]+0.003]];
@@ -4713,8 +4386,10 @@ function admRenderSources(){
        </div>
        <div class="dxGrid">
          <div><label>Type</label><input type="text" value="${s.kind}" disabled></div>
-         <div><label>Emission (g/s)</label>
-           <input type="text" data-f="q_g_s" value="${s.q_g_s}"></div>
+         ${ADM_SPECIES.map(p => `
+         <div><label>${p.label} (g/s)</label>
+           <input type="text" data-em="${p.key}" value="${(s.emissions||{})[p.key] ?? ''}"
+                  placeholder="0"></div>`).join('')}
          <div><label>Release height (m)</label>
            <input type="text" data-f="h_m" value="${s.h_m}"></div>
          <div><label>Schedule</label>
@@ -4741,6 +4416,14 @@ function admRenderSources(){
         else { const v = parseFloat(el.value); s[f] = isFinite(v) ? v : null; }
         admDrawScene();
       }));
+    d.querySelectorAll('[data-em]').forEach(el =>
+      el.addEventListener('change', () => {
+        s.emissions = s.emissions || {};
+        const v = parseFloat(el.value);
+        if(isFinite(v) && v > 0) s.emissions[el.dataset.em] = v;
+        else delete s.emissions[el.dataset.em];
+        admDrawScene();
+      }));
     d.querySelector('[data-del]').addEventListener('click', () => {
       ADM.sources.splice(i,1); admRenderSources(); admDrawScene();
     });
@@ -4748,6 +4431,11 @@ function admRenderSources(){
   });
 }
 
+function admRate(s){
+  const k = $('admSpecies').value;
+  const v = (s.emissions || {})[k];
+  return v == null ? 0 : v;
+}
 function admDrawScene(){
   admLayer.clearLayers();
   if(ADM.ring){
@@ -4766,12 +4454,12 @@ function admDrawScene(){
     const col = s.enabled ? '#E4572E' : '#6b6b6b';
     if(s.kind === 'point'){
       const mk = L.marker([s.lat, s.lon], {draggable:true}).addTo(admLayer);
-      mk.bindTooltip(`${s.label} \u00b7 ${s.q_g_s} g/s`);
+      mk.bindTooltip(`${s.label} \u00b7 ${admRate(s)} g/s of ${$('admSpecies').value}`);
       mk.on('dragend', ev => { const p = ev.target.getLatLng();
         s.lat = p.lat; s.lon = p.lng; admDrawScene(); });
     } else if(s.kind === 'line'){
       L.polyline(s.points, {color:col, weight:4, opacity:.9}).addTo(admLayer)
-        .bindTooltip(`${s.label} \u00b7 ${s.q_g_s} g/s`);
+        .bindTooltip(`${s.label} \u00b7 ${admRate(s)} g/s of ${$('admSpecies').value}`);
       s.points.forEach((p, k) => {
         const mk = L.marker(p, {draggable:true}).addTo(admLayer);
         mk.on('dragend', ev => { const q = ev.target.getLatLng();
@@ -4780,7 +4468,7 @@ function admDrawScene(){
     } else {
       L.polygon(s.ring, {color:col, weight:2, fillColor:col,
                          fillOpacity:.22}).addTo(admLayer)
-        .bindTooltip(`${s.label} \u00b7 ${s.q_g_s} g/s`);
+        .bindTooltip(`${s.label} \u00b7 ${admRate(s)} g/s of ${$('admSpecies').value}`);
     }
   });
   if(admLayer.getLayers().length)
@@ -5548,9 +5236,9 @@ async function runSlope(){
 const BASKETS = {
   sat: {sub: ['explore'], default: 'explore'},
   urban: {sub: ['site', 'adv', 'slope'], default: 'site'},
-  climate: {sub: ['weather', 'aq', 'adm', 'thermal', 'sunlight', 'noise'], default: 'weather'},
+  climate: {sub: ['weather', 'adm', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'weather', 'aq', 'adm', 'thermal', 'sunlight', 'noise'];
+const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'weather', 'adm', 'thermal', 'sunlight', 'noise'];
 function wipeMapAnalysis(){
   // clear ALL analysis overlays so switching tabs leaves a clean map.
   // wrapped in try/catch: this may run at initial load before the layer
@@ -5564,8 +5252,7 @@ function wipeMapAnalysis(){
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
-    try { aqState.lat = null; aqState.lon = null; } catch(e){}
-    try { if(dispersionOverlay){ map.removeLayer(dispersionOverlay); dispersionOverlay = null; } } catch(e){}
+      try { if(dispersionOverlay){ map.removeLayer(dispersionOverlay); dispersionOverlay = null; } } catch(e){}
     [_thermalTab, _sunlightTab, _noiseTab, _weatherTab].forEach(t => {
       try { if(t){ t.state.lat = null; t.state.lon = null; } } catch(e){}
     });
@@ -5585,7 +5272,6 @@ function showTab(tab){
   document.querySelectorAll('#subBar button').forEach(x =>
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
-  if(tab === 'aq'){ clearAllClimatePoints(); aqInit(); dxInit(); }
   if(tab === 'adm') admInit();
   if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
@@ -6597,52 +6283,6 @@ function noiseInit(){ clearAllClimatePoints(); _noiseTab.init(); }
 
 /* ---------- Gaussian plume dispersion ---------- */
 let dispersionOverlay = null;
-function clearDispersion(){
-  if(dispersionOverlay){ map.removeLayer(dispersionOverlay); dispersionOverlay = null; }
-  if($('aqDisperseClear')) $('aqDisperseClear').hidden = true;
-}
-async function runDispersion(){
-  if(aqState.lat == null) return toast('Pick a point in the Air tab first');
-  const btn = $('aqDisperse'); const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Modelling plume\u2026';
-  Progress.start('Plume dispersion model',
-    'Scanning sources, fetching ERA5 wind, evaluating the grid\u2026', 0);
-  try{
-    const j = await api('/dispersion', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon, radius_m: 800,
-        stability: $('dispStability').value || null})});
-    if(!j.ok){ toast(j.note || 'Dispersion unavailable', 7000); btn.disabled=false; btn.textContent=orig; return; }
-    clearDispersion();
-    dispersionOverlay = L.imageOverlay(j.image, j.bounds,
-      {opacity: 0.72, pane: 'datapane', interactive: false}).addTo(map);
-    map.fitBounds(j.bounds);
-    if($('aqDisperseClear')) $('aqDisperseClear').hidden = false;
-    $('drawer').classList.add('open');
-    if(typeof paneMode === 'function') paneMode('site');
-    $('drawerSub').textContent = 'Plume dispersion \u00b7 ' +
-      aqState.lat.toFixed(4) + ', ' + aqState.lon.toFixed(4);
-    const windTxt = j.wind_from_deg == null ? '\u2014' :
-      j.wind_from_deg.toFixed(0) + '\u00b0 @ ' + j.wind_speed_ms + ' m/s';
-    const STAB = {A:'very unstable',B:'unstable',C:'slightly unstable',
-      D:'neutral',E:'stable',F:'very stable'}[j.stability] || '';
-    $('siteWrap').innerHTML =
-      `<div class="siteSec"><div class="paneLabel">Gaussian plume dispersion</div>` +
-      `<div class="chips">` +
-      `<span class="chip2"><b>Wind from</b> ${windTxt}</span>` +
-      `<span class="chip2"><b>Stability</b> ${j.stability} \u00b7 ${STAB}</span>` +
-      `<span class="chip2"><b>Sources</b> ${j.n_sources}</span></div>` +
-      `<div style="margin-top:8px;display:flex;align-items:center;gap:8px">` +
-      `<span class="per">Relative concentration</span>` +
-      `<span style="flex:1;height:12px;border-radius:3px;background:linear-gradient(90deg,#0B5A49,#00B4D8,#E9C46A,#E4572E)"></span>` +
-      `<span class="per">low \u2192 high</span></div>` +
-      `<p class="srcNote">${j.note}</p></div>` +
-      (typeof provenanceBlock === 'function'
-        ? provenanceBlock(['osm','era5_wind'], {lat: aqState.lat, lon: aqState.lon}) : '');
-  }catch(e){ toast('Dispersion: ' + e.message, 8000); }
-  finally { Progress.done(); }
-  btn.disabled = false; btn.textContent = orig;
-}
 
 /* ---------- Live Air Quality (multi-provider) ---------- */
 const AQ_PROVIDERS = [
@@ -6663,113 +6303,6 @@ function drawStationMarkers(goodProviders){
     }
   });
 }
-const aqState = {lat: null, lon: null};
-let aqStatus = null, aqInited = false;
-
-async function aqInit(){
-  if(aqInited) return; aqInited = true;
-  try{ aqStatus = await api('/air_quality_status'); }catch(e){ aqStatus = {}; }
-  $('aqProviders').innerHTML = AQ_PROVIDERS.map(([id, name, key]) => {
-    const ready = id === 'open-meteo' || (aqStatus && aqStatus[id]);
-    const badge = ready
-      ? '<span style="color:#84CC16">ready</span>'
-      : `<span style="color:#E4572E" title="set ${key} on Cloud Run">needs ${key}</span>`;
-    return `<label style="display:flex;align-items:center;gap:7px;font-size:12px;padding:2px 0">` +
-      `<input type="checkbox" value="${id}" ${id === 'open-meteo' ? 'checked' : ''} ` +
-      `${ready ? '' : 'disabled'}> ${name} \u2014 ${badge}</label>`;
-  }).join('');
-}
-function aqSetPoint(lat, lon, label){
-  aqState.lat = lat; aqState.lon = lon;
-  aqLayer.clearLayers();
-  L.circleMarker([lat, lon], {radius: 6, color: '#00B4D8',
-    fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer)
-    .bindPopup(label || (lat.toFixed(5) + ', ' + lon.toFixed(5))).openPopup();
-  $('aqRun').disabled = false;
-  if($('aqApportion')) $('aqApportion').disabled = false;
-  
-  $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
-    ' \u2014 or tap the map to adjust';
-}
-if($('aqPick')) $('aqPick').addEventListener('click', () => {
-  mapClickMode = 'aqPick';
-  $('aqStatus').textContent = 'Tap a location on the map\u2026';
-});
-$('aqRun').addEventListener('click', async () => {
-  if(aqState.lat == null) return;
-  const provs = [...$('aqProviders').querySelectorAll('input:checked')].map(i => i.value);
-  if(!provs.length) return toast('Select at least one provider');
-  const btn = $('aqRun');
-  btn.disabled = true; btn.textContent = 'Fetching\u2026';
-  $('drawer').classList.add('open');
-  if(typeof paneMode === 'function') paneMode('site');
-  $('drawerSub').textContent = 'Live Air Quality \u00b7 ' +
-    aqState.lat.toFixed(4) + ', ' + aqState.lon.toFixed(4);
-  $('siteWrap').hidden = false;
-  $('siteWrap').innerHTML = '<p class="hint">Querying providers\u2026</p>';
-  try{
-    const j = await api('/air_quality_live', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon, providers: provs})});
-    aiRegister('air_quality', 'Air quality (live, multi-provider)', j);
-    const entries = Object.entries(j.providers);
-    const good = entries.filter(([id, r]) => !r.error);
-    const bad = entries.filter(([id, r]) => r.error);
-    const pname = id => (AQ_PROVIDERS.find(p => p[0] === id) || [id, id])[1];
-
-    // header row of provider chips (AQI / station / distance summary)
-    const summary = good.map(([id, r]) => {
-      const bits = [];
-      if(r.aqi_us != null) bits.push('AQI ' + r.aqi_us + (r.category ? ' (' + r.category + ')' : ''));
-      if(r.aqi_owm_1to5 != null) bits.push('OWM ' + r.aqi_owm_1to5 + '/5');
-      if(r.station) bits.push(r.station + (r.distance_km != null ? ' \u00b7 ' + r.distance_km + ' km' : ''));
-      const col = r.color || '#7FD0BC';
-      return `<div class="siteSec" style="border-left:3px solid ${col};padding-left:8px">` +
-        `<b style="color:${col}">${pname(id)}</b>` +
-        `<div class="srcNote">${r.source || ''}${r.units ? ' \u00b7 ' + r.units : ''}</div>` +
-        (bits.length ? `<div class="srcNote">${bits.join(' \u00b7 ')}</div>` : '') + `</div>`;
-    }).join('');
-
-    // PIVOT: pollutants as rows, providers as columns
-    const POLL_ORDER = ['PM2.5', 'PM10', 'NO2', 'SO2', 'O3', 'CO', 'NH3'];
-    const allPolls = new Set();
-    good.forEach(([id, r]) => Object.keys(r.pollutants || {}).forEach(k => allPolls.add(k)));
-    const rows = [...allPolls].sort((a, b) => {
-      const ia = POLL_ORDER.indexOf(a), ib = POLL_ORDER.indexOf(b);
-      return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-    });
-    let pivotTable = '';
-    if(good.length && rows.length){
-      pivotTable = '<table class="aqTable"><tr><th>Pollutant</th>' +
-        good.map(([id, r]) => `<th style="text-align:right">${pname(id).split(' ')[0]}</th>`).join('') +
-        '</tr>' +
-        rows.map(pol => '<tr><td>' + pol + '</td>' +
-          good.map(([id, r]) => {
-            const v = (r.pollutants || {})[pol];
-            return `<td style="text-align:right">${v == null ? '\u2014' : (+v).toFixed(1)}</td>`;
-          }).join('') + '</tr>').join('') +
-        '</table>' +
-        '<p class="srcNote">Rows: pollutants \u00b7 columns: sources. Units differ by provider (see each source above) \u2014 model estimates (Open-Meteo) and station readings (OpenAQ) are not directly comparable; read the pattern.</p>';
-    }
-    const errs = bad.map(([id, r]) =>
-      `<p class="srcNote" style="color:#E4572E">${pname(id)}: ${r.error}</p>`).join('');
-
-    $('siteWrap').innerHTML =
-      `<div class="siteSec"><div class="paneLabel">Sources</div>${summary || '<p class="srcNote">No sources returned data.</p>'}</div>` +
-      (pivotTable ? `<div class="siteSec"><div class="paneLabel">Pollutant comparison (\u00b5g/m\u00b3 where applicable)</div>${pivotTable}</div>` : '') +
-      (errs ? `<div class="siteSec">${errs}</div>` : '');
-    const provKeys = [];
-    if(good.find(([id]) => id === 'open-meteo')) provKeys.push('openmeteo_aq');
-    if(good.find(([id]) => id === 'openweather')) provKeys.push('openweather');
-    if(good.find(([id]) => id === 'openaq')) provKeys.push('openaq');
-    if(provKeys.length) $('siteWrap').innerHTML += provenanceBlock(provKeys, {lat: aqState.lat, lon: aqState.lon});
-
-    // drop station markers for any provider that reported a station location
-    drawStationMarkers(good);
-  }catch(e){ toast('Air quality: ' + e.message, 9000); }
-  btn.disabled = false; btn.textContent = 'Get live air quality';
-});
-
 const sourceMarkers = L.featureGroup().addTo(map);
 let apportionChart = null;
 const SRC_ICON = cat => L.divIcon({className: 'srcPin',
