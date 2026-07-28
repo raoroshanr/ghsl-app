@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v114"
+APP_VERSION = "deepseego-v115"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5599,7 +5599,10 @@ class AermodSource(BaseModel):
     lon: Optional[float] = None
     points: list = []              # line: [[lat,lon],...]
     ring: list = []                # area: [[lat,lon],...]
-    q_g_s: float = 1.0
+    # Emission rate PER POLLUTANT, g/s. A source emits different species at
+    # very different rates, so one number cannot serve them all.
+    emissions: dict = {}           # {"pm25": 0.5, "nox": 2.0, ...}
+    q_g_s: float = 1.0             # legacy single-value fallback
     h_m: float = 10.0
     temp_k: Optional[float] = None
     vel_m_s: Optional[float] = None
@@ -5653,10 +5656,15 @@ def _met_for_run(q):
         src_note = "manually specified"
     elif q.met_mode == "climatology":
         wc = _wind_climatology(lat, lon, q.month)
-        u, wdir = wc["scalar_mean_ms"], wc["vector_from_deg"]
+        u = wc["scalar_mean_ms"]
+        wdir = wc["vector_from_deg"]
         solar, T = 450.0, 300.0
         src_note = ("ERA5-Land climatology 2015-2024"
                     + (f", {MONTHS[q.month-1]}" if q.month else ", annual"))
+        # carry the rose so the caller can run every direction, weighted
+        rose = [r for r in (wc.get("rose") or []) if (r.get("weight") or 0) > 0.01]
+        return_rose = {"rose": rose, "steadiness": wc.get("steadiness"),
+                       "vector_from_deg": wc["vector_from_deg"]}
     else:
         try:
             d = _get_json("https://api.open-meteo.com/v1/forecast?"
@@ -5694,6 +5702,11 @@ def _met_for_run(q):
     else:
         pbl = _pbl_stable(u, 10.0, q.surface_roughness_m, T, cloud)
         pbl["regime"] = "stable"
+    try:
+        pbl["rose"] = return_rose["rose"]
+        pbl["steadiness"] = return_rose["steadiness"]
+    except (NameError, KeyError, TypeError):
+        pbl["rose"] = None
     pbl.update({"u_ref": u, "wind_from_deg": wdir, "T_K": T,
                 "heat_flux_W_m2": round(H, 1), "solar_W_m2": round(solar_eff, 1),
                 "cloud_fraction": cloud, "source": src_note,
@@ -5739,7 +5752,12 @@ def aermod_run(q: AermodQuery):
                                        EMISSION_SCHEDULES["continuous"])
         factor = _norm_schedule(sched["hours"])[pbl["hour"]]
         s2 = dict(s)
-        s2["q_g_s"] = float(s.get("q_g_s") or 0.0) * factor
+        # per-pollutant rate; fall back to the single value if not supplied
+        em = s.get("emissions") or {}
+        base_q = em.get(q.pollutant)
+        if base_q is None:
+            base_q = s.get("q_g_s")
+        s2["q_g_s"] = _num(base_q, 0.0) * factor
         els = _source_elements(s2, mlat, mlon, q.lat, q.lon)
         rise = _plume_rise(u_ref, float(s.get("h_m") or 0.0),
                            s.get("temp_k"), s.get("vel_m_s"), s.get("diam_m"),
@@ -5750,14 +5768,33 @@ def aermod_run(q: AermodQuery):
         elements += els
         per_source.append({"index": si, "label": s.get("label") or s.get("kind"),
                            "kind": s.get("kind"), "q_g_s": round(s2["q_g_s"], 5),
+                           "rate_source": ("per-pollutant value for "
+                                           + q.pollutant
+                                           if (s.get("emissions") or {}).get(q.pollutant)
+                                           is not None else
+                                           "single fallback value"),
+                           "schedule_factor": round(factor, 3),
                            "plume_rise_m": round(rise, 1),
                            "elements": len(els), "contribution": 0.0})
     if not elements:
         raise HTTPException(status_code=400, detail="No enabled sources.")
 
+    # ---- wind directions to evaluate ----
+    # For a single hour there is one direction. For a climatology we run EVERY
+    # sector of the wind rose and weight by how often it blows - because a
+    # vector-mean direction over a monsoon year points somewhere the wind
+    # rarely actually comes from, and can miss every source entirely.
+    rose = pbl.get("rose")
+    if q.met_mode == "climatology" and rose:
+        dirs = [(float(r["from_deg"]), float(r["weight"])) for r in rose]
+        tw = sum(w for _, w in dirs) or 1.0
+        dirs = [(d, w / tw) for d, w in dirs]
+        dir_mode = "wind rose, frequency-weighted over %d sectors" % len(dirs)
+    else:
+        dirs = [(wdir, 1.0)]
+        dir_mode = "single direction"
+
     # ---- concentration at every facade receptor ----
-    th = math.radians(wdir)
-    wx, wy = -math.sin(th), -math.cos(th)          # downwind unit vector
     scale = 1e3 if q.pollutant == "co" else 1e6    # g/m3 -> mg or ug
     out_recs = []
     for r in recs:
@@ -5766,33 +5803,37 @@ def aermod_run(q: AermodQuery):
         z = r["z"]
         total = 0.0
         contrib = [0.0] * len(srcs)
-        for e in elements:
-            dx, dy = rx - e["x"], ry - e["y"]
-            xd = dx * wx + dy * wy                 # downwind distance
-            if xd <= 1.0:
-                continue                           # no upwind transport
-            yd = -dx * wy + dy * wx                # crosswind offset
-            sw, sv = _sigma_wv(max(e["he"], 2.0), pbl, conv)
-            sy, sz = _sigmas(xd, u_ref, sw, sv, zi, conv)
-            if conv:
-                c = _conc_cbl(yd, z, e["q"], u_ref, e["he"], sy, sz, zi,
-                              pbl["wstar"], xd)
-            else:
-                c = _conc_sbl(yd, z, e["q"], u_ref, e["he"], sy, sz, zi)
-            # meander: blend the coherent plume with a radially-spread limit
-            fp = _meander_weight(xd, u_ref, sv, conv)
-            rr = math.hypot(dx, dy)
-            c_rand = _conc_random(rr, z, e["q"], u_ref, e["he"], sz, zi, rr)
-            c = fp * c + (1.0 - fp) * c_rand
-            if spec.get("v_dep_m_s"):
-                c *= math.exp(-spec["v_dep_m_s"] * xd /
-                              (max(0.3, u_ref) * max(1e-6, sz) *
-                               math.sqrt(2 * math.pi)))
-            if spec.get("half_life_h"):
-                c *= math.exp(-math.log(2) * (xd / max(0.3, u_ref)) /
-                              (spec["half_life_h"] * 3600.0))
-            total += c
-            contrib[e["src"]] += c
+        for wdir_i, wgt in dirs:
+          th = math.radians(wdir_i)
+          wx, wy = -math.sin(th), -math.cos(th)      # downwind unit vector
+          for e in elements:
+              dx, dy = rx - e["x"], ry - e["y"]
+              xd = dx * wx + dy * wy                 # downwind distance
+              if xd <= 1.0:
+                  continue                           # no upwind transport
+              yd = -dx * wy + dy * wx                # crosswind offset
+              sw, sv = _sigma_wv(max(e["he"], 2.0), pbl, conv)
+              sy, sz = _sigmas(xd, u_ref, sw, sv, zi, conv)
+              if conv:
+                  c = _conc_cbl(yd, z, e["q"], u_ref, e["he"], sy, sz, zi,
+                                pbl["wstar"], xd)
+              else:
+                  c = _conc_sbl(yd, z, e["q"], u_ref, e["he"], sy, sz, zi)
+              # meander: blend the coherent plume with a radially-spread limit
+              fp = _meander_weight(xd, u_ref, sv, conv)
+              rr = math.hypot(dx, dy)
+              c_rand = _conc_random(rr, z, e["q"], u_ref, e["he"], sz, zi, rr)
+              c = fp * c + (1.0 - fp) * c_rand
+              if spec.get("v_dep_m_s"):
+                  c *= math.exp(-spec["v_dep_m_s"] * xd /
+                                (max(0.3, u_ref) * max(1e-6, sz) *
+                                 math.sqrt(2 * math.pi)))
+              if spec.get("half_life_h"):
+                  c *= math.exp(-math.log(2) * (xd / max(0.3, u_ref)) /
+                                (spec["half_life_h"] * 3600.0))
+              c *= wgt                              # frequency weight
+              total += c
+              contrib[e["src"]] += c
         val = total * scale + float(q.background or 0.0)
         for i, cv in enumerate(contrib):
             if i < len(per_source):
@@ -5850,6 +5891,8 @@ def aermod_run(q: AermodQuery):
                 "heat_flux_W_m2": pbl["heat_flux_W_m2"],
                 "z0_m": pbl["z0_m"], "hour": pbl["hour"],
                 "source": pbl["source"],
+                "direction_treatment": dir_mode,
+                "steadiness": pbl.get("steadiness"),
                 "solver_iterations": pbl["iterations"],
                 "solver_residual": pbl["residual"]},
         "elements": len(elements),
@@ -6064,6 +6107,98 @@ def _math_aermod(run):
             "Sources not immediately adjacent to the receptor building "
             "(no downwash treatment).",
         ],
+    }
+
+
+# Surface characteristics, in plain language. AERSURFACE derives these from
+# land cover; we offer the standard published values as named presets so the
+# user is choosing a described surface rather than typing an abstract number.
+SURFACE_PRESETS = [
+    {"key": "water", "label": "Open water / large lake",
+     "z0": 0.0002, "bowen": 0.1, "albedo": 0.08,
+     "note": "Almost frictionless, and nearly all heat goes into evaporation."},
+    {"key": "grass", "label": "Grassland, playing fields",
+     "z0": 0.03, "bowen": 0.4, "albedo": 0.18,
+     "note": "Short vegetation, moist."},
+    {"key": "crops", "label": "Cropland",
+     "z0": 0.1, "bowen": 0.5, "albedo": 0.18,
+     "note": "Irrigated crops evaporate strongly, so the Bowen ratio is low."},
+    {"key": "scrub", "label": "Scrub / dry open land",
+     "z0": 0.2, "bowen": 2.0, "albedo": 0.20,
+     "note": "Dry surface: most energy heats the air rather than evaporating."},
+    {"key": "trees", "label": "Forest / dense trees",
+     "z0": 1.0, "bowen": 0.6, "albedo": 0.14,
+     "note": "Very rough and transpiring."},
+    {"key": "suburban", "label": "Suburban / low-rise residential",
+     "z0": 0.5, "bowen": 1.0, "albedo": 0.16,
+     "note": "Mixed buildings and gardens. A sensible default for most Indian "
+             "residential areas."},
+    {"key": "urban", "label": "Dense urban / mid-rise",
+     "z0": 1.0, "bowen": 1.5, "albedo": 0.16,
+     "note": "Buildings dominate. Hard dry surfaces raise the Bowen ratio."},
+    {"key": "cbd", "label": "City centre / high-rise",
+     "z0": 2.0, "bowen": 2.0, "albedo": 0.16,
+     "note": "Maximum roughness; very little evaporation."},
+    {"key": "industrial", "label": "Industrial estate",
+     "z0": 0.8, "bowen": 2.5, "albedo": 0.18,
+     "note": "Large hard surfaces, little vegetation."},
+    {"key": "desert", "label": "Bare soil / sand",
+     "z0": 0.05, "bowen": 5.0, "albedo": 0.30,
+     "note": "Nothing to evaporate, so nearly all energy becomes sensible "
+             "heat - strongly convective by day."},
+]
+
+
+@app.get("/surface_presets")
+def surface_presets():
+    return {
+        "presets": SURFACE_PRESETS,
+        "explain": {
+            "z0": {
+                "name": "Surface roughness length (z\u2080)",
+                "unit": "m",
+                "what": ("The height above the ground at which wind speed "
+                         "falls to zero in the logarithmic profile. In plain "
+                         "terms: how much the surface trips up the wind."),
+                "why": ("It sets how much mechanical turbulence the surface "
+                        "generates. Rough ground (cities, forest) mixes "
+                        "pollution downward faster than smooth ground (water, "
+                        "grass), so the SAME emission gives different "
+                        "concentrations."),
+                "rule": ("Roughly 1/10th of the average obstacle height: 2 m "
+                         "trees \u2248 0.2 m, 10 m buildings \u2248 1 m."),
+                "range": "0.0002 m (water) to 2 m (high-rise city)",
+            },
+            "bowen": {
+                "name": "Bowen ratio (B\u2080)",
+                "unit": "dimensionless",
+                "what": ("The ratio of sensible heat (which warms the air) to "
+                         "latent heat (which evaporates water) at the "
+                         "surface."),
+                "why": ("It decides how much of the sun's energy goes into "
+                        "heating the air, which drives convective turbulence. "
+                        "A wet surface (B\u2080 low) stays cool and mixes "
+                        "weakly; a dry surface (B\u2080 high) heats the air "
+                        "and mixes strongly. This directly changes the "
+                        "boundary-layer regime."),
+                "rule": ("Wet or irrigated \u2248 0.1-0.5; typical mixed "
+                         "urban \u2248 1-2; dry bare ground \u2248 4-6. "
+                         "It also rises through a dry season."),
+                "range": "0.1 (open water) to 6 (desert)",
+            },
+            "albedo": {
+                "name": "Albedo",
+                "unit": "fraction",
+                "what": "The fraction of incoming sunlight reflected away.",
+                "why": ("What is not reflected is available to heat the "
+                        "surface and the air above it."),
+                "rule": "Most land 0.14-0.20; bright sand or concrete higher.",
+                "range": "0.08 (water) to 0.30 (bright sand)",
+            },
+        },
+        "note": ("EPA's AERSURFACE derives these from gridded land cover by "
+                 "wind sector and season. We use a single set for the domain, "
+                 "which is a simplification stated in the model panel."),
     }
 
 
