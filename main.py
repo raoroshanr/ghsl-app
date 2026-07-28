@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v120"
+APP_VERSION = "deepseego-v121"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5411,6 +5411,73 @@ def _sigmas(x, u, sw, sv, zi, convective):
     return sy, min(sz, 0.9 * zi)
 
 
+class _HeightRaster:
+    """A coarse raster of building heights, so a source-to-receptor path can be
+    tested against EVERY building it crosses rather than just the tallest one.
+
+    Without this, 400 individual heights were being reduced to a single wake -
+    which made the detailed height data almost pointless. With it, a plume that
+    threads a dense block is attenuated cumulatively, as it should be.
+    """
+
+    def __init__(self, buildings, radius_m, n=120):
+        self.n = n
+        self.R = max(50.0, float(radius_m))
+        self.cell = 2.0 * self.R / n
+        self.h = np.zeros((n, n), dtype=float)
+        for b in buildings or []:
+            try:
+                cx, cy = float(b["cx"]), float(b["cy"])
+                H = float(b.get("h") or 0.0)
+                if H <= 1.0:
+                    continue
+                # stamp the building's footprint as a square of equal area
+                half = max(self.cell * 0.5,
+                           0.5 * math.sqrt(max(4.0, float(b.get("area_m2") or 100.0))))
+                i0 = int((cy - half + self.R) / self.cell)
+                i1 = int((cy + half + self.R) / self.cell)
+                j0 = int((cx - half + self.R) / self.cell)
+                j1 = int((cx + half + self.R) / self.cell)
+                i0, i1 = max(0, i0), min(n - 1, i1)
+                j0, j1 = max(0, j0), min(n - 1, j1)
+                if i1 >= i0 and j1 >= j0:
+                    blk = self.h[i0:i1 + 1, j0:j1 + 1]
+                    np.maximum(blk, H, out=blk)
+            except (KeyError, TypeError, ValueError):
+                continue
+        self.any = bool(np.any(self.h > 0))
+
+    def at(self, x, y):
+        j = int((x + self.R) / self.cell)
+        i = int((y + self.R) / self.cell)
+        if 0 <= i < self.n and 0 <= j < self.n:
+            return self.h[i, j]
+        return 0.0
+
+    def path_blockage(self, sx, sy, rx, ry, he, zr, samples=24):
+        """Fraction of the path where buildings reach the plume centreline,
+        and how many separate obstacles are crossed."""
+        if not self.any:
+            return 0.0, 0
+        blocked = 0
+        obstacles = 0
+        prev = False
+        for k in range(1, samples + 1):
+            t = k / (samples + 1.0)
+            x = sx + (rx - sx) * t
+            y = sy + (ry - sy) * t
+            # plume centre height varies linearly between release and receptor
+            zc = he + (zr - he) * t
+            hb = self.at(x, y)
+            hit = hb > max(1.0, zc * 0.7)
+            if hit:
+                blocked += 1
+                if not prev:
+                    obstacles += 1
+            prev = hit
+        return blocked / float(samples), obstacles
+
+
 def _lee_shelter(ring_xy, he, H_bldg, sx, sy_src, rx, ry, wdir):
     """Does the building of interest itself stand between source and receptor?
 
@@ -5735,6 +5802,8 @@ class AermodQuery(BaseModel):
     # Concentration is a 3D field C(x,y,z). Sampling several heights shows the
     # plume rising over the buildings instead of one slice near the ground.
     grid_levels: list = []              # e.g. [1.5, 10, 20, 40]
+    section: bool = True                # vertical slice along the wind axis
+    section_top_m: float = 150.0
     albedo: float = 0.18
     background: float = 0.0
 
@@ -5898,6 +5967,10 @@ def aermod_run(q: AermodQuery):
             except (KeyError, TypeError, ValueError):
                 continue
 
+    # height raster for path-blockage testing
+    hras = (_HeightRaster(wake_bldgs, max(float(q.grid_radius_m), 300.0))
+            if wake_bldgs else None)
+
     # ---- wind directions to evaluate ----
     # For a single hour there is one direction. For a climatology we run EVERY
     # sector of the wind rose and weight by how often it blows - because a
@@ -5936,6 +6009,15 @@ def aermod_run(q: AermodQuery):
               he_eff = e["he"]
               shelter = _lee_shelter(ring_xy, e["he"], float(q.building_h_m),
                                      e["x"], e["y"], rx, ry, wdir_i)
+              # every building the path crosses removes plume from the direct
+              # line and mixes it - this is what the individual heights buy us
+              if hras is not None and hras.any:
+                  fb, nob = hras.path_blockage(e["x"], e["y"], rx, ry,
+                                               e["he"], z)
+                  if fb > 0:
+                      shelter *= math.exp(-1.4 * fb)      # cumulative blocking
+                      sy *= (1.0 + 0.9 * fb)              # extra lateral mixing
+                      sz *= (1.0 + 1.3 * fb)              # extra vertical mixing
               if wake_bldgs:
                   dh, ey, ez = _building_wake(e["x"], e["y"], e["he"], rx, ry,
                                               wdir_i, wake_bldgs, mlat, mlon,
@@ -6081,6 +6163,59 @@ def aermod_run(q: AermodQuery):
                     "rows": int(fzs.shape[0]), "cols": int(fzs.shape[1]),
                 })
 
+        # ---- vertical cross-section along the wind axis ----
+        # The clearest way to read a plume: distance downwind on x, height on
+        # y. It shows the release height, the rise, and where the plume
+        # actually reaches the ground - none of which a plan view conveys.
+        section_out = None
+        if q.section:
+            nx, nz = 120, 60
+            top = max(30.0, min(600.0, float(q.section_top_m)))
+            xs = np.linspace(-gr, gr, nx)
+            zs = np.linspace(0.5, top, nz)
+            SX, SZ = np.meshgrid(xs, zs)
+            sec = np.zeros_like(SX)
+            wdir0 = dirs[0][0] if dirs else wdir
+            th = math.radians(wdir0)
+            wx, wy = -math.sin(th), -math.cos(th)
+            for e in elements:
+                # distance of this element along the section axis
+                s0 = e["x"] * wx + e["y"] * wy
+                off = -e["x"] * wy + e["y"] * wx      # crosswind offset
+                xd = SX - s0
+                ok = xd > 1.0
+                xv = np.where(ok, xd, 1.0)
+                sw, sv = _sigma_wv(max(e["he"], 2.0), pbl, conv)
+                t = xv / max(0.3, u_ref)
+                Tly = 300.0 if conv else 100.0
+                Tlz = 200.0 if conv else 50.0
+                sy = sv * t / np.sqrt(1.0 + t / (2 * Tly))
+                sz = np.minimum(sw * t / np.sqrt(1.0 + t / (2 * Tlz)), 0.9 * zi)
+                lat_f = np.exp(-(off ** 2) / (2 * sy ** 2)) / \
+                    (np.sqrt(2 * np.pi) * sy)
+                vert = np.zeros_like(SX)
+                for m_ in range(-2, 3):
+                    vert += np.exp(-((SZ - e["he"] - 2 * m_ * zi) ** 2) /
+                                   (2 * sz ** 2))
+                    vert += np.exp(-((SZ + e["he"] + 2 * m_ * zi) ** 2) /
+                                   (2 * sz ** 2))
+                cc = e["q"] / (np.sqrt(2 * np.pi) * max(0.3, u_ref) * sz) * \
+                    vert * lat_f
+                sec += np.where(ok, cc, 0.0)
+            sec = sec * scale + float(q.background or 0.0)
+            section_out = {
+                "values": [[round(float(v), 4) for v in row] for row in sec],
+                "x_m": [round(float(v), 1) for v in xs],
+                "z_m": [round(float(v), 1) for v in zs],
+                "max": round(float(np.max(sec)), 3),
+                "wind_from_deg": round(wdir0, 1),
+                "release_heights_m": sorted({round(e["he"], 1)
+                                             for e in elements})[:8],
+                "note": ("Vertical slice through the plume along the wind "
+                         "axis, at the crosswind position of each source. "
+                         "Left is upwind, right is downwind."),
+            }
+
         gmax = float(np.max(field))
         png = _plume_png(field, gmax if gmax > 0 else 1.0)
         # downsample the field so it can travel to the browser and be draped
@@ -6098,6 +6233,7 @@ def aermod_run(q: AermodQuery):
             "radius_m": gr, "n": gn,
             "receptor_height_m": zr,
             "levels": levels_out,
+            "section": section_out,
             "note": (f"Ground-level field at {zr} m, on a {gn}x{gn} grid over "
                      f"\u00b1{int(gr)} m. Building downwash is applied at the "
                      "facade receptors but NOT across this grid, which would "
@@ -6181,6 +6317,7 @@ def aermod_run(q: AermodQuery):
         "grid": grid_out,
         "downwash": {"applied": bool(wake_bldgs),
                      "buildings": len(wake_bldgs),
+                     "path_blockage": bool(hras is not None and hras.any),
                      "note": ("Simplified Huber-Snyder style wake: enhanced "
                               "mixing and plume capture behind buildings. NOT "
                               "PRIME - no cavity mass balance or streamline "
