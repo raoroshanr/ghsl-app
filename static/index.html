@@ -1032,6 +1032,15 @@ label.chk input{width:auto}
       </div>
       <button id="admPick" style="width:100%;margin-top:6px">Pick the building on the map</button>
 
+      <div class="stepH" style="margin-top:12px">Scene &amp; model inputs</div>
+      <p class="hint">Reads the land cover, built-up surface and volume, road network and terrain within a radius, builds a 3D scene, and <b>derives the dispersion inputs from that data</b> instead of asking you to guess them.</p>
+      <div class="dxGrid">
+        <div><label>Scene radius (m)</label><input type="text" id="admSceneR" value="500"></div>
+        <div><label>&nbsp;</label>
+          <button id="admScene" class="primary" style="width:100%">Extract scene</button></div>
+      </div>
+      <div id="admSceneInfo" class="hint" style="min-height:18px"></div>
+
       <label class="fld">2 &middot; Emission sources</label>
       <div id="admSources"></div>
       <div style="display:flex;gap:5px;margin-top:6px">
@@ -1215,7 +1224,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v115</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v116</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1343,7 +1352,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v115";
+const DSG_VERSION = "deepseego-v116";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4231,6 +4240,267 @@ function drawSunPath(){
   });
 }
 
+/* ---------- 3D scene + input extraction -------------------------------------
+   Renders the surroundings in 3D and shows every derived parameter WITH its
+   provenance, so the inputs to the dispersion run are inspectable before the
+   model is run rather than being invisible defaults.
+--------------------------------------------------------------------------- */
+let SCENE = null, _three = null, _sceneAnim = null;
+
+function ensureThree(){
+  if(window.THREE) return Promise.resolve();
+  if(!ensureThree._p){
+    ensureThree._p = new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+      s.onload = () => window.THREE ? res() : rej(new Error('three.js failed to initialise'));
+      s.onerror = () => { ensureThree._p = null; rej(new Error('three.js could not be loaded')); };
+      document.head.appendChild(s);
+    });
+  }
+  return ensureThree._p;
+}
+
+const LULC_COLOUR = {10:0x2f6b34, 20:0x9ab54a, 30:0xa8c66c, 40:0xd9c46a,
+  50:0x9a9a9a, 60:0xd4c9a8, 70:0xf0f0f0, 80:0x4a86c8, 90:0x6fa8a0,
+  95:0x2e7d64, 100:0xbfc9a8};
+
+async function admSceneRun(){
+  if(!ADM.building) return toast('Pick the building of interest first');
+  const btn = $('admScene'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Reading\u2026';
+  Progress.start('Scene extraction',
+                 'Land cover, built-up surface and volume, roads, terrain\u2026', 0);
+  try{
+    const j = await api('/scene_extract', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat: ADM.building.lat, lon: ADM.building.lon,
+                            radius_m: parseFloat($('admSceneR').value) || 500})}, true);
+    SCENE = j;
+
+    // adopt the derived surface parameters into the model inputs
+    const d = j.derived;
+    const z0 = d.z0_morphometric_m || d.z0_from_landcover_m;
+    $('admZ0').value = z0;
+    $('admBowen').value = d.bowen_ratio;
+    $('admSurfaceNote').innerHTML =
+      `<b>Derived from this scene</b> \u00b7 z\u2080 = ${z0} m, Bowen = ${d.bowen_ratio}`;
+
+    admOpen('scene & derived inputs');
+    admRenderScenePanel(j);
+    await admDraw3D(j);
+    $('admSceneInfo').innerHTML =
+      `${j.scene.building_count} buildings \u00b7 ${j.scene.road_count} roads \u00b7 ` +
+      `z\u2080 <b>${z0} m</b>`;
+  }catch(e){
+    $('admSceneInfo').textContent = e.message;
+    toast('Scene: ' + e.message, 11000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
+function admRenderScenePanel(j){
+  const d = j.derived, b = j.built, t = j.terrain;
+  const lulcRows = j.lulc.slice(0, 8).map(l =>
+    `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;
+       background:#${(LULC_COLOUR[l.code]||0x888888).toString(16).padStart(6,'0')};
+       margin-right:6px"></i>${l.name}</td>` +
+    `<td style="text-align:right">${(l.fraction*100).toFixed(1)}%</td>` +
+    `<td style="text-align:right">${l.z0} m</td>` +
+    `<td style="text-align:right">${l.bowen}</td></tr>`).join('');
+  const provRows = j.provenance.map(p =>
+    `<tr><td><b>${p.input}</b><div class="per">${p.how}</div></td>` +
+    `<td style="text-align:right;white-space:nowrap">${p.from}</td></tr>`).join('');
+  const srcRows = (j.suggested_sources || []).map((s, i) =>
+    `<tr><td>${s.label}</td>` +
+    `<td style="text-align:right">${(s.emissions.pm25).toFixed(4)}</td>` +
+    `<td style="text-align:right">${(s.emissions.nox).toFixed(3)}</td>` +
+    `<td style="text-align:right"><button class="ghost" data-addsrc="${i}"
+        style="padding:2px 8px;font-size:10px">Add</button></td></tr>`).join('');
+
+  const disagree = (d.z0_morphometric_m && d.z0_from_landcover_m)
+    ? Math.max(d.z0_morphometric_m, d.z0_from_landcover_m) /
+      Math.max(1e-6, Math.min(d.z0_morphometric_m, d.z0_from_landcover_m)) : 1;
+
+  $('admDrawerBody').innerHTML =
+    `<div class="paneLabel">3D scene \u00b7 ${j.radius_m} m radius</div>` +
+    `<div id="admScene3D" style="width:100%;height:340px;background:#0B1310;
+       border:1px solid #2A3A33;border-radius:8px;position:relative">
+       <div style="position:absolute;bottom:6px;left:8px;font-size:10px;color:#8A968F">
+         drag to orbit \u00b7 scroll to zoom</div></div>` +
+
+    `<div class="paneLabel" style="margin-top:12px">Derived model inputs</div>` +
+    `<table class="aqTable">` +
+    `<tr><td>Roughness z\u2080 \u2014 from land cover</td>` +
+    `<td style="text-align:right">${d.z0_from_landcover_m} m</td></tr>` +
+    `<tr><td>Roughness z\u2080 \u2014 morphometric</td>` +
+    `<td style="text-align:right"><b>${d.z0_morphometric_m ?? '\u2014'} m</b></td></tr>` +
+    `<tr><td>Displacement height d</td>` +
+    `<td style="text-align:right">${d.displacement_height_m ?? '\u2014'} m</td></tr>` +
+    `<tr><td>Bowen ratio</td><td style="text-align:right">${d.bowen_ratio}</td></tr>` +
+    `<tr><td>Albedo</td><td style="text-align:right">${d.albedo}</td></tr>` +
+    `</table>` +
+    (disagree > 2
+      ? `<div class="mmVerdict warn" style="font-size:11px">The two roughness
+         estimates differ by ${disagree.toFixed(1)}\u00d7. In built-up areas the
+         morphometric value is usually the better one \u2014 it uses actual
+         building density and height rather than a land-cover label. The value
+         adopted is shown in the input field.</div>`
+      : `<div class="mmVerdict ok" style="font-size:11px">Both roughness
+         estimates agree closely, which is reassuring.</div>`) +
+
+    `<div class="paneLabel" style="margin-top:12px">Built form</div>` +
+    `<table class="aqTable">` +
+    `<tr><td>Built-up surface</td><td style="text-align:right">${b.surface_m2?.toLocaleString() ?? '\u2014'} m\u00b2</td></tr>` +
+    `<tr><td>Built volume</td><td style="text-align:right">${b.volume_m3?.toLocaleString() ?? '\u2014'} m\u00b3</td></tr>` +
+    `<tr><td>Plan area fraction \u03bb\u209a</td><td style="text-align:right">${b.plan_area_fraction ?? '\u2014'}</td></tr>` +
+    `<tr><td>Frontal area index \u03bb_f</td><td style="text-align:right">${b.frontal_area_index ?? '\u2014'}</td></tr>` +
+    `<tr><td>Mean building height</td><td style="text-align:right"><b>${b.mean_height_m ?? '\u2014'} m</b></td></tr>` +
+    `</table>` +
+
+    `<div class="paneLabel" style="margin-top:12px">Land cover</div>` +
+    `<table class="aqTable"><tr><td><b>Class</b></td><td style="text-align:right"><b>Share</b></td>` +
+    `<td style="text-align:right"><b>z\u2080</b></td><td style="text-align:right"><b>Bowen</b></td></tr>` +
+    `${lulcRows}</table>` +
+
+    `<div class="paneLabel" style="margin-top:12px">Terrain</div>` +
+    `<table class="aqTable">` +
+    `<tr><td>Elevation range</td><td style="text-align:right">${t.min_m}\u2013${t.max_m} m</td></tr>` +
+    `<tr><td>Relief</td><td style="text-align:right">${t.relief_m} m</td></tr>` +
+    `</table>` +
+    `<div class="mmVerdict ${t.flat_assumption_holds ? 'ok' : 'warn'}"
+       style="font-size:11px">${t.note}</div>` +
+
+    (srcRows ? `<div class="paneLabel" style="margin-top:12px">Line sources found (g/s)</div>` +
+      `<table class="aqTable"><tr><td><b>Road</b></td><td style="text-align:right"><b>PM2.5</b></td>` +
+      `<td style="text-align:right"><b>NOx</b></td><td></td></tr>${srcRows}</table>` +
+      `<p class="srcNote">Traffic volume is assumed from road class, not measured \u2014 the largest uncertainty here.</p>` : '') +
+
+    `<div class="paneLabel" style="margin-top:12px">Where each input came from</div>` +
+    `<table class="aqTable">${provRows}</table>` +
+    `<ul class="mmList">${j.caveats.map(x => `<li>${x}</li>`).join('')}</ul>`;
+
+  $('admDrawerBody').querySelectorAll('[data-addsrc]').forEach(b2 =>
+    b2.addEventListener('click', () => {
+      const s = JSON.parse(JSON.stringify(j.suggested_sources[+b2.dataset.addsrc]));
+      ADM.sources.push(s); admRenderSources(); admDrawScene();
+      toast('Added: ' + s.label, 4000);
+    }));
+}
+
+async function admDraw3D(j){
+  const host = document.getElementById('admScene3D');
+  if(!host) return;
+  try{ await ensureThree(); }
+  catch(e){
+    host.innerHTML = '<p class="srcNote" style="padding:12px">3D view unavailable: '
+      + e.message + '. The extracted parameters below are unaffected.</p>';
+    return;
+  }
+  if(_sceneAnim){ cancelAnimationFrame(_sceneAnim); _sceneAnim = null; }
+  const W = host.clientWidth || 400, H = host.clientHeight || 340;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0B1310);
+  const cam = new THREE.PerspectiveCamera(48, W/H, 1, 8000);
+  const R = j.radius_m;
+  let camAz = -0.6, camEl = 0.55, camR = R * 2.6;
+  const rend = new THREE.WebGLRenderer({antialias:true});
+  rend.setSize(W, H); rend.setPixelRatio(Math.min(2, window.devicePixelRatio||1));
+  host.appendChild(rend.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.62));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+  sun.position.set(R*0.6, R*0.9, R*0.5); scene.add(sun);
+
+  // ground: terrain surface if available, else a flat disc
+  const t = j.scene.terrain;
+  if(t && t.z && t.rows > 1){
+    const geo = new THREE.PlaneGeometry(t.size_m, t.size_m, t.cols-1, t.rows-1);
+    const pos = geo.attributes.position;
+    let k = 0;
+    for(let iy = 0; iy < t.rows; iy++)
+      for(let ix = 0; ix < t.cols; ix++){
+        const v = t.z[iy][ix];
+        pos.setZ(k++, v == null ? 0 : v);
+      }
+    geo.computeVertexNormals();
+    geo.rotateX(-Math.PI/2);
+    scene.add(new THREE.Mesh(geo,
+      new THREE.MeshLambertMaterial({color:0x2b4034, side:THREE.DoubleSide,
+                                     wireframe:false})));
+  } else {
+    const g = new THREE.CircleGeometry(R, 48); g.rotateX(-Math.PI/2);
+    scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({color:0x2b4034})));
+  }
+
+  // buildings, extruded from their footprints
+  (j.scene.buildings || []).forEach(b => {
+    if(!b.poly || b.poly.length < 3) return;
+    const shape = new THREE.Shape();
+    b.poly.forEach(([x, y], i) => i ? shape.lineTo(x, y) : shape.moveTo(x, y));
+    shape.closePath();
+    const geo = new THREE.ExtrudeGeometry(shape,
+      {depth: Math.max(2, b.h), bevelEnabled: false});
+    geo.rotateX(-Math.PI/2);
+    const tall = Math.min(1, b.h / 40);
+    const col = new THREE.Color().setHSL(0.09, 0.25 + 0.3*tall, 0.35 + 0.25*tall);
+    scene.add(new THREE.Mesh(geo,
+      new THREE.MeshLambertMaterial({color: col})));
+  });
+
+  // roads, drawn just above the ground
+  (j.scene.roads || []).forEach(rd => {
+    const pts = rd.pts.map(([x, y]) => new THREE.Vector3(x, 1.0, y));
+    if(pts.length < 2) return;
+    const w = rd.class === 'motorway' || rd.class === 'trunk' ? 3
+            : rd.class === 'primary' ? 2 : 1;
+    scene.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({color: w >= 2 ? 0xE9C46A : 0x8A968F,
+                                   linewidth: w})));
+  });
+
+  // the building of interest, highlighted
+  if(ADM.ring){
+    const mlat = 110540, mlon = 111320*Math.cos(ADM.building.lat*Math.PI/180);
+    const shape = new THREE.Shape();
+    ADM.ring.forEach((p, i) => {
+      const x = (p[1]-ADM.building.lon)*mlon, y = (p[0]-ADM.building.lat)*mlat;
+      i ? shape.lineTo(x, y) : shape.moveTo(x, y);
+    });
+    shape.closePath();
+    const geo = new THREE.ExtrudeGeometry(shape,
+      {depth: parseFloat($('admH').value) || 12, bevelEnabled: false});
+    geo.rotateX(-Math.PI/2);
+    scene.add(new THREE.Mesh(geo,
+      new THREE.MeshLambertMaterial({color:0x7FD0BC, transparent:true, opacity:.9})));
+  }
+
+  function place(){
+    cam.position.set(camR*Math.cos(camEl)*Math.sin(camAz),
+                     camR*Math.sin(camEl),
+                     camR*Math.cos(camEl)*Math.cos(camAz));
+    cam.lookAt(0, 0, 0);
+  }
+  place();
+  let drag = false, lx = 0, ly = 0;
+  rend.domElement.addEventListener('mousedown', e => { drag = true; lx = e.clientX; ly = e.clientY; });
+  window.addEventListener('mouseup', () => drag = false);
+  rend.domElement.addEventListener('mousemove', e => {
+    if(!drag) return;
+    camAz -= (e.clientX - lx) * 0.006;
+    camEl = Math.max(0.08, Math.min(1.45, camEl + (e.clientY - ly) * 0.005));
+    lx = e.clientX; ly = e.clientY; place();
+  });
+  rend.domElement.addEventListener('wheel', e => {
+    e.preventDefault();
+    camR = Math.max(R*0.6, Math.min(R*6, camR * (1 + Math.sign(e.deltaY)*0.12)));
+    place();
+  }, {passive:false});
+
+  (function loop(){ _sceneAnim = requestAnimationFrame(loop); rend.render(scene, cam); })();
+}
+
 /* ---------- Air Dispersion Model (AERMOD formulation) ----------------------
    Computes what arrives at every facade of a building from multiple sources.
    Results open in their own extendable drawer so the map stays usable.
@@ -4295,6 +4565,7 @@ async function admInit(){
   $('admAddPoint').addEventListener('click', () => admAdd('point'));
   $('admAddLine').addEventListener('click', () => admAdd('line'));
   $('admAddArea').addEventListener('click', () => admAdd('area'));
+  $('admScene').addEventListener('click', admSceneRun);
   $('admRun').addEventListener('click', admRun);
   $('admVerify').addEventListener('click', admVerify);
   $('admClear').addEventListener('click', () => {
