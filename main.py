@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v115"
+APP_VERSION = "deepseego-v116"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6147,6 +6147,349 @@ SURFACE_PRESETS = [
      "note": "Nothing to evaporate, so nearly all energy becomes sensible "
              "heat - strongly convective by day."},
 ]
+
+
+# ============================================================================
+# SCENE EXTRACTION
+#
+# Turns the datasets already in this app into the inputs the dispersion model
+# needs, instead of asking the user to guess them:
+#
+#   ESA WorldCover  -> surface roughness and Bowen ratio by land-cover class,
+#                      area-weighted (this is what EPA's AERSURFACE does)
+#   GHS-BUILT-S     -> plan area fraction lambda_p (how much ground is built)
+#   GHS-BUILT-V     -> mean building height H = volume / surface
+#   -> together      -> MORPHOMETRIC roughness (Macdonald et al. 1998), which
+#                      is the physically-derived alternative to a lookup
+#   OSM roads       -> line sources with class-weighted traffic
+#   DEM             -> terrain relief, to test whether the model's flat-terrain
+#                      assumption actually holds here
+# ============================================================================
+
+# AERSURFACE-style surface characteristics per WorldCover class.
+# z0 in metres, Bowen ratio dimensionless, albedo fraction.
+WORLDCOVER_SURFACE = {
+    10: {"name": "Tree cover",        "z0": 1.00, "bowen": 0.6, "albedo": 0.14},
+    20: {"name": "Shrubland",         "z0": 0.20, "bowen": 1.5, "albedo": 0.18},
+    30: {"name": "Grassland",         "z0": 0.03, "bowen": 0.6, "albedo": 0.18},
+    40: {"name": "Cropland",          "z0": 0.10, "bowen": 0.5, "albedo": 0.18},
+    50: {"name": "Built-up",          "z0": 1.00, "bowen": 1.5, "albedo": 0.16},
+    60: {"name": "Bare / sparse",     "z0": 0.05, "bowen": 4.0, "albedo": 0.28},
+    70: {"name": "Snow and ice",      "z0": 0.002, "bowen": 0.5, "albedo": 0.70},
+    80: {"name": "Permanent water",   "z0": 0.0002, "bowen": 0.1, "albedo": 0.08},
+    90: {"name": "Herbaceous wetland", "z0": 0.05, "bowen": 0.2, "albedo": 0.14},
+    95: {"name": "Mangroves",         "z0": 0.80, "bowen": 0.3, "albedo": 0.12},
+    100: {"name": "Moss and lichen",  "z0": 0.02, "bowen": 1.0, "albedo": 0.20},
+}
+
+
+def _z0_macdonald(lambda_p, lambda_f, H):
+    """Morphometric roughness length from building geometry.
+
+    Macdonald, Griffiths & Hall (1998):
+        d/H  = 1 + A^(-lambda_p) (lambda_p - 1)
+        z0/H = (1 - d/H) exp{ -[0.5 beta Cd/kappa^2 (1 - d/H) lambda_f]^(-1/2) }
+
+    This DERIVES roughness from how densely and how tall the area is built,
+    rather than looking it up from a land-cover label. Where the two disagree,
+    that disagreement is itself informative.
+    """
+    A, beta, Cd = 4.43, 1.0, 1.2
+    lp = max(1e-4, min(0.85, float(lambda_p)))
+    lf = max(1e-4, min(0.85, float(lambda_f)))
+    H = max(1.0, float(H))
+    d_over_H = 1.0 + A ** (-lp) * (lp - 1.0)
+    d_over_H = max(0.0, min(0.95, d_over_H))
+    inner = 0.5 * beta * Cd / (KARMAN ** 2) * (1.0 - d_over_H) * lf
+    if inner <= 0:
+        return None, None
+    z0_over_H = (1.0 - d_over_H) * math.exp(-(inner ** -0.5))
+    return z0_over_H * H, d_over_H * H
+
+
+class SceneQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 500
+    max_buildings: int = 400
+    max_roads: int = 200
+
+
+@app.post("/scene_extract")
+@ee_errors
+def scene_extract(q: SceneQuery):
+    """Build a 3D scene and derive dispersion inputs from it."""
+    ensure_ee()
+    r = max(150.0, min(1500.0, float(q.radius_m)))
+    pt = ee.Geometry.Point([q.lon, q.lat])
+    ring = pt.buffer(r)
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(q.lat))
+
+    # ---- one batched Earth Engine call for every raster statistic ----
+    stats = {}
+    wc = ee.Image("ESA/WorldCover/v200/2021").select("Map")
+    for code in WORLDCOVER_SURFACE:
+        stats[f"wc{code}"] = (wc.eq(code).rename("f")
+                              .reduceRegion(ee.Reducer.mean(), ring, 10,
+                                            bestEffort=True).get("f"))
+    ghs_s = (ee.ImageCollection("JRC/GHSL/P2023A/GHS_BUILT_S")
+             .filter(ee.Filter.eq("system:index", "2020")).first()
+             .select("built_surface"))
+    ghs_v = (ee.ImageCollection("JRC/GHSL/P2023A/GHS_BUILT_V")
+             .filter(ee.Filter.eq("system:index", "2020")).first()
+             .select("built_volume_total"))
+    stats["built_s"] = ghs_s.reduceRegion(ee.Reducer.sum(), ring, 100,
+                                          bestEffort=True).get("built_surface")
+    stats["built_v"] = ghs_v.reduceRegion(ee.Reducer.sum(), ring, 100,
+                                          bestEffort=True).get("built_volume_total")
+    dem = ee.ImageCollection("COPERNICUS/DEM/GLO30").select("DEM").mosaic()
+    for k, red in (("dem_min", ee.Reducer.min()), ("dem_max", ee.Reducer.max()),
+                   ("dem_mean", ee.Reducer.mean())):
+        stats[k] = dem.reduceRegion(red, ring, 30, bestEffort=True).get("DEM")
+    stats["area_m2"] = ring.area(10)
+
+    info, failed = _eval_stats_resiliently(stats)
+
+    def g(k):
+        v = info.get(k)
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    area_m2 = g("area_m2") or (math.pi * r * r)
+
+    # ---- land cover -> area-weighted surface characteristics ----
+    lulc, z0_sum, bo_sum, al_sum, wsum = [], 0.0, 0.0, 0.0, 0.0
+    for code, meta in WORLDCOVER_SURFACE.items():
+        f = g(f"wc{code}")
+        if not f or f < 0.001:
+            continue
+        lulc.append({"code": code, "name": meta["name"],
+                     "fraction": round(f, 4),
+                     "area_m2": round(f * area_m2, 1),
+                     "z0": meta["z0"], "bowen": meta["bowen"]})
+        # roughness averages logarithmically, not linearly: a small patch of
+        # tall obstacles dominates the effective roughness
+        z0_sum += f * math.log(max(1e-4, meta["z0"]))
+        bo_sum += f * meta["bowen"]
+        al_sum += f * meta["albedo"]
+        wsum += f
+    lulc.sort(key=lambda x: -x["fraction"])
+    z0_lulc = math.exp(z0_sum / wsum) if wsum > 0 else 0.5
+    bowen_lulc = bo_sum / wsum if wsum > 0 else 1.0
+    albedo_lulc = al_sum / wsum if wsum > 0 else 0.18
+
+    # ---- GHSL -> plan area fraction and mean building height ----
+    built_s = g("built_s")
+    built_v = g("built_v")
+    lambda_p = (built_s / area_m2) if (built_s and area_m2) else None
+    H_mean = (built_v / built_s) if (built_s and built_v and built_s > 0) else None
+    # frontal area index: for a roughly cubic array lambda_f ~ lambda_p; we
+    # scale by the height-to-spacing ratio, which is the usual first estimate
+    lambda_f = None
+    z0_morph = d_morph = None
+    if lambda_p and H_mean:
+        spacing = math.sqrt(max(1.0, area_m2 / max(1.0, built_s / max(1.0, H_mean))))
+        lambda_f = min(0.8, lambda_p * max(0.3, min(3.0, H_mean / 10.0)))
+        z0_morph, d_morph = _z0_macdonald(lambda_p, lambda_f, H_mean)
+
+    # ---- terrain ----
+    dmin, dmax, dmean = g("dem_min"), g("dem_max"), g("dem_mean")
+    relief = (dmax - dmin) if (dmin is not None and dmax is not None) else None
+    terrain_ok = relief is None or relief < 0.1 * r     # AERMOD's own guidance
+    return_terrain = {
+        "min_m": None if dmin is None else round(dmin, 1),
+        "max_m": None if dmax is None else round(dmax, 1),
+        "mean_m": None if dmean is None else round(dmean, 1),
+        "relief_m": None if relief is None else round(relief, 1),
+        "flat_assumption_holds": bool(terrain_ok),
+        "note": ("Relief is small compared with the domain, so treating the "
+                 "terrain as flat is reasonable."
+                 if terrain_ok else
+                 "Relief is a significant fraction of the domain. This model "
+                 "has NO terrain treatment (no AERMAP), so results over "
+                 "elevated ground will be wrong - most likely under-predicting "
+                 "on high ground."),
+    }
+
+    # ---- vector geometry for the 3D scene, in LOCAL METRES ----
+    def xy(la, lo):
+        return round((lo - q.lon) * mlon, 1), round((la - q.lat) * mlat, 1)
+
+    bldgs = []
+    try:
+        for f in _osm_buildings(q.lat, q.lon, r):
+            g_ = f.get("geometry") or {}
+            rg = (g_.get("coordinates") or [[]])[0]
+            if len(rg) < 3:
+                continue
+            p = f.get("properties") or {}
+            h = p.get("height_m")
+            if h is None and p.get("levels"):
+                h = float(p["levels"]) * 3.2      # typical storey height
+            if h is None:
+                h = H_mean or 8.0                 # fall back to the GHSL mean
+            poly = [xy(c[1], c[0]) for c in rg]
+            if len(poly) > 2 and poly[0] == poly[-1]:
+                poly = poly[:-1]
+            # rough plan area, for ranking
+            a2 = abs(sum(poly[i][0] * poly[(i + 1) % len(poly)][1] -
+                         poly[(i + 1) % len(poly)][0] * poly[i][1]
+                         for i in range(len(poly)))) / 2.0
+            bldgs.append({"poly": poly, "h": round(float(h), 1),
+                          "name": p.get("name", ""), "area_m2": round(a2, 1),
+                          "height_source": ("OSM tag" if p.get("height_m") or
+                                            p.get("levels") else "GHSL mean")})
+        bldgs.sort(key=lambda b: -b["area_m2"])
+        bldgs = bldgs[:int(q.max_buildings)]
+    except Exception:
+        bldgs = []
+
+    roads = []
+    try:
+        # traffic weighting by class - the basis for turning roads into line
+        # sources. These are order-of-magnitude defaults, editable downstream.
+        VEH = {"motorway": 60000, "trunk": 30000, "primary": 25000,
+               "secondary": 12000, "tertiary": 6000, "residential": 2000,
+               "unclassified": 1500, "service": 500, "living_street": 400}
+        for f in _osm_roads_v(q.lat, q.lon, r):
+            g_ = f.get("geometry") or {}
+            cs = g_.get("coordinates") or []
+            if len(cs) < 2:
+                continue
+            p = f.get("properties") or {}
+            cls = p.get("class", "")
+            if cls not in VEH:
+                continue
+            pts = [xy(c[1], c[0]) for c in cs]
+            ln = sum(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+            roads.append({"pts": pts, "class": cls, "name": p.get("name", ""),
+                          "length_m": round(ln, 1), "veh_per_day": VEH[cls],
+                          "latlon": [[round(c[1], 6), round(c[0], 6)] for c in cs]})
+        roads.sort(key=lambda x: -x["veh_per_day"] * x["length_m"])
+        roads = roads[:int(q.max_roads)]
+    except Exception:
+        roads = []
+
+    # ---- terrain grid for the 3D floor ----
+    terrain_grid = None
+    try:
+        n = 24
+        rect = ee.Geometry.Rectangle(
+            [q.lon - r / mlon, q.lat - r / mlat,
+             q.lon + r / mlon, q.lat + r / mlat], None, False)
+        arr = dem.sampleRectangle(region=rect, defaultValue=-9999).getInfo()
+        band = None
+        for k, v in (arr.get("properties") or {}).items():
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                band = v
+                break
+        if band:
+            Z = np.array(band, dtype=float)
+            Z[Z <= -9000] = np.nan
+            step = max(1, Z.shape[0] // n)
+            Zs = Z[::step, ::step]
+            base = float(np.nanmin(Zs)) if not np.all(np.isnan(Zs)) else 0.0
+            terrain_grid = {
+                "rows": Zs.shape[0], "cols": Zs.shape[1],
+                "base_m": round(base, 2),
+                "size_m": 2 * r,
+                "z": [[None if not math.isfinite(v) else round(float(v) - base, 2)
+                       for v in row] for row in Zs],
+            }
+    except Exception:
+        terrain_grid = None
+
+    # ---- suggested line sources, from the roads actually found ----
+    suggested = []
+    for rd in roads[:8]:
+        ef = {"motorway": 0.05, "trunk": 0.05, "primary": 0.05,
+              "secondary": 0.05, "tertiary": 0.05, "residential": 0.05}
+        pm = ef.get(rd["class"], 0.05)
+        km = rd["length_m"] / 1000.0
+        vd = rd["veh_per_day"]
+        suggested.append({
+            "kind": "line", "label": (rd["name"] or rd["class"]) + " (road)",
+            "points": rd["latlon"][:12],
+            "h_m": 1.0, "schedule": "traffic_urban", "enabled": True,
+            "emissions": {
+                "pm25": round(vd * pm * km / 86400.0, 6),
+                "pm10": round(vd * 0.09 * km / 86400.0, 6),
+                "nox": round(vd * 0.80 * km / 86400.0, 6),
+                "co": round(vd * 3.50 * km / 86400.0, 6),
+                "so2": round(vd * 0.01 * km / 86400.0, 6),
+            },
+            "basis": (f"{vd:,} vehicles/day x {km:.2f} km, class '{rd['class']}'"),
+        })
+
+    return {
+        "centre": {"lat": q.lat, "lon": q.lon}, "radius_m": r,
+        "area_m2": round(area_m2, 1),
+        "scene": {"buildings": bldgs, "roads": roads,
+                  "terrain": terrain_grid,
+                  "building_count": len(bldgs), "road_count": len(roads)},
+        "suggested_sources": suggested,
+        "lulc": lulc,
+        "built": {
+            "surface_m2": None if built_s is None else round(built_s, 1),
+            "volume_m3": None if built_v is None else round(built_v, 1),
+            "plan_area_fraction": None if lambda_p is None else round(lambda_p, 4),
+            "frontal_area_index": None if lambda_f is None else round(lambda_f, 4),
+            "mean_height_m": None if H_mean is None else round(H_mean, 1),
+        },
+        "terrain": return_terrain,
+        "derived": {
+            "z0_from_landcover_m": round(z0_lulc, 4),
+            "z0_morphometric_m": (None if z0_morph is None
+                                  else round(z0_morph, 4)),
+            "displacement_height_m": (None if d_morph is None
+                                      else round(d_morph, 2)),
+            "bowen_ratio": round(bowen_lulc, 2),
+            "albedo": round(albedo_lulc, 3),
+        },
+        "unavailable": failed,
+        "provenance": [
+            {"input": "Surface roughness (land cover)",
+             "from": "ESA WorldCover 2021, 10 m",
+             "how": "area-weighted logarithmic mean of per-class z0, the same "
+                    "approach EPA's AERSURFACE uses"},
+            {"input": "Surface roughness (morphometric)",
+             "from": "GHS-BUILT-S + GHS-BUILT-V, 100 m",
+             "how": "Macdonald et al. (1998) from plan area fraction and mean "
+                    "building height derived as volume/surface"},
+            {"input": "Bowen ratio and albedo",
+             "from": "ESA WorldCover 2021",
+             "how": "area-weighted mean of per-class values"},
+            {"input": "Mean building height",
+             "from": "GHS-BUILT-V / GHS-BUILT-S",
+             "how": "built volume divided by built surface"},
+            {"input": "Building geometry",
+             "from": "OpenStreetMap",
+             "how": "footprints with height or levels tags; the GHSL mean "
+                    "height is used where a building has neither"},
+            {"input": "Line sources",
+             "from": "OpenStreetMap highways",
+             "how": "traffic volume assumed by road class, multiplied by "
+                    "emission factors per vehicle-km"},
+            {"input": "Terrain",
+             "from": "Copernicus GLO-30",
+             "how": "relief across the domain, used to test whether the "
+                    "flat-terrain assumption is defensible"},
+        ],
+        "caveats": [
+            "Roughness from land cover and from building morphometry are "
+            "INDEPENDENT estimates. Where they differ, the morphometric value "
+            "is usually better in built-up areas because it uses actual "
+            "density and height.",
+            "Traffic volumes are assumed from road class, not measured. They "
+            "are the largest uncertainty in the suggested line sources.",
+            "Building heights without an OSM tag fall back to the GHSL area "
+            "mean, so individual buildings may be well off even where the "
+            "area average is sound.",
+        ],
+    }
 
 
 @app.get("/surface_presets")
