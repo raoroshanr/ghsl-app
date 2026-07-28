@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v118"
+APP_VERSION = "deepseego-v119"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6017,6 +6017,50 @@ def aermod_run(q: AermodQuery):
 
     limits = spec.get("limits") or {}
     peak = max(r["conc"] for r in out_recs)
+
+    warnings = []
+    if u_ref < 1.0:
+        warnings.append({
+            "level": "high",
+            "title": f"Wind speed {u_ref:.1f} m/s is below the model's valid range",
+            "detail": (
+                "Concentration is inversely proportional to wind speed, so as "
+                "u approaches zero the equations diverge. The solver floors u "
+                "at 0.3 m/s to stay finite, but at this speed the result is "
+                "not physically meaningful - it will be strongly over-stated. "
+                "Gaussian plume models are generally quoted as valid above "
+                "about 1 m/s. Use a higher wind, or the climatology option "
+                "which averages over the whole wind rose."),
+        })
+    elif u_ref < 1.5:
+        warnings.append({
+            "level": "medium",
+            "title": f"Wind speed {u_ref:.1f} m/s is near the validity limit",
+            "detail": "Treat the magnitudes as indicative rather than "
+                      "quantitative; the spatial pattern is more reliable "
+                      "than the absolute values.",
+        })
+    if peak <= 1e-9:
+        warnings.append({
+            "level": "medium",
+            "title": "No facade receives any plume",
+            "detail": (
+                "Every source lies downwind or crosswind of the building for "
+                "this wind direction, so nothing reaches the envelope. This is "
+                "a real result, not a failure - but if you expected loading, "
+                "check the wind direction against where your sources sit, or "
+                "use the climatology option to average over all directions."),
+        })
+    if zi < 150:
+        warnings.append({
+            "level": "medium",
+            "title": f"Very shallow mixing height ({zi:.0f} m)",
+            "detail": "A shallow stable layer traps emissions near the ground "
+                      "and produces high concentrations. Physically real, but "
+                      "sensitive to the mixing-height estimate, which is "
+                      "derived rather than measured.",
+        })
+
     out = {
         "pollutant": {"key": q.pollutant, "label": spec["label"],
                       "unit": spec["unit"]},
@@ -6051,6 +6095,7 @@ def aermod_run(q: AermodQuery):
                               "mixing and plume capture behind buildings. NOT "
                               "PRIME - no cavity mass balance or streamline "
                               "deflection.")},
+        "warnings": warnings,
         "elements": len(elements),
         "model": "AERMOD-formulation (not EPA AERMOD - see the model panel)",
         "caveats": [
