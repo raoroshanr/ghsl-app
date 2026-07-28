@@ -1230,7 +1230,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v118</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v119</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1366,7 +1366,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v118";
+const DSG_VERSION = "deepseego-v119";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4558,8 +4558,10 @@ function admDrapeConcentration(grid){
   const lo = Math.log10(Math.max(1e-4, mx * 1e-3)), hi = Math.log10(mx);
 
   const size = 2 * grid.radius_m;
+  const Rlim = grid.radius_m;
   const geo = new THREE.PlaneGeometry(size, size, cols - 1, rows - 1);
   const colours = new Float32Array(rows * cols * 3);
+  const alphas = new Float32Array(rows * cols);
   const pos = geo.attributes.position;
   const t3 = _S3.terrain;
   let k = 0;
@@ -4569,6 +4571,13 @@ function admDrapeConcentration(grid){
       const t = v > 0 ? (Math.log10(v) - lo) / Math.max(1e-9, hi - lo) : 0;
       const c = admConcColour(t);
       colours[k*3] = c[0]; colours[k*3+1] = c[1]; colours[k*3+2] = c[2];
+      // hide anything outside the circular region of interest, with a soft
+      // edge so the boundary does not look like a cut-out artefact
+      const px = -Rlim + (ix / (cols - 1)) * size;
+      const py = -Rlim + (iy / (rows - 1)) * size;
+      const rr = Math.hypot(px, py);
+      alphas[k] = rr > Rlim ? 0.0
+                : (rr > Rlim * 0.94 ? (Rlim - rr) / (Rlim * 0.06) : 1.0);
       // sit just above the terrain so it is visible but not z-fighting
       let zt = 2.0;
       if(t3 && t3.z){
@@ -4582,10 +4591,22 @@ function admDrapeConcentration(grid){
     }
   }
   geo.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+  geo.setAttribute('alpha', new THREE.BufferAttribute(alphas, 1));
   geo.rotateX(-Math.PI/2);
-  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+  // per-vertex alpha needs a small shader patch: the standard material has no
+  // alpha attribute, so we inject one.
+  const mat = new THREE.MeshBasicMaterial({
     vertexColors: true, transparent: true, opacity: 0.62,
-    side: THREE.DoubleSide, depthWrite: false}));
+    side: THREE.DoubleSide, depthWrite: false});
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = 'attribute float alpha;\nvarying float vAlpha;\n' +
+      sh.vertexShader.replace('void main() {', 'void main() {\n  vAlpha = alpha;');
+    sh.fragmentShader = 'varying float vAlpha;\n' +
+      sh.fragmentShader.replace(
+        '#include <opaque_fragment>',
+        'gl_FragColor = vec4( outgoingLight, diffuseColor.a * vAlpha );');
+  };
+  const mesh = new THREE.Mesh(geo, mat);
   _S3.scene.add(mesh);
   _S3.conc = mesh;
 
@@ -4935,7 +4956,13 @@ async function admRun(){
     // keep the 3D scene and drape the modelled field over it
     let draped = false;
     if(j.grid) draped = admDrapeConcentration(j.grid);
+    const warnHtml = (j.warnings || []).map(w =>
+      `<div class="mmVerdict ${w.level === 'high' ? 'warn' : 'warn'}"
+         style="font-size:11px;${w.level === 'high'
+           ? 'border-color:#8b3a1c;background:rgba(228,87,46,.14);color:#F0B49E' : ''}">
+         <b>${w.level === 'high' ? '\u26a0 ' : ''}${w.title}</b><br>${w.detail}</div>`).join('');
     $('admResults').innerHTML =
+      warnHtml +
       `<div class="mmVerdict warn" style="font-size:11px">${j.model}. Not for compliance.</div>` +
       (j.grid ? `<div class="paneLabel">Concentration map</div>` +
         `<p class="srcNote">Shown on the 2D map and` +
