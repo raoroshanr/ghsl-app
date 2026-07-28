@@ -1224,7 +1224,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v116</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v117</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1352,7 +1352,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v116";
+const DSG_VERSION = "deepseego-v117";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4324,6 +4324,16 @@ function admRenderScenePanel(j){
 
   $('admDrawerBody').innerHTML =
     `<div class="paneLabel">3D scene \u00b7 ${j.radius_m} m radius</div>` +
+    (j.scene.building_count === 0
+      ? `<div class="mmVerdict warn" style="font-size:11px">No buildings returned` +
+        (j.scene.building_error ? ` \u2014 ${j.scene.building_error}` : '') +
+        `. The 3D view will show terrain and roads only.</div>`
+      : `<div class="hint" style="font-size:10.5px">${j.scene.building_count} buildings ` +
+        `from <b>${j.scene.building_source}</b>` +
+        (j.scene.height_stats
+          ? ` \u00b7 heights ${j.scene.height_stats.min}\u2013${j.scene.height_stats.max} m ` +
+            `(mean ${j.scene.height_stats.mean}), ${j.scene.height_stats.individual} with ` +
+            `individually measured heights` : '') + `</div>`) +
     `<div id="admScene3D" style="width:100%;height:340px;background:#0B1310;
        border:1px solid #2A3A33;border-radius:8px;position:relative">
        <div style="position:absolute;bottom:6px;left:8px;font-size:10px;color:#8A968F">
@@ -4570,6 +4580,8 @@ async function admInit(){
   $('admVerify').addEventListener('click', admVerify);
   $('admClear').addEventListener('click', () => {
     admLayer.clearLayers(); ADM = {building:null, ring:null, sources:[], last:null};
+    if(window._admGridOverlay){ map.removeLayer(window._admGridOverlay);
+                                window._admGridOverlay = null; }
     $('admSources').innerHTML = ''; $('admInfo').textContent = '';
     $('admBldg').textContent = 'Pick a point \u2014 the footprint comes from OpenStreetMap.';
     admClose(); admRenderSources();
@@ -4765,6 +4777,18 @@ async function admRun(){
       hour: +$('admHour').value,
       surface_roughness_m: parseFloat($('admZ0').value) || 1.0,
       bowen_ratio: parseFloat($('admBowen').value) || 1.0,
+      grid: true,
+      grid_n: 60,
+      grid_radius_m: SCENE ? SCENE.radius_m : 500,
+      downwash: true,
+      // individual building geometry from the extracted scene, so each
+      // building's own height affects the plume
+      scene_buildings: SCENE ? (SCENE.scene.buildings || []).map(b => {
+        const n = b.poly.length;
+        return {cx: b.poly.reduce((s,p)=>s+p[0],0)/n,
+                cy: b.poly.reduce((s,p)=>s+p[1],0)/n,
+                h: b.h, area_m2: b.area_m2};
+      }) : [],
     };
     if($('admMet').value === 'climatology' && $('admMonth').value)
       body.month = +$('admMonth').value;
@@ -4785,6 +4809,12 @@ async function admRun(){
                      {sticky:true});
     });
 
+    // concentration map across the region
+    if(j.grid && j.grid.png){
+      if(window._admGridOverlay) map.removeLayer(window._admGridOverlay);
+      window._admGridOverlay = L.imageOverlay(j.grid.png, j.grid.bounds,
+        {opacity: 0.55}).addTo(map);
+    }
     const u = j.pollutant.unit;
     const faceRows = j.facades.map(f => {
       const w = Math.round(100 * f.max / Math.max(1e-9, j.peak));
@@ -4807,6 +4837,15 @@ async function admRun(){
     admOpen(`${j.pollutant.label} \u00b7 ${m.regime} \u00b7 ${m.wind_from} ${m.u_ref_ms} m/s`);
     $('admDrawerBody').innerHTML =
       `<div class="mmVerdict warn" style="font-size:11px">${j.model}. Not for compliance.</div>` +
+      (j.grid ? `<div class="paneLabel">Concentration map</div>` +
+        `<p class="srcNote">Drawn on the map at ${j.grid.receptor_height_m} m above ground, ` +
+        `\u00b1${j.grid.radius_m} m. Peak in the field ${j.grid.max} ${j.pollutant.unit}, ` +
+        `mean ${j.grid.mean}. ${j.grid.note}</p>` : '') +
+      (j.downwash ? `<div class="mmVerdict ${j.downwash.applied ? 'ok' : 'warn'}" style="font-size:11px">` +
+        (j.downwash.applied
+          ? `Building downwash applied using <b>${j.downwash.buildings} individual buildings</b> from the extracted scene. ${j.downwash.note}`
+          : `No building downwash \u2014 extract the scene first so individual building heights can influence the plume.`) +
+        `</div>` : '') +
       `<div class="paneLabel">Facade loading (peak)</div>${faceRows}` +
       `<table class="aqTable" style="margin-top:8px">` +
       `<tr><td>Worst facade</td><td style="text-align:right"><b>${j.worst.facing}</b> at ${j.worst.height_m} m</td></tr>` +
