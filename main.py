@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v117"
+APP_VERSION = "deepseego-v118"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5994,8 +5994,14 @@ def aermod_run(q: AermodQuery):
         field = field * scale + float(q.background or 0.0)
         gmax = float(np.max(field))
         png = _plume_png(field, gmax if gmax > 0 else 1.0)
+        # downsample the field so it can travel to the browser and be draped
+        # over the 3D terrain without a huge payload
+        step = max(1, gn // 48)
+        fs = field[::step, ::step]
         grid_out = {
             "png": png,
+            "values": [[round(float(v), 4) for v in row] for row in fs],
+            "values_rows": int(fs.shape[0]), "values_cols": int(fs.shape[1]),
             "bounds": [[q.lat - gr / mlat, q.lon - gr / mlon],
                        [q.lat + gr / mlat, q.lon + gr / mlon]],
             "max": round(gmax, 3),
