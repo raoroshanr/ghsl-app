@@ -422,6 +422,24 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
   font:11.5px/1.45 Arial,Helvetica,sans-serif}
 .mmVerdict.ok{background:rgba(132,204,22,.10);border:1px solid #3d5a1f;color:#C7E59A}
 .mmVerdict.warn{background:rgba(233,196,106,.10);border:1px solid #6b5a1f;color:#E9C46A}
+#admDrawer{position:fixed;top:0;right:0;height:100vh;width:0;z-index:3800;
+  background:#0F1A15;border-left:1px solid #2E3E37;overflow:hidden;
+  transition:width .22s ease;display:flex;flex-direction:column;
+  font-family:Arial,Helvetica,sans-serif}
+#admDrawer.open{width:min(460px,94vw)}
+#admDrawer.wide{width:min(820px,98vw)}
+#admDrawerHead{display:flex;justify-content:space-between;align-items:center;
+  gap:10px;padding:12px 14px;border-bottom:1px solid #2A3A33;flex:0 0 auto}
+#admDrawerHead b{font-size:13px;color:#E7EDE8}
+#admDrawerHead .per{display:block;font-size:10.5px;color:#8A968F;margin-top:2px}
+#admDrawerHead button{padding:4px 9px;font-size:11px}
+#admDrawerBody{flex:1 1 auto;overflow-y:auto;padding:12px 14px 20px}
+.admFace{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.admFaceName{flex:0 0 46px;font-size:11.5px;font-weight:700;color:#E7EDE8}
+.admBar{flex:1;height:16px;background:#12201B;border:1px solid #2A3A33;
+  border-radius:4px;overflow:hidden}
+.admBar i{display:block;height:100%;background:linear-gradient(90deg,#2A9D8F,#E9C46A,#E4572E)}
+.admFaceVal{flex:0 0 92px;text-align:right;font-size:11px;color:#C9D3CC}
 #dxValData{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
   font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
   border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
@@ -713,6 +731,7 @@ label.chk input{width:auto}
       <button data-tab="slope">Slope Analysis</button>
       <button data-tab="weather">Weather</button>
       <button data-tab="aq">Air</button>
+      <button data-tab="adm">Air Dispersion Model</button>
       <button data-tab="thermal">Heat</button>
       <button data-tab="sunlight">Sun</button>
       <button data-tab="noise">Noise</button>
@@ -1006,7 +1025,6 @@ label.chk input{width:auto}
       <label class="fld">Providers</label>
       <div id="aqProviders"></div>
       <button id="aqRun" class="primary" style="margin-top:8px" disabled>Get live air quality</button>
-      <button id="aqApportion" style="margin-top:6px" disabled>Pollutant source-proximity model</button>
       <p class="hint">Source scan covers a fixed 500 m radius around the point — every road and mapped feature within it.</p>
       <label class="fld" for="dispStability" style="margin-top:8px">Dispersion &mdash; atmospheric stability</label>
       <select id="dispStability">
@@ -1018,8 +1036,6 @@ label.chk input{width:auto}
         <option value="E">E &middot; stable</option>
         <option value="F">F &middot; very stable</option>
       </select>
-      <button id="aqDisperse" style="margin-top:6px" disabled>Model plume dispersion</button>
-      <button id="aqDisperseClear" class="ghost" style="margin-top:6px" hidden>Clear plume</button>
 
       <div class="stepH" style="margin-top:16px">Advanced dispersion model</div>
       <p class="hint">Multi-species Gaussian plume with editable emission rates, stack parameters and time-of-day schedules. Every result is traceable to the numbers you set.</p>
@@ -1086,6 +1102,58 @@ label.chk input{width:auto}
       <div id="dxInfo" class="hint" style="min-height:18px"></div>
     </section>
     </div><!-- /tab-aq -->
+
+    <div id="tab-adm" hidden>
+    <section>
+      <h2>Air Dispersion Model</h2>
+      <p class="hint">AERMOD-formulation dispersion computing what arrives at every <b>facade</b> of a building, from multiple point, line and area sources.</p>
+      <div class="mmVerdict warn" style="font-size:11px">
+        <b>This is not EPA AERMOD.</b> It implements the published AERMOD dispersion equations, but without AERMET, AERMAP terrain, PRIME building downwash or EPA validation. <b>Not valid for compliance.</b> Full detail in the model panel.
+      </div>
+
+      <label class="fld">1 &middot; Building of interest</label>
+      <div id="admBldg" class="hint">Pick a point &mdash; the footprint comes from OpenStreetMap, or a box is used.</div>
+      <div class="dxGrid">
+        <div><label>Height (m)</label><input type="text" id="admH" value="12"></div>
+        <div><label>Facade levels</label><input type="text" id="admLevels" value="4"></div>
+      </div>
+      <button id="admPick" style="width:100%;margin-top:6px">Pick the building on the map</button>
+
+      <label class="fld">2 &middot; Emission sources</label>
+      <div id="admSources"></div>
+      <div style="display:flex;gap:5px;margin-top:6px">
+        <button id="admAddPoint" class="ghost" style="flex:1">+ Point</button>
+        <button id="admAddLine" class="ghost" style="flex:1">+ Line</button>
+        <button id="admAddArea" class="ghost" style="flex:1">+ Area</button>
+      </div>
+
+      <label class="fld">3 &middot; Pollutant</label>
+      <select id="admSpecies"></select>
+
+      <label class="fld">4 &middot; Meteorology</label>
+      <select id="admMet">
+        <option value="current" selected>Current conditions (live)</option>
+        <option value="climatology">Long-term climatology (ERA5)</option>
+      </select>
+      <div id="admMonthRow" hidden>
+        <label class="fld" for="admMonth">Month</label>
+        <select id="admMonth"><option value="">Annual mean</option></select>
+      </div>
+      <label class="fld" for="admHour">Hour of day &mdash; <span id="admHourLbl">12:00</span></label>
+      <input type="range" id="admHour" min="0" max="23" step="1" value="12">
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Roughness z&#8320; (m)</label><input type="text" id="admZ0" value="1.0"></div>
+        <div><label>Bowen ratio</label><input type="text" id="admBowen" value="1.0"></div>
+      </div>
+
+      <button id="admRun" class="primary" style="width:100%;margin-top:10px">Run dispersion model</button>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="admVerify" class="ghost" style="flex:1">Verify code</button>
+        <button id="admClear" class="ghost" style="flex:1">Clear</button>
+      </div>
+      <div id="admInfo" class="hint" style="min-height:18px"></div>
+    </section>
+    </div><!-- /tab-adm -->
 
     <div id="tab-thermal" hidden>
     <section>
@@ -1226,12 +1294,26 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v113</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v114</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+  <div id="admDrawer">
+    <div id="admDrawerHead">
+      <div>
+        <b>Air Dispersion Model</b>
+        <span id="admDrawerSub" class="per"></span>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button id="admDrawerWide" class="ghost">&#8596; Wide</button>
+        <button id="admDrawerClose" class="ghost">&#10005;</button>
+      </div>
+    </div>
+    <div id="admDrawerBody"></div>
+  </div>
+
   <div id="roiPanel">
     <div id="roiHead">
       <h3>Region of Interest</h3>
@@ -1340,7 +1422,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v113";
+const DSG_VERSION = "deepseego-v114";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -2940,6 +3022,12 @@ map.on('click', ev => {
   if(!mapClickMode) return;
   const {lat, lng} = ev.latlng;
 
+  if(mapClickMode === 'admBldg'){
+    mapClickMode = null;
+    admSetBuilding(lat, lng);
+    return;
+  }
+
   if(mapClickMode === 'roiPoint'){
     mapClickMode = null;
     ptSet(lat, lng);
@@ -2985,7 +3073,7 @@ map.on('click', ev => {
     L.circleMarker([lat, lng], {radius: 6, color: '#00B4D8',
       fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer);
     $('aqRun').disabled = false;
-    $('aqApportion').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false; if($('aqDisperse')) $('aqDisperse').disabled = false;
+    if($('aqApportion')) $('aqApportion').disabled = false;  
     $('aqStatus').textContent = lat.toFixed(5) + ', ' + lng.toFixed(5);
     return;
   }
@@ -4502,6 +4590,317 @@ function drawSunPath(){
   });
 }
 
+/* ---------- Air Dispersion Model (AERMOD formulation) ----------------------
+   Computes what arrives at every facade of a building from multiple sources.
+   Results open in their own extendable drawer so the map stays usable.
+--------------------------------------------------------------------------- */
+const admLayer = L.featureGroup().addTo(map);
+let ADM = {building: null, ring: null, sources: [], last: null};
+
+function admOpen(sub){
+  $('admDrawer').classList.add('open');
+  if(sub) $('admDrawerSub').textContent = sub;
+}
+function admClose(){ $('admDrawer').classList.remove('open'); }
+
+async function admInit(){
+  if(admInit._done) return; admInit._done = true;
+  try{
+    const meta = await api('/dispersion_meta');
+    $('admSpecies').innerHTML = meta.pollutants
+      .map(p => `<option value="${p.key}">${p.label} (${p.unit})</option>`).join('');
+  }catch(e){ $('admInfo').textContent = e.message; }
+  const M = ['January','February','March','April','May','June','July',
+             'August','September','October','November','December'];
+  $('admMonth').innerHTML = '<option value="">Annual mean</option>' +
+    M.map((m,i) => `<option value="${i+1}">${m}</option>`).join('');
+
+  $('admMet').addEventListener('change', () => {
+    $('admMonthRow').hidden = $('admMet').value !== 'climatology';
+  });
+  $('admHour').addEventListener('input', () => {
+    $('admHourLbl').textContent =
+      String($('admHour').value).padStart(2,'0') + ':00';
+  });
+  $('admPick').addEventListener('click', () => {
+    mapClickMode = 'admBldg';
+    $('admBldg').textContent = 'Tap the building on the map\u2026';
+  });
+  $('admAddPoint').addEventListener('click', () => admAdd('point'));
+  $('admAddLine').addEventListener('click', () => admAdd('line'));
+  $('admAddArea').addEventListener('click', () => admAdd('area'));
+  $('admRun').addEventListener('click', admRun);
+  $('admVerify').addEventListener('click', admVerify);
+  $('admClear').addEventListener('click', () => {
+    admLayer.clearLayers(); ADM = {building:null, ring:null, sources:[], last:null};
+    $('admSources').innerHTML = ''; $('admInfo').textContent = '';
+    $('admBldg').textContent = 'Pick a point \u2014 the footprint comes from OpenStreetMap.';
+    admClose(); admRenderSources();
+  });
+  $('admDrawerClose').addEventListener('click', admClose);
+  $('admDrawerWide').addEventListener('click', () =>
+    $('admDrawer').classList.toggle('wide'));
+  admRenderSources();
+}
+
+async function admSetBuilding(lat, lon){
+  ADM.building = {lat, lon};
+  $('admBldg').textContent = 'Fetching the footprint\u2026';
+  try{
+    const j = await api('/site_layers', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat, lon, radius_m: 60, layers:['buildings'],
+                            buildings_source:'osm'})}, true);
+    const feats = (j.layers.buildings || {}).features || [];
+    // the footprint containing the tap, else the nearest
+    let best = null, bd = 1e9;
+    feats.forEach(f => {
+      const ring = ((f.geometry || {}).coordinates || [[]])[0];
+      if(ring.length < 3) return;
+      const cy = ring.reduce((s,c) => s + c[1], 0) / ring.length;
+      const cx = ring.reduce((s,c) => s + c[0], 0) / ring.length;
+      const d = Math.hypot((cy-lat)*110540, (cx-lon)*111320*Math.cos(lat*Math.PI/180));
+      if(d < bd){ bd = d; best = ring; }
+    });
+    if(best && bd < 80){
+      ADM.ring = best.map(c => [c[1], c[0]]);   // [lat,lon]
+      $('admBldg').innerHTML = `Footprint from OpenStreetMap \u00b7 ` +
+        `${ADM.ring.length - 1} vertices`;
+    } else {
+      ADM.ring = null;
+      $('admBldg').innerHTML = 'No OSM footprint here \u2014 a ' +
+        '<b>25 m box</b> will be used.';
+    }
+  }catch(e){
+    ADM.ring = null;
+    $('admBldg').textContent = 'Footprint unavailable; a 25 m box will be used.';
+  }
+  admDrawScene();
+}
+
+function admAdd(kind){
+  const st = ADM.building;
+  const base = st ? [st.lat + 0.002, st.lon - 0.002] : [map.getCenter().lat, map.getCenter().lng];
+  const s = {kind, label: kind[0].toUpperCase() + kind.slice(1) + ' source',
+             q_g_s: kind === 'point' ? 1.0 : 5.0,
+             h_m: kind === 'point' ? 15 : 1, schedule: 'continuous', enabled: true};
+  if(kind === 'point'){ s.lat = base[0]; s.lon = base[1]; }
+  if(kind === 'line'){ s.points = [[base[0], base[1]], [base[0]+0.001, base[1]+0.003]];
+                       s.temp_k = null; }
+  if(kind === 'area'){ const d = 0.0008;
+    s.ring = [[base[0]-d,base[1]-d],[base[0]-d,base[1]+d],
+              [base[0]+d,base[1]+d],[base[0]+d,base[1]-d]]; }
+  ADM.sources.push(s);
+  admRenderSources(); admDrawScene();
+}
+
+function admRenderSources(){
+  const box = $('admSources');
+  if(!ADM.sources.length){
+    box.innerHTML = '<span class="per">No sources yet. Add a point (stack), ' +
+      'line (road) or area (yard, landfill).</span>';
+    return;
+  }
+  box.innerHTML = '';
+  ADM.sources.forEach((s, i) => {
+    const d = document.createElement('div');
+    d.className = 'dxSrc';
+    d.innerHTML =
+      `<div class="dxSrcHead">
+         <input type="checkbox" ${s.enabled ? 'checked' : ''} data-f="enabled">
+         <input type="text" value="${(s.label||'').replace(/"/g,'&quot;')}" data-f="label">
+         <button data-del="${i}">&#10005;</button>
+       </div>
+       <div class="dxGrid">
+         <div><label>Type</label><input type="text" value="${s.kind}" disabled></div>
+         <div><label>Emission (g/s)</label>
+           <input type="text" data-f="q_g_s" value="${s.q_g_s}"></div>
+         <div><label>Release height (m)</label>
+           <input type="text" data-f="h_m" value="${s.h_m}"></div>
+         <div><label>Schedule</label>
+           <select data-f="schedule">
+             <option value="continuous"${s.schedule==='continuous'?' selected':''}>Continuous</option>
+             <option value="traffic_urban"${s.schedule==='traffic_urban'?' selected':''}>Urban traffic</option>
+             <option value="daytime_shift"${s.schedule==='daytime_shift'?' selected':''}>Day shift</option>
+             <option value="evening_burning"${s.schedule==='evening_burning'?' selected':''}>Evening burning</option>
+           </select></div>
+         ${s.kind === 'point' ? `
+         <div><label>Exit temp (K)</label>
+           <input type="text" data-f="temp_k" value="${s.temp_k ?? ''}"></div>
+         <div><label>Exit velocity (m/s)</label>
+           <input type="text" data-f="vel_m_s" value="${s.vel_m_s ?? ''}"></div>
+         <div><label>Stack diameter (m)</label>
+           <input type="text" data-f="diam_m" value="${s.diam_m ?? ''}"></div>` : ''}
+       </div>
+       <div class="per" style="margin-top:4px">Drag the marker on the map to reposition.</div>`;
+    d.querySelectorAll('[data-f]').forEach(el =>
+      el.addEventListener('change', () => {
+        const f = el.dataset.f;
+        if(el.type === 'checkbox') s[f] = el.checked;
+        else if(f === 'label' || f === 'schedule') s[f] = el.value;
+        else { const v = parseFloat(el.value); s[f] = isFinite(v) ? v : null; }
+        admDrawScene();
+      }));
+    d.querySelector('[data-del]').addEventListener('click', () => {
+      ADM.sources.splice(i,1); admRenderSources(); admDrawScene();
+    });
+    box.appendChild(d);
+  });
+}
+
+function admDrawScene(){
+  admLayer.clearLayers();
+  if(ADM.ring){
+    L.polygon(ADM.ring, {color:'#7FD0BC', weight:2, fillColor:'#7FD0BC',
+                         fillOpacity:.18}).addTo(admLayer)
+      .bindTooltip('Building of interest');
+  } else if(ADM.building){
+    const d = 12.5/110540;
+    L.rectangle([[ADM.building.lat-d, ADM.building.lon-d],
+                 [ADM.building.lat+d, ADM.building.lon+d]],
+                {color:'#7FD0BC', weight:2, dashArray:'5 4',
+                 fillOpacity:.12}).addTo(admLayer)
+      .bindTooltip('Building (25 m box \u2014 no OSM footprint)');
+  }
+  ADM.sources.forEach((s, i) => {
+    const col = s.enabled ? '#E4572E' : '#6b6b6b';
+    if(s.kind === 'point'){
+      const mk = L.marker([s.lat, s.lon], {draggable:true}).addTo(admLayer);
+      mk.bindTooltip(`${s.label} \u00b7 ${s.q_g_s} g/s`);
+      mk.on('dragend', ev => { const p = ev.target.getLatLng();
+        s.lat = p.lat; s.lon = p.lng; admDrawScene(); });
+    } else if(s.kind === 'line'){
+      L.polyline(s.points, {color:col, weight:4, opacity:.9}).addTo(admLayer)
+        .bindTooltip(`${s.label} \u00b7 ${s.q_g_s} g/s`);
+      s.points.forEach((p, k) => {
+        const mk = L.marker(p, {draggable:true}).addTo(admLayer);
+        mk.on('dragend', ev => { const q = ev.target.getLatLng();
+          s.points[k] = [q.lat, q.lng]; admDrawScene(); });
+      });
+    } else {
+      L.polygon(s.ring, {color:col, weight:2, fillColor:col,
+                         fillOpacity:.22}).addTo(admLayer)
+        .bindTooltip(`${s.label} \u00b7 ${s.q_g_s} g/s`);
+    }
+  });
+  if(admLayer.getLayers().length)
+    try{ map.fitBounds(admLayer.getBounds().pad(0.25)); }catch(e){}
+}
+
+async function admRun(){
+  if(!ADM.building) return toast('Pick the building of interest first');
+  if(!ADM.sources.length) return toast('Add at least one emission source');
+  const btn = $('admRun'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Running\u2026';
+  Progress.start('Air dispersion model',
+                 'Solving the boundary layer and every facade receptor\u2026', 0);
+  try{
+    const body = {
+      lat: ADM.building.lat, lon: ADM.building.lon,
+      building_ring: ADM.ring || [],
+      building_h_m: parseFloat($('admH').value) || 12,
+      levels: parseInt($('admLevels').value) || 4,
+      sources: ADM.sources,
+      pollutant: $('admSpecies').value,
+      met_mode: $('admMet').value,
+      hour: +$('admHour').value,
+      surface_roughness_m: parseFloat($('admZ0').value) || 1.0,
+      bowen_ratio: parseFloat($('admBowen').value) || 1.0,
+    };
+    if($('admMet').value === 'climatology' && $('admMonth').value)
+      body.month = +$('admMonth').value;
+    const j = await api('/aermod_run', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)}, true);
+    ADM.last = j;
+
+    // receptors on the map, coloured by load
+    admDrawScene();
+    const mx = Math.max(1e-9, ...j.receptors.map(r => r.conc));
+    j.receptors.forEach(r => {
+      const t = r.conc / mx;
+      L.circleMarker([r.lat, r.lon],
+        {radius: 3 + 4*t, color:'#fff', weight:.6,
+         fillColor: wgColour(t), fillOpacity:.92}).addTo(admLayer)
+        .bindTooltip(`${r.facing} facade \u00b7 ${r.z} m<br><b>${r.conc} ${j.pollutant.unit}</b>`,
+                     {sticky:true});
+    });
+
+    const u = j.pollutant.unit;
+    const faceRows = j.facades.map(f => {
+      const w = Math.round(100 * f.max / Math.max(1e-9, j.peak));
+      return `<div class="admFace"><span class="admFaceName">${f.facing}</span>` +
+             `<span class="admBar"><i style="width:${w}%"></i></span>` +
+             `<span class="admFaceVal">${f.max} ${u}</span></div>`;
+    }).join('');
+    const lvlRows = j.levels.map(l =>
+      `<tr><td>${l.height_m} m</td><td style="text-align:right">${l.mean}</td>` +
+      `<td style="text-align:right">${l.max}</td></tr>`).join('');
+    const srcRows = j.sources.map(s =>
+      `<tr><td>${s.label}</td><td style="text-align:right">${s.q_g_s} g/s</td>` +
+      `<td style="text-align:right">${s.contribution}%</td></tr>`).join('');
+    const lim = Object.entries(j.fraction_of_limit || {}).map(([k,v]) =>
+      `<tr><td>${k}</td><td style="text-align:right">${
+        v == null ? '\u2014' : (v >= 1 ? '<b style="color:#E4572E">'+v+'\u00d7</b>' : v+'\u00d7')
+      }</td></tr>`).join('');
+    const m = j.met;
+
+    admOpen(`${j.pollutant.label} \u00b7 ${m.regime} \u00b7 ${m.wind_from} ${m.u_ref_ms} m/s`);
+    $('admDrawerBody').innerHTML =
+      `<div class="mmVerdict warn" style="font-size:11px">${j.model}. Not for compliance.</div>` +
+      `<div class="paneLabel">Facade loading (peak)</div>${faceRows}` +
+      `<table class="aqTable" style="margin-top:8px">` +
+      `<tr><td>Worst facade</td><td style="text-align:right"><b>${j.worst.facing}</b> at ${j.worst.height_m} m</td></tr>` +
+      `<tr><td>Peak concentration</td><td style="text-align:right"><b>${j.peak} ${u}</b></td></tr>` +
+      `<tr><td>Receptors</td><td style="text-align:right">${j.building.receptor_count}</td></tr>` +
+      `<tr><td>Source elements</td><td style="text-align:right">${j.elements}</td></tr>` +
+      `</table>` +
+      `<div class="paneLabel" style="margin-top:12px">By height</div>` +
+      `<table class="aqTable"><tr><td><b>Level</b></td><td style="text-align:right"><b>Mean</b></td>` +
+      `<td style="text-align:right"><b>Max</b></td></tr>${lvlRows}</table>` +
+      `<div class="paneLabel" style="margin-top:12px">Source apportionment at the worst receptor</div>` +
+      `<table class="aqTable">${srcRows}</table>` +
+      `<div class="paneLabel" style="margin-top:12px">Peak vs limits</div>` +
+      `<table class="aqTable">${lim}</table>` +
+      `<div class="paneLabel" style="margin-top:12px">Boundary layer</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Regime</td><td style="text-align:right"><b>${m.regime}</b></td></tr>` +
+      `<tr><td>u* (friction velocity)</td><td style="text-align:right">${m.ustar_ms} m/s</td></tr>` +
+      `<tr><td>L (Monin-Obukhov)</td><td style="text-align:right">${m.monin_obukhov_m} m</td></tr>` +
+      `<tr><td>w* (convective scale)</td><td style="text-align:right">${m.wstar_ms} m/s</td></tr>` +
+      `<tr><td>Mixing height</td><td style="text-align:right">${m.mixing_height_m} m</td></tr>` +
+      `<tr><td>Sensible heat flux</td><td style="text-align:right">${m.heat_flux_W_m2} W/m\u00b2</td></tr>` +
+      `<tr><td>Solver</td><td style="text-align:right">${m.solver_iterations} iterations</td></tr>` +
+      `</table><p class="srcNote">Met: ${m.source}</p>` +
+      `<ul class="mmList">${j.caveats.map(x => `<li>${x}</li>`).join('')}</ul>` +
+      mathModelHtml(j.math_model);
+    $('admInfo').innerHTML = `Worst: <b>${j.worst.facing}</b> facade, ` +
+      `${j.peak} ${u}`;
+  }catch(e){
+    $('admInfo').textContent = e.message;
+    toast('Dispersion: ' + e.message, 12000);
+  }
+  finally{ Progress.done(); btn.disabled = false; btn.textContent = o; }
+}
+
+async function admVerify(){
+  const btn = $('admVerify'); const o = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Testing\u2026';
+  try{
+    const j = await api('/aermod_verify');
+    const rows = j.tests.map(t =>
+      `<div class="dxTest ${t.pass ? 'ok' : 'bad'}"><div>
+         <b>${t.pass ? '\u2713' : '\u2717'} ${t.name}</b> ${t.detail}<br>
+         <span class="per">expected ${t.expected} \u00b7 got ${t.got}</span>
+         <div class="dxWhy">${t.why}</div></div></div>`).join('');
+    admOpen('code verification');
+    $('admDrawerBody').innerHTML =
+      `<div class="paneLabel">Verification \u00b7 ${j.passed}/${j.total} passed</div>` +
+      `<p class="srcNote">${j.explains}</p>${rows}`;
+  }catch(e){ toast('Verify: ' + e.message, 9000); }
+  btn.disabled = false; btn.textContent = o;
+}
+
 /* ---------- rooftop solar (Google Solar API) --------------------------------
    Roof segments coloured by orientation, with pitch, area and modelled annual
    irradiance. Sits alongside the sun path and shadow tools: those tell you WHEN
@@ -5149,9 +5548,9 @@ async function runSlope(){
 const BASKETS = {
   sat: {sub: ['explore'], default: 'explore'},
   urban: {sub: ['site', 'adv', 'slope'], default: 'site'},
-  climate: {sub: ['weather', 'aq', 'thermal', 'sunlight', 'noise'], default: 'weather'},
+  climate: {sub: ['weather', 'aq', 'adm', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'weather', 'aq', 'thermal', 'sunlight', 'noise'];
+const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'weather', 'aq', 'adm', 'thermal', 'sunlight', 'noise'];
 function wipeMapAnalysis(){
   // clear ALL analysis overlays so switching tabs leaves a clean map.
   // wrapped in try/catch: this may run at initial load before the layer
@@ -5160,7 +5559,8 @@ function wipeMapAnalysis(){
     [osmSourceLayer, climatePointMarkers, aqLayer, stationMarkers,
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
    slopeLayer, sunPathLayer, shadowLayer, createLayer,
-   weatherGridLayer, dxLayer, siteLayerGroup, solarLayer].forEach(g => {
+   weatherGridLayer, dxLayer, siteLayerGroup, solarLayer,
+   admLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -5186,6 +5586,7 @@ function showTab(tab){
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
   if(tab === 'aq'){ clearAllClimatePoints(); aqInit(); dxInit(); }
+  if(tab === 'adm') admInit();
   if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight'){ sunlightInit(); solInit(); }
@@ -6198,7 +6599,7 @@ function noiseInit(){ clearAllClimatePoints(); _noiseTab.init(); }
 let dispersionOverlay = null;
 function clearDispersion(){
   if(dispersionOverlay){ map.removeLayer(dispersionOverlay); dispersionOverlay = null; }
-  $('aqDisperseClear').hidden = true;
+  if($('aqDisperseClear')) $('aqDisperseClear').hidden = true;
 }
 async function runDispersion(){
   if(aqState.lat == null) return toast('Pick a point in the Air tab first');
@@ -6216,7 +6617,7 @@ async function runDispersion(){
     dispersionOverlay = L.imageOverlay(j.image, j.bounds,
       {opacity: 0.72, pane: 'datapane', interactive: false}).addTo(map);
     map.fitBounds(j.bounds);
-    $('aqDisperseClear').hidden = false;
+    if($('aqDisperseClear')) $('aqDisperseClear').hidden = false;
     $('drawer').classList.add('open');
     if(typeof paneMode === 'function') paneMode('site');
     $('drawerSub').textContent = 'Plume dispersion \u00b7 ' +
@@ -6242,8 +6643,6 @@ async function runDispersion(){
   finally { Progress.done(); }
   btn.disabled = false; btn.textContent = orig;
 }
-if($('aqDisperse')) $('aqDisperse').addEventListener('click', runDispersion);
-if($('aqDisperseClear')) $('aqDisperseClear').addEventListener('click', clearDispersion);
 
 /* ---------- Live Air Quality (multi-provider) ---------- */
 const AQ_PROVIDERS = [
@@ -6287,8 +6686,8 @@ function aqSetPoint(lat, lon, label){
     fillColor: '#00B4D8', fillOpacity: 0.9}).addTo(aqLayer)
     .bindPopup(label || (lat.toFixed(5) + ', ' + lon.toFixed(5))).openPopup();
   $('aqRun').disabled = false;
-  $('aqApportion').disabled = false;
-  if($('aqDisperse')) $('aqDisperse').disabled = false;
+  if($('aqApportion')) $('aqApportion').disabled = false;
+  
   $('aqStatus').textContent = lat.toFixed(5) + ', ' + lon.toFixed(5) +
     ' \u2014 or tap the map to adjust';
 }
@@ -6390,65 +6789,6 @@ function drawSourceMarkers(sources, clat, clon, scanM){
         (s.dist_m != null ? `<br>${s.dist_m >= 1000 ? (s.dist_m/1000).toFixed(1)+' km' : s.dist_m+' m'} away` : ''));
   });
 }
-$('aqApportion').addEventListener('click', async () => {
-  if(aqState.lat == null) return;
-  const btn = $('aqApportion');
-  btn.disabled = true; btn.textContent = 'Analysing sources\u2026';
-  $('drawer').classList.add('open');
-  if(typeof paneMode === 'function') paneMode('site');
-  $('drawerSub').textContent = 'Pollutant source-proximity model \u00b7 ' +
-    aqState.lat.toFixed(4) + ', ' + aqState.lon.toFixed(4);
-  $('siteWrap').hidden = false;
-  sourceMarkers.clearLayers();
-  $('siteWrap').innerHTML = '<p class="hint">Scanning nearby pollutant sources (OpenStreetMap) and weighting by distance and prevailing wind\u2026</p>';
-  try{
-    const j = await api('/source_apportion', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({lat: aqState.lat, lon: aqState.lon,
-        radius_m: 500})});
-    const km = ((j.scan_radius_m || 2500) / 1000).toFixed(1);
-    if(j.osm_ok === false){
-      $('siteWrap').innerHTML = '<div class="siteSec"><div class="paneLabel">Pollutant source-proximity model</div>' +
-        `<p class="srcNote" style="color:#E9C46A">${j.method}</p></div>`;
-    } else if(!j.contributions || !j.contributions.length){
-      $('siteWrap').innerHTML = '<div class="siteSec"><div class="paneLabel">Pollutant source-proximity model</div>' +
-        `<p class="srcNote">No mapped pollutant sources found within ${km} km (${j.sources_found} features). ` +
-        'This suggests a low-source area, or sparse OpenStreetMap coverage here.</p></div>';
-    } else {
-      const wind = j.prevailing_wind_from
-        ? `Prevailing wind from ${j.prevailing_wind_from} (${j.prevailing_wind_from_deg}\u00b0); upwind sources weighted higher.`
-        : 'Wind data unavailable; distance-only weighting.';
-      $('siteWrap').innerHTML = `
-        <div class="siteSec">
-          <div class="paneLabel">Estimated relative source influence <span class="per">\u00b7 ${km} km scan</span></div>
-          <div class="pieBox"><canvas id="cApportionPie"></canvas></div>
-          <table class="aqTable" style="margin-top:8px">
-            <tr><th>Source</th><th>Share</th><th>Nearest</th><th>Count</th></tr>
-            ${j.contributions.map(c => `<tr>` +
-              `<td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${c.color};margin-right:5px"></i>${c.label}</td>` +
-              `<td style="text-align:right">${c.pct}%</td>` +
-              `<td style="text-align:right">${c.nearest_m != null ? (c.nearest_m >= 1000 ? (c.nearest_m/1000).toFixed(1)+' km' : c.nearest_m+' m') : '\u2014'}</td>` +
-              `<td style="text-align:right">${c.count}</td></tr>`).join('')}
-          </table>
-          <p class="srcNote" style="margin-top:6px">${wind}</p>
-          <p class="srcNote">${j.method}</p>
-        </div>` + provenanceBlock(['osm', 'era5_wind'], {lat: aqState.lat, lon: aqState.lon});
-      drawSourcesWithLines(j.sources_list, aqState.lat, aqState.lon, {scanM: j.scan_radius_m || 2500});
-      if(apportionChart){ apportionChart.destroy(); apportionChart = null; }
-      apportionChart = new Chart($('cApportionPie').getContext('2d'), {
-        type: 'doughnut',
-        data: {labels: j.contributions.map(c => c.label),
-               datasets: [{data: j.contributions.map(c => c.pct),
-                 backgroundColor: j.contributions.map(c => c.color),
-                 borderColor: '#101B16', borderWidth: 1.5}]},
-        options: {responsive: true, maintainAspectRatio: false,
-          plugins: {legend: {position: 'right',
-            labels: {color: '#C9D3CC', font: {size: 11}, boxWidth: 12, padding: 6}},
-            tooltip: {callbacks: {label: x => ' ' + x.label + ': ' + x.parsed.toFixed(1) + '%'}}}}});
-    }
-  }catch(e){ toast('Source-proximity model: ' + e.message, 9000); }
-  btn.disabled = false; btn.textContent = 'Pollutant source-proximity model';
-});
 
 /* ---------- Bhuvan token APIs (via backend proxy) ---------- */
 const BHUVAN_PRESETS = [
