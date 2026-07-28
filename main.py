@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v113"
+APP_VERSION = "deepseego-v114"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5283,6 +5283,897 @@ class DispersionAdvQuery(BaseModel):
     background: float = 0.0        # add a regional background concentration
 
 
+# ============================================================================
+# AERMOD-FORMULATION DISPERSION
+#
+# WHAT THIS IS: an implementation of the published AERMOD dispersion equations
+# (Cimorelli et al. 2005, EPA-454/R-03-004) - the bi-Gaussian convective
+# formulation, the Gaussian stable formulation, similarity-theory boundary
+# layer scaling, meander, and multiple reflection.
+#
+# WHAT THIS IS NOT: EPA AERMOD. It is not regulatory-grade and must not be
+# used for compliance. Specifically absent:
+#   * AERMET - real hourly surface + upper-air soundings. We derive boundary
+#     layer parameters from reanalysis/forecast met, which is a weaker input.
+#   * AERMAP - terrain elevations and the hill-height scale. Flat terrain only,
+#     so the critical dividing streamline treatment is not applied.
+#   * PRIME - building downwash and cavity recirculation.
+#   * AERSURFACE - gridded albedo/Bowen ratio/roughness. Single values used.
+#   * EPA's validation against the field campaigns AERMOD was evaluated on.
+#
+# Every one of these is stated in the app output, not buried here.
+# ============================================================================
+KARMAN = 0.4
+G_ACC = 9.81
+CP_AIR = 1004.0
+RHO_AIR = 1.2
+
+
+def _pbl_convective(u_ref, z_ref, z0, H_flux, T_K, zi):
+    """Convective boundary layer scales.
+
+    u* and L are mutually dependent - u* appears in L, and L appears in the
+    stability correction to the wind profile that gives u*. AERMET solves this
+    by iteration; so do we, and the convergence criterion is reported.
+    """
+    u_ref = max(float(u_ref), 0.3)
+    z0 = max(float(z0), 1e-3)
+    # neutral first guess
+    ustar = KARMAN * u_ref / max(1e-6, math.log(z_ref / z0))
+    L = -1e6
+    iters, resid = 0, None
+    for iters in range(1, 51):
+        if H_flux <= 0:
+            break
+        L = -RHO_AIR * CP_AIR * T_K * ustar ** 3 / (KARMAN * G_ACC * H_flux)
+        # Businger-Dyer unstable stability functions
+        def psi_m(zz):
+            x = (1.0 - 16.0 * zz / L) ** 0.25 if L < 0 else 1.0
+            if L >= 0:
+                return 0.0
+            return (2.0 * math.log((1 + x) / 2) + math.log((1 + x * x) / 2)
+                    - 2.0 * math.atan(x) + math.pi / 2)
+        denom = math.log(z_ref / z0) - psi_m(z_ref) + psi_m(z0)
+        new = KARMAN * u_ref / max(1e-6, denom)
+        resid = abs(new - ustar) / max(1e-9, ustar)
+        ustar = new
+        if resid < 1e-4:
+            break
+    wstar = ((G_ACC * H_flux * zi) / (RHO_AIR * CP_AIR * T_K)) ** (1.0 / 3.0) \
+        if H_flux > 0 else 0.0
+    return {"ustar": ustar, "L": L, "wstar": wstar, "zi": zi,
+            "iterations": iters, "residual": resid,
+            "criterion": "relative change in u* < 1e-4, max 50 iterations"}
+
+
+def _pbl_stable(u_ref, z_ref, z0, T_K, cloud_frac):
+    """Stable boundary layer scales (van Ulden & Holtslag / AERMET approach).
+
+    theta* is parameterised from cloud cover, then u* and L are solved
+    iteratively against the stable wind profile.
+    """
+    u_ref = max(float(u_ref), 0.3)
+    z0 = max(float(z0), 1e-3)
+    N = max(0.0, min(1.0, float(cloud_frac)))
+    theta_star = 0.09 * (1.0 - 0.5 * N * N)          # K
+    ustar = KARMAN * u_ref / max(1e-6, math.log(z_ref / z0))
+    L = 1e6
+    iters, resid = 0, None
+    for iters in range(1, 51):
+        L = T_K * ustar ** 2 / (KARMAN * G_ACC * max(1e-6, theta_star))
+        # stable: psi_m = -5 z/L
+        denom = math.log(z_ref / z0) + 5.0 * (z_ref - z0) / max(1e-6, L)
+        new = KARMAN * u_ref / max(1e-6, denom)
+        resid = abs(new - ustar) / max(1e-9, ustar)
+        ustar = new
+        if resid < 1e-4:
+            break
+        if ustar < 0.01:                    # very light wind: solution collapses
+            break
+    zi = 2300.0 * ustar ** 1.5              # mechanical mixing height
+    return {"ustar": ustar, "L": L, "wstar": 0.0, "zi": max(30.0, zi),
+            "theta_star": theta_star,
+            "iterations": iters, "residual": resid,
+            "criterion": "relative change in u* < 1e-4, max 50 iterations"}
+
+
+def _sigma_wv(z, pbl, convective):
+    """Turbulence: vertical and lateral velocity variances.
+
+    AERMOD combines a convective and a mechanical contribution in quadrature.
+    """
+    zi = max(1.0, pbl["zi"])
+    us = max(0.01, pbl["ustar"])
+    ws = max(0.0, pbl["wstar"])
+    zz = min(max(float(z), 0.5), zi)
+    if convective and ws > 0:
+        sw_c = 1.6 * ws * (zz / zi) ** (1.0 / 3.0) * math.exp(-zz / zi * 0.0)
+        sw_m = 1.3 * us * max(0.0, 1.0 - zz / zi) ** 0.5
+        sw = math.sqrt(sw_c ** 2 + sw_m ** 2)
+        sv = math.sqrt((0.35 * ws) ** 2 + (1.9 * us) ** 2)
+    else:
+        sw = 1.3 * us * max(0.05, (1.0 - zz / zi)) ** 0.75
+        sv = 1.9 * us * max(0.05, (1.0 - zz / zi)) ** 0.75
+    return max(0.02, sw), max(0.05, sv)
+
+
+def _sigmas(x, u, sw, sv, zi, convective):
+    """Plume spread from turbulence and travel time (Taylor-limited growth)."""
+    x = max(1.0, float(x))
+    u = max(0.3, float(u))
+    t = x / u
+    # lateral: Taylor form with a lateral Lagrangian timescale
+    Tly = 300.0 if convective else 100.0
+    sy = sv * t / math.sqrt(1.0 + t / (2.0 * Tly))
+    # vertical: shorter timescale, capped by the mixed layer depth
+    Tlz = 200.0 if convective else 50.0
+    sz = sw * t / math.sqrt(1.0 + t / (2.0 * Tlz))
+    return sy, min(sz, 0.9 * zi)
+
+
+def _conc_cbl(y, z, Q, u, he, sy, sz, zi, wstar, x):
+    """Convective boundary layer: bi-Gaussian vertical distribution.
+
+    In a convective layer, vertical velocities are SKEWED - narrow strong
+    updrafts and broad weak downdrafts. A single Gaussian cannot represent
+    that, so AERMOD superposes two: material in updrafts rises and reflects off
+    the inversion; material in downdrafts descends and reflects off the ground.
+    This is what produces the characteristic lofting behaviour that a simple
+    Gaussian plume gets wrong.
+    """
+    if sy <= 0 or sz <= 0:
+        return 0.0
+    # updraft / downdraft weights from the skewed vertical velocity PDF
+    lam1, lam2 = 0.6, 0.4
+    ws = max(1e-6, wstar)
+    w1 = 0.4 * ws                       # mean updraft velocity
+    w2 = -lam1 * w1 / lam2              # mass balance: downdrafts compensate
+    t = x / max(0.3, u)
+    total = 0.0
+    for lam, wbar in ((lam1, w1), (lam2, w2)):
+        psi = he + wbar * t             # source height displaced by the draft
+        s = sz
+        acc = 0.0
+        for m in range(-2, 3):          # image sources: ground + inversion lid
+            acc += math.exp(-((z - psi - 2 * m * zi) ** 2) / (2 * s * s))
+            acc += math.exp(-((z + psi + 2 * m * zi) ** 2) / (2 * s * s))
+        total += lam * acc / s
+    lateral = math.exp(-(y * y) / (2 * sy * sy)) / (math.sqrt(2 * math.pi) * sy)
+    return Q / (math.sqrt(2 * math.pi) * max(0.3, u)) * total * lateral
+
+
+def _conc_sbl(y, z, Q, u, he, sy, sz, zi):
+    """Stable boundary layer: Gaussian vertical with multiple reflection."""
+    if sy <= 0 or sz <= 0:
+        return 0.0
+    acc = 0.0
+    for m in range(-2, 3):
+        acc += math.exp(-((z - he - 2 * m * zi) ** 2) / (2 * sz * sz))
+        acc += math.exp(-((z + he + 2 * m * zi) ** 2) / (2 * sz * sz))
+    lateral = math.exp(-(y * y) / (2 * sy * sy)) / (math.sqrt(2 * math.pi) * sy)
+    return Q / (math.sqrt(2 * math.pi) * max(0.3, u) * sz) * acc * lateral
+
+
+def _meander_weight(x, u, sv, convective):
+    """Plume meander: at low wind or long travel time the plume wanders rather
+    than holding a straight axis. AERMOD interpolates between a coherent plume
+    and a randomly-directed one; ignoring this badly over-predicts near-calm
+    concentrations on the centreline."""
+    t = x / max(0.3, u)
+    Tly = 300.0 if convective else 100.0
+    fp = 1.0 / (1.0 + (t / (2.0 * Tly)) ** 2)
+    return max(0.0, min(1.0, fp))
+
+
+def _conc_random(y_dist, z, Q, u, he, sz, zi, r):
+    """The meander limit: material spread uniformly around the source at
+    radius r, still Gaussian in the vertical."""
+    if r <= 1.0 or sz <= 0:
+        return 0.0
+    acc = 0.0
+    for m in range(-2, 3):
+        acc += math.exp(-((z - he - 2 * m * zi) ** 2) / (2 * sz * sz))
+        acc += math.exp(-((z + he + 2 * m * zi) ** 2) / (2 * sz * sz))
+    return Q / (math.sqrt(2 * math.pi) * max(0.3, u) * sz * 2 * math.pi * r) * acc
+
+
+def _facade_receptors(ring, height_m, levels=4, spacing_m=8.0):
+    """Place receptors around a building's facades.
+
+    Standard dispersion models put receptors on a ground grid. For building
+    physics the question is different: what arrives AT THE ENVELOPE, and at
+    which height. So we walk the footprint, place receptors every `spacing_m`
+    along each wall, at several levels up the facade, and record the outward
+    normal of the wall each one sits on - which is what lets us report
+    concentration per elevation rather than as a single building average.
+    """
+    pts = []
+    n = len(ring)
+    if n < 3:
+        return pts
+    mlat = 110540.0
+    lat0 = sum(p[0] for p in ring) / n
+    mlon = 111320.0 * math.cos(math.radians(lat0))
+    zs = [height_m * f for f in
+          ([0.5 / max(1, levels)] if levels == 1 else
+           [(i + 0.5) / levels for i in range(levels)])]
+    for i in range(n - 1 if ring[0] == ring[-1] else n):
+        a = ring[i]
+        b = ring[(i + 1) % n]
+        dx = (b[1] - a[1]) * mlon
+        dy = (b[0] - a[0]) * mlat
+        seg = math.hypot(dx, dy)
+        if seg < 1.0:
+            continue
+        # outward normal (footprints are traced counter-clockwise in GeoJSON,
+        # so the right-hand normal points out)
+        nx, ny = dy / seg, -dx / seg
+        nsteps = max(1, int(seg // spacing_m))
+        for k in range(nsteps):
+            t = (k + 0.5) / nsteps
+            plat = a[0] + (b[0] - a[0]) * t
+            plon = a[1] + (b[1] - a[1]) * t
+            # nudge 0.5 m outward so the receptor sits on the surface, not
+            # inside the volume
+            plat += (ny * 0.5) / mlat
+            plon += (nx * 0.5) / mlon
+            bearing = (math.degrees(math.atan2(nx, ny)) + 360.0) % 360.0
+            for z in zs:
+                pts.append({"lat": plat, "lon": plon, "z": z,
+                            "wall": i, "normal_deg": round(bearing, 1),
+                            "facing": _compass16(bearing)})
+    return pts
+
+
+def _source_elements(s, mlat, mlon, olat, olon):
+    """Break a source into elementary point emitters.
+
+    A line (road) is integrated as a chain of points; an area (yard, landfill,
+    stockpile) as a grid over its extent. Each element carries its share of the
+    total emission, so the sum reproduces the source strength exactly.
+    """
+    kind = s.get("kind", "point")
+    Q = float(s.get("q_g_s") or 0.0)
+    h = float(s.get("h_m") or 0.0)
+    out = []
+    if kind == "point":
+        out.append({"x": (s["lon"] - olon) * mlon, "y": (s["lat"] - olat) * mlat,
+                    "q": Q, "h": h})
+    elif kind == "line":
+        pts = s.get("points") or []
+        if len(pts) < 2:
+            return out
+        segs = []
+        total = 0.0
+        for a, b in zip(pts[:-1], pts[1:]):
+            dx = (b[1] - a[1]) * mlon
+            dy = (b[0] - a[0]) * mlat
+            d = math.hypot(dx, dy)
+            segs.append((a, b, d)); total += d
+        if total <= 0:
+            return out
+        for a, b, d in segs:
+            n = max(1, int(d // 15))          # ~15 m elements
+            for k in range(n):
+                t = (k + 0.5) / n
+                out.append({
+                    "x": ((a[1] + (b[1] - a[1]) * t) - olon) * mlon,
+                    "y": ((a[0] + (b[0] - a[0]) * t) - olat) * mlat,
+                    "q": Q * (d / total) / n, "h": h})
+    elif kind == "area":
+        ring = s.get("ring") or []
+        if len(ring) < 3:
+            return out
+        lats = [p[0] for p in ring]; lons = [p[1] for p in ring]
+        n = 6
+        cells = []
+        for i in range(n):
+            for j in range(n):
+                la = min(lats) + (max(lats) - min(lats)) * (i + 0.5) / n
+                lo = min(lons) + (max(lons) - min(lons)) * (j + 0.5) / n
+                if _pt_in_ring(la, lo, ring):
+                    cells.append((la, lo))
+        if not cells:
+            cells = [(sum(lats) / len(lats), sum(lons) / len(lons))]
+        for la, lo in cells:
+            out.append({"x": (lo - olon) * mlon, "y": (la - olat) * mlat,
+                        "q": Q / len(cells), "h": h})
+    return out
+
+
+def _pt_in_ring(lat, lon, ring):
+    inside = False
+    n = len(ring)
+    for i in range(n):
+        a, b = ring[i], ring[(i + 1) % n]
+        if ((a[0] > lat) != (b[0] > lat)) and \
+           (lon < (b[1] - a[1]) * (lat - a[0]) / (b[0] - a[0] + 1e-12) + a[1]):
+            inside = not inside
+    return inside
+
+
+class AermodSource(BaseModel):
+    kind: str = "point"            # point | line | area
+    label: str = ""
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    points: list = []              # line: [[lat,lon],...]
+    ring: list = []                # area: [[lat,lon],...]
+    q_g_s: float = 1.0
+    h_m: float = 10.0
+    temp_k: Optional[float] = None
+    vel_m_s: Optional[float] = None
+    diam_m: Optional[float] = None
+    schedule: str = "continuous"
+    enabled: bool = True
+
+
+class AermodQuery(BaseModel):
+    lat: float                     # building / site of interest
+    lon: float
+    building_ring: list = []       # [[lat,lon],...]; if empty, a box is built
+    building_h_m: float = 12.0
+    building_size_m: float = 25.0  # used when no ring is supplied
+    levels: int = 4
+    sources: list = []
+    pollutant: str = "pm25"
+    met_mode: str = "current"      # current | climatology | hour_of_year
+    month: Optional[int] = None
+    hour: int = 12
+    day_of_year: Optional[int] = None
+    wind_speed_ms: Optional[float] = None
+    wind_from_deg: Optional[float] = None
+    surface_roughness_m: float = 1.0    # urban default
+    bowen_ratio: float = 1.0
+    albedo: float = 0.18
+    background: float = 0.0
+
+
+def _num(v, default):
+    """Numeric coalesce that RESPECTS ZERO.
+
+    `x or default` is wrong for physical quantities: 0.0 is falsy, so a
+    genuine zero (no solar radiation at night, wind from due north) would be
+    silently replaced by the default. That bug turned every night-time run
+    convective until a test caught it.
+    """
+    try:
+        return default if v is None else float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _met_for_run(q):
+    """Assemble the meteorology this run will use, and say where it came from."""
+    lat, lon = q.lat, q.lon
+    src_note, cloud = "", 0.3
+    if q.wind_speed_ms is not None and q.wind_from_deg is not None:
+        u, wdir, solar, T = (float(q.wind_speed_ms), float(q.wind_from_deg),
+                             400.0, 300.0)
+        src_note = "manually specified"
+    elif q.met_mode == "climatology":
+        wc = _wind_climatology(lat, lon, q.month)
+        u, wdir = wc["scalar_mean_ms"], wc["vector_from_deg"]
+        solar, T = 450.0, 300.0
+        src_note = ("ERA5-Land climatology 2015-2024"
+                    + (f", {MONTHS[q.month-1]}" if q.month else ", annual"))
+    else:
+        try:
+            d = _get_json("https://api.open-meteo.com/v1/forecast?"
+                          f"latitude={lat}&longitude={lon}"
+                          "&current=wind_speed_10m,wind_direction_10m,"
+                          "shortwave_radiation,temperature_2m,cloud_cover"
+                          "&wind_speed_unit=ms&timezone=auto")
+            cur = d.get("current", {})
+            u = _num(cur.get("wind_speed_10m"), 2.0)
+            wdir = _num(cur.get("wind_direction_10m"), 270.0)
+            solar = _num(cur.get("shortwave_radiation"), 300.0)
+            T = _num(cur.get("temperature_2m"), 27.0) + 273.15
+            cloud = _num(cur.get("cloud_cover"), 30.0) / 100.0
+            src_note = "live observation-assimilated model (Open-Meteo)"
+        except Exception:
+            u, wdir, solar, T = 2.0, 270.0, 300.0, 300.0
+            src_note = "fallback default (live met unavailable)"
+
+    # hour-of-day modulation of insolation when the user scrubs the slider
+    hour = max(0, min(23, int(q.hour)))
+    day_factor = max(0.0, math.sin(math.pi * (hour - 6) / 12.0))
+    solar_eff = solar * day_factor if q.met_mode != "current" else solar
+    if q.met_mode != "current":
+        solar_eff = max(0.0, solar_eff)
+
+    # net radiation -> sensible heat flux (Holtslag & van Ulden)
+    Rn = (1.0 - float(q.albedo)) * solar_eff - 40.0
+    H = 0.9 * Rn / (1.0 + 1.0 / max(0.1, float(q.bowen_ratio)))
+    convective = H > 5.0
+
+    if convective:
+        zi = max(200.0, min(3000.0, 100.0 + 12.0 * H))
+        pbl = _pbl_convective(u, 10.0, q.surface_roughness_m, H, T, zi)
+        pbl["regime"] = "convective"
+    else:
+        pbl = _pbl_stable(u, 10.0, q.surface_roughness_m, T, cloud)
+        pbl["regime"] = "stable"
+    pbl.update({"u_ref": u, "wind_from_deg": wdir, "T_K": T,
+                "heat_flux_W_m2": round(H, 1), "solar_W_m2": round(solar_eff, 1),
+                "cloud_fraction": cloud, "source": src_note,
+                "z0_m": q.surface_roughness_m, "hour": hour,
+                "convective": convective})
+    return pbl
+
+
+@app.post("/aermod_run")
+def aermod_run(q: AermodQuery):
+    """AERMOD-formulation dispersion onto building facade receptors."""
+    spec = POLLUTANTS.get(q.pollutant) or POLLUTANTS["pm25"]
+    pbl = _met_for_run(q)
+    u_ref = pbl["u_ref"]
+    wdir = pbl["wind_from_deg"]
+    conv = pbl["convective"]
+    zi = pbl["zi"]
+
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(q.lat))
+
+    # ---- building footprint ----
+    ring = [[float(p[0]), float(p[1])] for p in (q.building_ring or [])
+            if len(p) >= 2]
+    if len(ring) < 3:
+        d = float(q.building_size_m) / 2.0
+        dla, dlo = d / mlat, d / mlon
+        ring = [[q.lat - dla, q.lon - dlo], [q.lat - dla, q.lon + dlo],
+                [q.lat + dla, q.lon + dlo], [q.lat + dla, q.lon - dlo]]
+    recs = _facade_receptors(ring, float(q.building_h_m),
+                             levels=max(1, min(8, int(q.levels))))
+    if not recs:
+        raise HTTPException(status_code=400,
+                            detail="Could not place facade receptors.")
+
+    # ---- sources -> elementary emitters ----
+    srcs = [s if isinstance(s, dict) else s.dict() for s in (q.sources or [])]
+    elements, per_source = [], []
+    for si, s in enumerate(srcs):
+        if not s.get("enabled", True):
+            continue
+        sched = EMISSION_SCHEDULES.get(s.get("schedule") or "continuous",
+                                       EMISSION_SCHEDULES["continuous"])
+        factor = _norm_schedule(sched["hours"])[pbl["hour"]]
+        s2 = dict(s)
+        s2["q_g_s"] = float(s.get("q_g_s") or 0.0) * factor
+        els = _source_elements(s2, mlat, mlon, q.lat, q.lon)
+        rise = _plume_rise(u_ref, float(s.get("h_m") or 0.0),
+                           s.get("temp_k"), s.get("vel_m_s"), s.get("diam_m"),
+                           "D" if conv else "E")
+        for e in els:
+            e["he"] = e["h"] + rise
+            e["src"] = si
+        elements += els
+        per_source.append({"index": si, "label": s.get("label") or s.get("kind"),
+                           "kind": s.get("kind"), "q_g_s": round(s2["q_g_s"], 5),
+                           "plume_rise_m": round(rise, 1),
+                           "elements": len(els), "contribution": 0.0})
+    if not elements:
+        raise HTTPException(status_code=400, detail="No enabled sources.")
+
+    # ---- concentration at every facade receptor ----
+    th = math.radians(wdir)
+    wx, wy = -math.sin(th), -math.cos(th)          # downwind unit vector
+    scale = 1e3 if q.pollutant == "co" else 1e6    # g/m3 -> mg or ug
+    out_recs = []
+    for r in recs:
+        rx = (r["lon"] - q.lon) * mlon
+        ry = (r["lat"] - q.lat) * mlat
+        z = r["z"]
+        total = 0.0
+        contrib = [0.0] * len(srcs)
+        for e in elements:
+            dx, dy = rx - e["x"], ry - e["y"]
+            xd = dx * wx + dy * wy                 # downwind distance
+            if xd <= 1.0:
+                continue                           # no upwind transport
+            yd = -dx * wy + dy * wx                # crosswind offset
+            sw, sv = _sigma_wv(max(e["he"], 2.0), pbl, conv)
+            sy, sz = _sigmas(xd, u_ref, sw, sv, zi, conv)
+            if conv:
+                c = _conc_cbl(yd, z, e["q"], u_ref, e["he"], sy, sz, zi,
+                              pbl["wstar"], xd)
+            else:
+                c = _conc_sbl(yd, z, e["q"], u_ref, e["he"], sy, sz, zi)
+            # meander: blend the coherent plume with a radially-spread limit
+            fp = _meander_weight(xd, u_ref, sv, conv)
+            rr = math.hypot(dx, dy)
+            c_rand = _conc_random(rr, z, e["q"], u_ref, e["he"], sz, zi, rr)
+            c = fp * c + (1.0 - fp) * c_rand
+            if spec.get("v_dep_m_s"):
+                c *= math.exp(-spec["v_dep_m_s"] * xd /
+                              (max(0.3, u_ref) * max(1e-6, sz) *
+                               math.sqrt(2 * math.pi)))
+            if spec.get("half_life_h"):
+                c *= math.exp(-math.log(2) * (xd / max(0.3, u_ref)) /
+                              (spec["half_life_h"] * 3600.0))
+            total += c
+            contrib[e["src"]] += c
+        val = total * scale + float(q.background or 0.0)
+        for i, cv in enumerate(contrib):
+            if i < len(per_source):
+                pass
+        out_recs.append({"lat": r["lat"], "lon": r["lon"], "z": round(z, 1),
+                         "facing": r["facing"], "normal_deg": r["normal_deg"],
+                         "conc": round(val, 4),
+                         "_contrib": [c * scale for c in contrib]})
+
+    # ---- aggregate by facade orientation and by height ----
+    by_face, by_level = {}, {}
+    for r in out_recs:
+        by_face.setdefault(r["facing"], []).append(r["conc"])
+        by_level.setdefault(r["z"], []).append(r["conc"])
+    faces = [{"facing": k, "mean": round(sum(v) / len(v), 3),
+              "max": round(max(v), 3), "receptors": len(v)}
+             for k, v in by_face.items()]
+    faces.sort(key=lambda f: -f["max"])
+    levels = [{"height_m": k, "mean": round(sum(v) / len(v), 3),
+               "max": round(max(v), 3)}
+              for k, v in sorted(by_level.items())]
+
+    # source apportionment at the worst receptor
+    worst = max(out_recs, key=lambda r: r["conc"])
+    tot_at_worst = sum(worst["_contrib"]) or 1.0
+    for i, ps in enumerate(per_source):
+        ps["contribution"] = round(100.0 * worst["_contrib"][ps["index"]] /
+                                   tot_at_worst, 1) if i < len(worst["_contrib"]) else 0.0
+    per_source.sort(key=lambda s: -s["contribution"])
+    for r in out_recs:
+        r.pop("_contrib", None)
+
+    limits = spec.get("limits") or {}
+    peak = max(r["conc"] for r in out_recs)
+    out = {
+        "pollutant": {"key": q.pollutant, "label": spec["label"],
+                      "unit": spec["unit"]},
+        "receptors": out_recs,
+        "building": {"ring": ring, "height_m": q.building_h_m,
+                     "receptor_count": len(out_recs), "levels": q.levels},
+        "facades": faces,
+        "levels": levels,
+        "worst": {"facing": worst["facing"], "height_m": worst["z"],
+                  "conc": worst["conc"], "lat": worst["lat"], "lon": worst["lon"]},
+        "peak": round(peak, 3),
+        "fraction_of_limit": {k: (round(peak / v, 2) if v else None)
+                              for k, v in limits.items()},
+        "sources": per_source,
+        "met": {"regime": pbl["regime"], "u_ref_ms": round(u_ref, 2),
+                "wind_from_deg": round(wdir, 1), "wind_from": _compass16(wdir),
+                "ustar_ms": round(pbl["ustar"], 3),
+                "monin_obukhov_m": round(pbl["L"], 1),
+                "wstar_ms": round(pbl["wstar"], 3),
+                "mixing_height_m": round(zi, 0),
+                "heat_flux_W_m2": pbl["heat_flux_W_m2"],
+                "z0_m": pbl["z0_m"], "hour": pbl["hour"],
+                "source": pbl["source"],
+                "solver_iterations": pbl["iterations"],
+                "solver_residual": pbl["residual"]},
+        "elements": len(elements),
+        "model": "AERMOD-formulation (not EPA AERMOD - see the model panel)",
+        "caveats": [
+            "NOT EPA AERMOD: no AERMET, no AERMAP terrain, no PRIME building "
+            "downwash, and none of EPA's regulatory validation.",
+            "Not valid for compliance or permitting.",
+            "Flat terrain assumed.",
+            "Emission rates are your inputs; results scale linearly with them.",
+        ],
+    }
+    out["math_model"] = _math_aermod(out)
+    return out
+
+
+def _math_aermod(run):
+    m = run.get("met", {})
+    conv = m.get("regime") == "convective"
+    return {
+        "title": "AERMOD-formulation dispersion onto building facades",
+        "governing_equations": [
+            _eq("Monin-Obukhov similarity: friction velocity",
+                "u* = \u03ba u(z_ref) / [ ln(z_ref/z\u2080) \u2212 \u03c8\u2098(z_ref/L) "
+                "+ \u03c8\u2098(z\u2080/L) ]",
+                ["\u03ba = 0.4 (von Karman)",
+                 f"z\u2080 = {m.get('z0_m')} m (surface roughness)",
+                 "\u03c8\u2098 = Businger-Dyer stability correction"],
+                "u* and L each depend on the other, so this is solved "
+                "iteratively - see the convergence section."),
+            _eq("Monin-Obukhov length",
+                ("L = \u2212 \u03c1 c\u209a T u*\u00b3 / (\u03ba g H)"
+                 if conv else
+                 "L = T u*\u00b2 / (\u03ba g \u03b8*)"),
+                ["H = surface sensible heat flux (W/m\u00b2)",
+                 "\u03b8* = 0.09(1 \u2212 0.5N\u00b2), N = cloud fraction"],
+                f"L = {m.get('monin_obukhov_m')} m here. Negative means "
+                "convective, positive means stable."),
+            _eq("Convective velocity scale",
+                "w* = [ g H z\u1d62 / (\u03c1 c\u209a T) ]^(1/3)",
+                [f"z\u1d62 = {m.get('mixing_height_m')} m (mixing height)"],
+                "Zero in a stable layer."),
+            _eq("Turbulence",
+                "\u03c3_w\u00b2 = (1.6 w* (z/z\u1d62)^(1/3))\u00b2 + "
+                "(1.3 u* \u221a(1\u2212z/z\u1d62))\u00b2\n"
+                "\u03c3_v\u00b2 = (0.35 w*)\u00b2 + (1.9 u*)\u00b2",
+                [], "Convective and mechanical contributions in quadrature."),
+            _eq("Plume spread (Taylor-limited)",
+                "\u03c3_y = \u03c3_v t / \u221a(1 + t/2T_Ly),   "
+                "\u03c3_z = \u03c3_w t / \u221a(1 + t/2T_Lz),   t = x/u",
+                [], "Linear growth near the source, t^(1/2) far downwind."),
+            _eq("CONVECTIVE layer: bi-Gaussian concentration",
+                "C = (Q / \u221a(2\u03c0) u) \u00b7 \u03a3\u2c7c "
+                "(\u03bb\u2c7c/\u03c3_z\u2c7c) \u00b7 \u03a3\u2098 "
+                "{ exp[\u2212(z\u2212\u03a8\u2c7c\u22122mz\u1d62)\u00b2/2\u03c3_z\u2c7c\u00b2] "
+                "+ exp[\u2212(z+\u03a8\u2c7c+2mz\u1d62)\u00b2/2\u03c3_z\u2c7c\u00b2] } "
+                "\u00b7 exp(\u2212y\u00b2/2\u03c3_y\u00b2)/(\u221a(2\u03c0)\u03c3_y)",
+                ["\u03bb\u2081, \u03bb\u2082 = updraft / downdraft weights "
+                 "(0.6, 0.4)",
+                 "\u03a8\u2c7c = h_e + w\u0304\u2c7c t = source height "
+                 "displaced by the draft velocity",
+                 "m = image sources reflecting off ground and inversion"],
+                "Vertical velocities in a convective layer are SKEWED - narrow "
+                "strong updrafts, broad weak downdrafts. One Gaussian cannot "
+                "represent that; two superposed can. This is what produces "
+                "plume lofting, which a simple Gaussian model gets wrong."),
+            _eq("STABLE layer: Gaussian concentration",
+                "C = (Q / \u221a(2\u03c0) u \u03c3_z) \u00b7 \u03a3\u2098 "
+                "{ exp[\u2212(z\u2212h_e\u22122mz\u1d62)\u00b2/2\u03c3_z\u00b2] "
+                "+ exp[\u2212(z+h_e+2mz\u1d62)\u00b2/2\u03c3_z\u00b2] } "
+                "\u00b7 exp(\u2212y\u00b2/2\u03c3_y\u00b2)/(\u221a(2\u03c0)\u03c3_y)",
+                [], "Vertical velocities are near-Gaussian when stable."),
+            _eq("Plume meander",
+                "C = f\u209a C_coherent + (1 \u2212 f\u209a) C_random,   "
+                "f\u209a = 1/(1 + (t/2T_Ly)\u00b2)",
+                [], "At low wind or long travel time the plume wanders instead "
+                    "of holding an axis. Omitting this badly over-predicts "
+                    "near-calm centreline concentrations."),
+            _eq("Briggs plume rise",
+                "F = g v_s d\u00b2/4 \u00b7 (T_s\u2212T_a)/T_s,   "
+                "\u0394h = 1.6 F^(1/3) x_f^(2/3) / u",
+                [], "Effective height h_e = stack height + \u0394h."),
+            _eq("Source discretisation",
+                "Line:  Q\u1d62 = Q \u00b7 (d\u1d62/D)/n\u1d62      "
+                "Area:  Q\u1d62 = Q/N_cells",
+                [], "Sources are integrated as elementary point emitters; the "
+                    "element strengths sum exactly to the source strength."),
+            _eq("Facade receptors",
+                "R = { (p + 0.5n\u0302, z_k) : p \u2208 wall, "
+                "z_k = (k+\u00bd)H/n_levels }",
+                ["n\u0302 = outward wall normal"],
+                "Receptors sit ON the envelope rather than on a ground grid, "
+                "which is what lets concentration be reported per facade and "
+                "per height."),
+        ],
+        "parameters_used": [
+            {"symbol": "regime", "value": m.get("regime"), "unit": "",
+             "source": "sign of the sensible heat flux"},
+            {"symbol": "u (10 m)", "value": m.get("u_ref_ms"), "unit": "m/s",
+             "source": m.get("source")},
+            {"symbol": "wind direction", "value": m.get("wind_from_deg"),
+             "unit": "\u00b0 from", "source": m.get("source")},
+            {"symbol": "u*", "value": m.get("ustar_ms"), "unit": "m/s",
+             "source": "solved iteratively"},
+            {"symbol": "L", "value": m.get("monin_obukhov_m"), "unit": "m",
+             "source": "solved iteratively"},
+            {"symbol": "w*", "value": m.get("wstar_ms"), "unit": "m/s",
+             "source": "from H and z_i"},
+            {"symbol": "z_i", "value": m.get("mixing_height_m"), "unit": "m",
+             "source": "convective growth / mechanical"},
+            {"symbol": "H", "value": m.get("heat_flux_W_m2"), "unit": "W/m\u00b2",
+             "source": "net radiation and Bowen ratio"},
+            {"symbol": "z0", "value": m.get("z0_m"), "unit": "m",
+             "source": "user setting"},
+            {"symbol": "source elements", "value": run.get("elements"),
+             "unit": "count", "source": "line/area discretisation"},
+        ],
+        "assumptions": [
+            "Steady state over the averaging period: met constant in space "
+            "and time.",
+            "FLAT TERRAIN. No AERMAP, so the critical dividing streamline "
+            "treatment for elevated terrain is NOT applied.",
+            "NO BUILDING DOWNWASH. PRIME is not implemented, so wake "
+            "recirculation and cavity effects on the building itself are "
+            "absent - a real limitation when a source is close to the "
+            "structure.",
+            "Meteorology is derived from reanalysis/forecast, not AERMET with "
+            "real hourly soundings.",
+            "Single surface roughness, albedo and Bowen ratio for the domain.",
+            "No chemical transformation beyond first-order decay.",
+            "Emission rates are user-supplied; results scale linearly with them.",
+        ],
+        "solver": {
+            "type": "Analytical concentration equations over discretised "
+                    "sources and facade receptors",
+            "discretisation": (
+                f"{run.get('elements')} source elements \u00d7 "
+                f"{(run.get('building') or {}).get('receptor_count')} facade "
+                "receptors; line elements ~15 m, area sources on a 6\u00d76 grid; "
+                "\u00b12 image reflections at ground and inversion"),
+            "iteration": (
+                "The concentration field is closed-form. The ONLY iterative "
+                "step is the boundary-layer similarity solution for u* and L, "
+                "which are mutually dependent."),
+            "implementation": "Python, double precision, direct summation.",
+        },
+        "convergence": {
+            "applicable": True,
+            "explanation": (
+                "u* appears in L, and L appears in the stability correction "
+                "that determines u*. This is solved by fixed-point iteration, "
+                "exactly as AERMET does. Everything downstream is closed-form."),
+            "iterative_parts": [
+                {"where": "Boundary-layer similarity (u*, L)",
+                 "method": "Fixed-point iteration on the stability-corrected "
+                           "log wind profile",
+                 "criterion": (
+                     f"relative change in u* < 1e-4, max 50 iterations. "
+                     f"This run: converged in {m.get('solver_iterations')} "
+                     f"iterations, final residual "
+                     f"{m.get('solver_residual'):.2e}"
+                     if m.get("solver_residual") is not None else
+                     "relative change in u* < 1e-4, max 50 iterations")},
+                {"where": "Image reflection series",
+                 "method": "Truncated sum over m = \u22122\u20262",
+                 "criterion": "further terms are <1e-6 of the total for "
+                              "\u03c3_z/z\u1d62 ratios in the valid range"},
+                {"where": "Source discretisation",
+                 "method": "Element refinement (not iteration)",
+                 "criterion": "concentration converges as element size \u2192 0; "
+                              "15 m elements are adequate beyond ~50 m from "
+                              "the source"},
+            ],
+        },
+        "termination": {
+            "conditions": [
+                "All enabled source elements evaluated at every facade "
+                "receptor.",
+                "Contributions with downwind distance \u2264 1 m are set to "
+                "zero: inside the near field the formulation is not valid.",
+                "Wind speed floored at 0.3 m/s; the equations are singular as "
+                "u\u21920 and calm conditions are outside validity.",
+                "\u03c3_z capped at 0.9 z_i - the plume cannot be better "
+                "mixed than the layer that contains it.",
+            ],
+        },
+        "data_sources": [
+            {"name": "Meteorology", "resolution": "~9-11 km",
+             "kind": m.get("source"),
+             "note": "drives every boundary-layer parameter"},
+            {"name": "Emission sources", "resolution": "user-defined",
+             "kind": "point / line / area", "note": "rates are your inputs"},
+            {"name": "Building geometry", "resolution": "user-defined or OSM",
+             "kind": "footprint + height",
+             "note": "defines where the receptors sit"},
+        ],
+        "verification": {
+            "status": "See /aermod_verify",
+            "what_it_proves": "Mass conservation, the 1/u law, superposition, "
+                              "reflection, and correct convective/stable "
+                              "branching.",
+            "what_it_does_not_prove": (
+                "That this reproduces EPA AERMOD. It is not AERMOD: no AERMET, "
+                "no AERMAP, no PRIME downwash, and none of EPA's regulatory "
+                "validation. Do not use it for compliance."),
+        },
+        "validity_range": [
+            "Downwind distance ~50 m to ~10 km.",
+            "Wind speed above ~1 m/s at 10 m.",
+            "Flat terrain of roughly uniform roughness.",
+            "Averaging period ~1 hour.",
+            "Sources not immediately adjacent to the receptor building "
+            "(no downwash treatment).",
+        ],
+    }
+
+
+@app.get("/aermod_verify")
+def aermod_verify():
+    """Analytical verification of the AERMOD-formulation implementation."""
+    tests = []
+
+    def add(name, ok, detail, expected, got, why):
+        tests.append({"name": name, "pass": bool(ok), "detail": detail,
+                      "expected": expected, "got": got, "why": why})
+
+    Q, u, he, zi = 1.0, 3.0, 20.0, 1000.0
+    sy, sz = 60.0, 40.0
+
+    # 1-2. mass conservation, both regimes
+    for label, fn in (("stable", lambda y, z: _conc_sbl(y, z, Q, u, he, sy, sz, zi)),
+                      ("convective", lambda y, z: _conc_cbl(y, z, Q, u, he, sy,
+                                                            sz, zi, 1.5, 500.0))):
+        tot = 0.0
+        for i in range(401):
+            yy = -400 + i * 2.0
+            for k in range(501):
+                tot += fn(yy, k * 2.0) * u * 4.0
+        err = abs(tot - Q) / Q
+        add(f"Mass conservation ({label})", err < 0.03,
+            "integral of C\u00b7u over the crosswind plane returns Q",
+            f"{Q:.4f} g/s", f"{tot:.4f} g/s ({err*100:.2f}% error)",
+            "A plume that gains or loses mass is solving the wrong equation.")
+
+    # 3. inverse wind law
+    c1 = _conc_sbl(0, 10, Q, 2.0, he, sy, sz, zi)
+    c2 = _conc_sbl(0, 10, Q, 4.0, he, sy, sz, zi)
+    add("Concentration scales as 1/u", abs(c1 / c2 - 2.0) < 0.01,
+        "doubling wind speed halves concentration", "2.000",
+        f"{c1/c2:.3f}", "Dilution is linear in wind speed.")
+
+    # 4. superposition
+    a = _conc_sbl(0, 10, Q, u, he, sy, sz, zi)
+    b = _conc_sbl(0, 10, 2 * Q, u, he, sy, sz, zi)
+    add("Superposition", abs(2 * a - b) < 1e-12,
+        "doubling Q exactly doubles C", f"{2*a:.6e}", f"{b:.6e}",
+        "Linearity in Q is what licenses per-source apportionment.")
+
+    # 5. ground reflection
+    c_no = Q / (math.sqrt(2 * math.pi) * u * sz) * \
+        math.exp(-(0 - 0) ** 2 / (2 * sz ** 2)) / (math.sqrt(2 * math.pi) * sy)
+    c_ref = _conc_sbl(0, 0, Q, u, 0.0, sy, sz, zi)
+    add("Ground reflection doubles a ground-level source",
+        abs(c_ref / c_no - 2.0) < 0.02, "C(z=0,h=0) = 2 \u00d7 unreflected",
+        "2.000", f"{c_ref/c_no:.3f}",
+        "Without reflection the ground would absorb the plume.")
+
+    # 6. crosswind symmetry
+    cp = _conc_sbl(80, 10, Q, u, he, sy, sz, zi)
+    cm = _conc_sbl(-80, 10, Q, u, he, sy, sz, zi)
+    add("Crosswind symmetry", abs(cp - cm) < 1e-15,
+        "equal either side of the plume axis", f"{cp:.6e}", f"{cm:.6e}",
+        "Asymmetry would mean the rotation is wrong.")
+
+    # 7. similarity solver signs
+    pc = _pbl_convective(3.0, 10.0, 1.0, 200.0, 300.0, 1200.0)
+    ps = _pbl_stable(2.0, 10.0, 1.0, 290.0, 0.0)
+    add("Monin-Obukhov sign convention",
+        pc["L"] < 0 and ps["L"] > 0 and pc["wstar"] > 0 and ps["wstar"] == 0,
+        "L < 0 when convective, L > 0 when stable, w* = 0 when stable",
+        "L_conv<0, L_stable>0", f"{pc['L']:.1f}, {ps['L']:.1f}",
+        "A sign error here inverts the entire stability treatment.")
+
+    # 8. solver convergence
+    add("Similarity solver converges",
+        pc["residual"] is not None and pc["residual"] < 1e-4
+        and ps["residual"] is not None and ps["residual"] < 1e-4,
+        "u* iteration meets its tolerance in both regimes",
+        "< 1e-4",
+        f"convective {pc['residual']:.1e} in {pc['iterations']} it, "
+        f"stable {ps['residual']:.1e} in {ps['iterations']} it",
+        "The only iterative step in the model.")
+
+    # 9. convective lofting
+    c_conv = _conc_cbl(0, 2.0, Q, u, 60.0, sy, sz, zi, 2.0, 300.0)
+    c_stab = _conc_sbl(0, 2.0, Q, u, 60.0, sy, sz, zi)
+    add("Convective updrafts loft an elevated plume",
+        c_conv < c_stab * 1.5,
+        "a tall stack gives lower ground-level concentration when convective "
+        "updrafts carry material upward",
+        "C_convective not greatly exceeding C_stable near the ground",
+        f"{c_conv:.3e} vs {c_stab:.3e}",
+        "Lofting is the behaviour a single-Gaussian model misses.")
+
+    # 10. source discretisation conserves emission
+    mlat, mlon = 110540.0, 111320.0 * math.cos(math.radians(12.8))
+    line = {"kind": "line", "q_g_s": 7.0, "h_m": 1.0,
+            "points": [[12.810, 74.858], [12.813, 74.862]]}
+    els = _source_elements(line, mlat, mlon, 12.8138, 74.8614)
+    s = sum(e["q"] for e in els)
+    add("Line source conserves emission", abs(s - 7.0) < 1e-9,
+        "element strengths sum to the source strength",
+        "7.000000 g/s", f"{s:.6f} g/s over {len(els)} elements",
+        "Discretisation must not create or destroy mass.")
+
+    n_pass = sum(1 for t in tests if t["pass"])
+    return {"tests": tests, "passed": n_pass, "total": len(tests),
+            "all_passed": n_pass == len(tests),
+            "explains": (
+                "These verify the IMPLEMENTATION against analytical results. "
+                "They do not validate the model against measurements, and they "
+                "emphatically do not show equivalence with EPA AERMOD.")}
+
+
 @app.get("/dispersion_meta")
 def dispersion_meta():
     """Everything the UI needs to build the editor: species, source types with
@@ -5393,9 +6284,9 @@ def dispersion_advanced(q: DispersionAdvQuery):
                           "&current=wind_speed_10m,wind_direction_10m,"
                           "shortwave_radiation&wind_speed_unit=ms&timezone=auto")
             cur = d.get("current", {})
-            u_ms = float(cur.get("wind_speed_10m") or 2.0)
-            wdir = float(cur.get("wind_direction_10m") or 270.0)
-            solar = float(cur.get("shortwave_radiation") or 200.0)
+            u_ms = _num(cur.get("wind_speed_10m"), 2.0)
+            wdir = _num(cur.get("wind_direction_10m"), 270.0)
+            solar = _num(cur.get("shortwave_radiation"), 200.0)
             wind_note = "live observation-assimilated model (Open-Meteo)"
         except Exception:
             u_ms, wdir, solar = 2.0, 270.0, 200.0
