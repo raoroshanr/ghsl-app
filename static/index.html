@@ -1250,7 +1250,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v123</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v124</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1417,7 +1417,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v123";
+const DSG_VERSION = "deepseego-v124";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4376,7 +4376,10 @@ function admRenderScenePanel(j){
         (j.scene.height_stats
           ? ` \u00b7 heights ${j.scene.height_stats.min}\u2013${j.scene.height_stats.max} m ` +
             `(${j.scene.height_stats.individual} individually measured)` : '')) +
-    ` \u00b7 ${j.scene.road_count} roads \u00b7 drag to orbit, scroll to zoom`;
+    ` \u00b7 ${j.scene.road_count} roads (${j.scene.road_source})` +
+    (j.scene.rail_count ? ` \u00b7 ${j.scene.rail_count} rail` : '') +
+    (j.scene.terrain ? ' \u00b7 terrain' : ' \u00b7 <span style="color:#E9C46A">no terrain</span>') +
+    ` \u00b7 drag to orbit, scroll to zoom`;
   const d = j.derived, b = j.built, t = j.terrain;
   const lulcRows = j.lulc.slice(0, 8).map(l =>
     `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;
@@ -4399,8 +4402,16 @@ function admRenderScenePanel(j){
     ? Math.max(d.z0_morphometric_m, d.z0_from_landcover_m) /
       Math.max(1e-6, Math.min(d.z0_morphometric_m, d.z0_from_landcover_m)) : 1;
 
+  const statusRows = (j.layer_status || []).map(s =>
+    `<tr><td style="white-space:nowrap">` +
+    `<span style="color:${s.ok ? '#84CC16' : '#E4572E'}">${s.ok ? '\u2713' : '\u2717'}</span> ` +
+    `${s.layer}</td><td style="text-align:right">${s.source}</td></tr>` +
+    `<tr><td colspan="2" class="mmSrc" style="padding-bottom:5px">${s.detail}</td></tr>`).join('');
+
   $('admResults').innerHTML =
-    `<div class="paneLabel">Derived model inputs</div>` +
+    `<div class="paneLabel">Extracted layers</div>` +
+    `<table class="aqTable mmTable">${statusRows}</table>` +
+    `<div class="paneLabel" style="margin-top:12px">Derived model inputs</div>` +
     `<table class="aqTable">` +
     `<tr><td>Roughness z\u2080 \u2014 from land cover</td>` +
     `<td style="text-align:right">${d.z0_from_landcover_m} m</td></tr>` +
@@ -4544,6 +4555,16 @@ async function admDraw3D(j){
       new THREE.BufferGeometry().setFromPoints(pts),
       new THREE.LineBasicMaterial({color: w >= 2 ? 0xE9C46A : 0x8A968F,
                                    linewidth: w})));
+  });
+
+  // railways
+  (j.scene.rails || []).forEach(rl => {
+    const pts = rl.pts.map(([x, y]) => new THREE.Vector3(x, 1.4, y));
+    if(pts.length < 2) return;
+    scene.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineDashedMaterial({color: 0xE4572E, dashSize: 8, gapSize: 5})
+        ));
   });
 
   // the building of interest, highlighted
