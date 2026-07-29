@@ -436,8 +436,14 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
 #admDrawerBody{flex:1 1 auto;overflow-y:auto;padding:12px 14px 20px}
 #admScene3D{width:100%;height:320px;background:#0B1310;border:1px solid #2A3A33;
   border-radius:8px;position:relative;overflow:hidden}
-#admSection{width:100%;height:240px;background:#0B1310;border:1px solid #2A3A33;
+#admPlaneCv{width:100%;height:230px;background:#0B1310;border:1px solid #2A3A33;
+  border-radius:8px;display:block;margin-top:6px}
+#admProfileCv{width:100%;height:130px;background:#0B1310;border:1px solid #2A3A33;
   border-radius:8px;display:block}
+#admPlaneRow{display:flex;align-items:center;gap:8px;margin-top:6px}
+#admPlaneRow span{font-size:11px;color:#9FB0A8;min-width:74px}
+#admPlaneRow b{font-size:11px;color:#E9C46A;min-width:56px;text-align:right}
+#admPlaneAt{flex:1;accent-color:#E9C46A}
 #admViewBar{margin-bottom:6px}
 .admViewModes{display:flex;gap:4px}
 .admViewModes button{flex:1;padding:5px 6px;font-size:11px;background:#12201B;
@@ -1244,7 +1250,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v121</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v122</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1278,7 +1284,24 @@ label.chk input{width:auto}
           </div>
         </div>
         <div id="admScene3D"></div>
-        <canvas id="admSection" hidden></canvas>
+        <div id="admPlanePane" hidden>
+          <div class="admViewModes" style="margin-top:8px">
+            <button data-plane="xy" class="active">XY plan</button>
+            <button data-plane="xz">XZ section (E&ndash;W)</button>
+            <button data-plane="yz">YZ section (N&ndash;S)</button>
+          </div>
+          <div id="admPlaneRow">
+            <span id="admPlaneAtLbl">height</span>
+            <input type="range" id="admPlaneAt" min="0" max="100" step="1" value="0">
+            <b id="admPlaneAtVal">1.5 m</b>
+            <button id="admPlaneApply" class="ghost" style="padding:3px 10px;font-size:10.5px">Recompute</button>
+          </div>
+          <canvas id="admPlaneCv"></canvas>
+          <div id="admPlaneLegend" class="hint" style="font-size:10px"></div>
+          <div class="paneLabel" style="margin-top:8px">Concentration profile through this plane</div>
+          <canvas id="admProfileCv"></canvas>
+          <div id="admProfileLbl" class="hint" style="font-size:10px"></div>
+        </div>
         <div id="admSceneLegend" class="hint" style="font-size:10.5px;margin-top:4px"></div>
         <div id="admSceneMeta" class="hint" style="font-size:10.5px"></div>
       </div>
@@ -1394,7 +1417,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v121";
+const DSG_VERSION = "deepseego-v122";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4565,6 +4588,137 @@ async function admDraw3D(j){
   (function loop(){ _sceneAnim = requestAnimationFrame(loop); rend.render(scene, cam); })();
 }
 
+/* ---- orthogonal cut planes + profile graph ------------------------------
+   Three planes through the concentration field, the way a CFD post-processor
+   presents one: a plan at a chosen height, and two vertical sections. Below
+   each, a profile graph through the plane's centre line so values can be read
+   quantitatively rather than judged by colour.
+--------------------------------------------------------------------- */
+let ADM_PLANE = 'xy';
+
+function admPlaneSet(k){
+  ADM_PLANE = k;
+  document.querySelectorAll('[data-plane]').forEach(b =>
+    b.classList.toggle('active', b.dataset.plane === k));
+  const p = ADM_GRID && ADM_GRID.planes && ADM_GRID.planes[k];
+  if(p){
+    $('admPlaneAtLbl').textContent = p.at_label;
+    $('admPlaneAtVal').textContent = p.at + ' m';
+  }
+  admPlaneDraw();
+}
+
+function admPlaneDraw(){
+  const p = ADM_GRID && ADM_GRID.planes && ADM_GRID.planes[ADM_PLANE];
+  const cv = $('admPlaneCv');
+  if(!p || !cv) return;
+  const W = cv.clientWidth || 420, H = 230;
+  cv.width = W * 2; cv.height = H * 2;
+  const g = cv.getContext('2d');
+  g.setTransform(2, 0, 0, 2, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const rows = p.values.length, cols = p.values[0].length;
+  const pad = {l: 46, r: 12, t: 10, b: 26};
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  const mx = p.max || 1;
+  const lo = Math.log10(Math.max(1e-5, mx * 1e-4)), hi = Math.log10(Math.max(1e-4, mx));
+  const cw = pw / cols, chh = ph / rows;
+  for(let iy = 0; iy < rows; iy++){
+    for(let ix = 0; ix < cols; ix++){
+      const v = p.values[iy][ix];
+      if(v <= 0) continue;
+      const t = (Math.log10(v) - lo) / Math.max(1e-9, hi - lo);
+      if(t <= 0) continue;
+      const c = admConcColour(t).map(x => Math.round(x * 255));
+      g.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${Math.min(1, .18 + t)})`;
+      // vertical planes have height on axis2, so draw bottom-up
+      const yPix = (ADM_PLANE === 'xy')
+        ? pad.t + iy * chh
+        : pad.t + ph - (iy + 1) * chh;
+      g.fillRect(pad.l + ix * cw, yPix, Math.ceil(cw) + .5, Math.ceil(chh) + .5);
+    }
+  }
+  // the subject building, for scale
+  g.strokeStyle = '#7FD0BC'; g.lineWidth = 1.4;
+  const a1 = p.axis1, a2 = p.axis2;
+  const X = v => pad.l + (v - a1[0]) / (a1[a1.length-1] - a1[0]) * pw;
+  const Y = v => (ADM_PLANE === 'xy')
+    ? pad.t + (v - a2[0]) / (a2[a2.length-1] - a2[0]) * ph
+    : pad.t + ph - (v - a2[0]) / (a2[a2.length-1] - a2[0]) * ph;
+  const bh = parseFloat($('admH').value) || 12;
+  if(ADM_PLANE === 'xy'){
+    g.strokeRect(X(-12), Y(-12), X(12)-X(-12), Y(12)-Y(-12));
+  } else {
+    g.strokeRect(X(-12), Y(bh), X(12)-X(-12), Y(0)-Y(bh));
+  }
+  // axes
+  g.strokeStyle = '#5c6b64'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(pad.l, pad.t); g.lineTo(pad.l, pad.t+ph);
+  g.lineTo(pad.l+pw, pad.t+ph); g.stroke();
+  g.fillStyle = '#9FB0A8'; g.font = '10px Arial, Helvetica, sans-serif';
+  [0, .5, 1].forEach(f => {
+    const v1 = a1[0] + (a1[a1.length-1]-a1[0])*f;
+    g.fillText(Math.round(v1), pad.l + f*pw - 10, H - 10);
+    const v2 = a2[0] + (a2[a2.length-1]-a2[0])*f;
+    g.fillText(Math.round(v2), 6, (ADM_PLANE==='xy' ? pad.t + f*ph : pad.t + ph - f*ph) + 3);
+  });
+  g.fillStyle = '#8A968F';
+  g.fillText(p.label1, pad.l + pw/2 - 20, H - 1);
+  g.save(); g.translate(11, pad.t + ph/2 + 22); g.rotate(-Math.PI/2);
+  g.fillText(p.label2, 0, 0); g.restore();
+
+  const stops = [0,.25,.5,.75,1].map(t => {
+    const c = admConcColour(t).map(v => Math.round(v*255));
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }).join(',');
+  $('admPlaneLegend').innerHTML =
+    `<div class="admLegend"><span>${(mx*1e-4).toPrecision(2)}</span>` +
+    `<span class="ramp" style="background:linear-gradient(90deg,${stops})"></span>` +
+    `<span>${mx.toPrecision(3)}</span></div>` +
+    `<span class="per">${p.at_label} = ${p.at} m \u00b7 log scale \u00b7 ` +
+    `teal outline = the building</span>`;
+  admProfileDraw(p);
+}
+
+function admProfileDraw(p){
+  const cv = $('admProfileCv');
+  if(!cv) return;
+  const W = cv.clientWidth || 420, H = 130;
+  cv.width = W*2; cv.height = H*2;
+  const g = cv.getContext('2d');
+  g.setTransform(2,0,0,2,0,0); g.clearRect(0,0,W,H);
+  const rows = p.values.length, cols = p.values[0].length;
+  // profile along the centre of axis2 (a horizontal cut through the plane)
+  const mid = Math.floor(rows/2);
+  const prof = p.values[mid];
+  const pad = {l:46, r:12, t:10, b:22};
+  const pw = W-pad.l-pad.r, ph = H-pad.t-pad.b;
+  const mx = Math.max(1e-9, ...prof);
+  g.strokeStyle='#5c6b64'; g.lineWidth=1;
+  g.beginPath(); g.moveTo(pad.l,pad.t); g.lineTo(pad.l,pad.t+ph);
+  g.lineTo(pad.l+pw,pad.t+ph); g.stroke();
+  g.beginPath();
+  prof.forEach((v,i) => {
+    const x = pad.l + i/(cols-1)*pw;
+    const y = pad.t + ph - Math.min(1, v/mx)*ph;
+    i ? g.lineTo(x,y) : g.moveTo(x,y);
+  });
+  g.strokeStyle='#E9C46A'; g.lineWidth=1.8; g.stroke();
+  g.lineTo(pad.l+pw, pad.t+ph); g.lineTo(pad.l, pad.t+ph); g.closePath();
+  g.fillStyle='rgba(233,196,106,.16)'; g.fill();
+  g.fillStyle='#9FB0A8'; g.font='10px Arial, Helvetica, sans-serif';
+  g.fillText(mx.toPrecision(3), 4, pad.t+8);
+  g.fillText('0', 4, pad.t+ph+3);
+  [0,.5,1].forEach(f => {
+    const v1 = p.axis1[0] + (p.axis1[p.axis1.length-1]-p.axis1[0])*f;
+    g.fillText(Math.round(v1), pad.l + f*pw - 10, H-6);
+  });
+  const at2 = p.axis2[mid];
+  $('admProfileLbl').textContent =
+    `Profile along ${p.label1} at ${p.label2.replace(' (m)','')} = ${at2} m. ` +
+    `Peak on this line ${mx.toPrecision(4)}.`;
+}
+
 /* ---- interactive view modes -------------------------------------------
    Stacked translucent planes are hard to read. Four modes instead:
      Ground  - the field at 1.5 m, draped on the terrain
@@ -4574,6 +4728,7 @@ async function admDraw3D(j){
                conventionally read: distance downwind against height
 --------------------------------------------------------------------- */
 let ADM_VIEW = 'ground', ADM_GRID = null;
+const ADM_PLANE_AT = {xy: 1.5, xz: 0, yz: 0};
 
 function admSetView(v){
   ADM_VIEW = v;
@@ -4895,8 +5050,28 @@ async function admInit(){
     $('admBldg').textContent = 'Pick a point \u2014 the footprint comes from OpenStreetMap.';
     admClose(); admRenderSources();
   });
-  document.querySelectorAll('.admViewModes button').forEach(b =>
+  document.querySelectorAll('.admViewModes button[data-view]').forEach(b =>
     b.addEventListener('click', () => admSetView(b.dataset.view)));
+  document.querySelectorAll('[data-plane]').forEach(b =>
+    b.addEventListener('click', () => admPlaneSet(b.dataset.plane)));
+  $('admPlaneAt').addEventListener('input', () => {
+    const p = ADM_GRID && ADM_GRID.planes && ADM_GRID.planes[ADM_PLANE];
+    if(!p) return;
+    const R = ADM_GRID.radius_m || 500;
+    const v = (ADM_PLANE === 'xy')
+      ? (+$('admPlaneAt').value / 100) * Math.max(60, (parseFloat($('admH').value)||12)*8)
+      : -R + (+$('admPlaneAt').value / 100) * 2 * R;
+    $('admPlaneAtVal').textContent = Math.round(v*10)/10 + ' m';
+  });
+  $('admPlaneApply').addEventListener('click', () => {
+    const R = (ADM_GRID && ADM_GRID.radius_m) || 500;
+    const f = +$('admPlaneAt').value / 100;
+    const v = (ADM_PLANE === 'xy')
+      ? f * Math.max(60, (parseFloat($('admH').value)||12)*8)
+      : -R + f * 2 * R;
+    ADM_PLANE_AT[ADM_PLANE] = Math.round(v*10)/10;
+    admRun();
+  });
   $('admSliceZ').addEventListener('input', () => {
     const lv = (ADM_GRID && ADM_GRID.levels) || [];
     const i = +$('admSliceZ').value;
@@ -5106,6 +5281,9 @@ async function admRun(){
                    return [1.5, H*0.5, H, H*1.5, H*3].map(v => Math.round(v*10)/10); })()
         : [],
       section: true,
+      plane_z_m: ADM_PLANE_AT.xy,
+      plane_y_m: ADM_PLANE_AT.xz,
+      plane_x_m: ADM_PLANE_AT.yz,
       section_top_m: Math.max(80, (parseFloat($('admH').value) || 12) * 8),
       downwash: true,
       // individual building geometry from the extracted scene, so each
@@ -5180,6 +5358,7 @@ async function admRun(){
         b.style.opacity = b.disabled ? '.4' : '';
       });
       admSetView(lv.length ? 'slice' : 'ground');
+      if(j.grid.planes){ $('admPlanePane').hidden = false; admPlaneSet(ADM_PLANE); }
     }
     const warnHtml = (j.warnings || []).map(w =>
       `<div class="mmVerdict ${w.level === 'high' ? 'warn' : 'warn'}"
