@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v124"
+APP_VERSION = "deepseego-v125"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6530,6 +6530,39 @@ def aermod_run(q: AermodQuery):
                 "solver_iterations": pbl["iterations"],
                 "solver_residual": pbl["residual"]},
         "grid": grid_out,
+        "building_effects": {
+            "summary": ("Buildings affect BOTH the facade receptors and the "
+                        "map. They are not treated to the same depth, and the "
+                        "difference is set out below."),
+            "rows": [
+                {"output": "Facade receptors",
+                 "treatment": "Full",
+                 "includes": [
+                     "path blockage computed separately for EVERY source "
+                     "element",
+                     "Huber-Snyder style wake behind the tallest obstacle",
+                     "leeward sheltering by the subject building itself",
+                 ],
+                 "note": "These are the most precise numbers in the run."},
+                {"output": "Concentration map, planes and 3D drape",
+                 "treatment": "Approximate",
+                 "includes": [
+                     "path blockage from the emission-weighted source CENTRE, "
+                     "one path per grid point",
+                 ],
+                 "note": ("Per-element paths across the whole grid would cost "
+                          "roughly 100x more for a picture whose purpose is "
+                          "the spatial pattern. Wake and leeward sheltering "
+                          "are omitted here because both are receptor-"
+                          "specific.")},
+            ],
+            "consequence": ("Expect the facade values to be somewhat lower "
+                            "than the map suggests at the same location, "
+                            "because the facades carry the extra sheltering "
+                            "terms. Where you need a number, use the facade "
+                            "table; where you need to see the plume, use the "
+                            "map."),
+        },
         "downwash": {"applied": bool(wake_bldgs),
                      "buildings": len(wake_bldgs),
                      "path_blockage": bool(hras is not None and hras.any),
