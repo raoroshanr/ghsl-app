@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v121"
+APP_VERSION = "deepseego-v122"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5454,28 +5454,39 @@ class _HeightRaster:
             return self.h[i, j]
         return 0.0
 
-    def path_blockage(self, sx, sy, rx, ry, he, zr, samples=24):
-        """Fraction of the path where buildings reach the plume centreline,
-        and how many separate obstacles are crossed."""
+    def path_blockage(self, sx, sy, rx, ry, he, zr, samples=24, sigma_z=None):
+        """How much of the plume's vertical extent the path's buildings block.
+
+        A binary "does the building reach the centreline" test made a 25 m
+        block score the same as a 6 m one, which wasted the height data. This
+        instead integrates the FRACTION OF THE PLUME DEPTH intercepted at each
+        step, so height matters continuously.
+        """
         if not self.any:
             return 0.0, 0
-        blocked = 0
+        total = 0.0
         obstacles = 0
         prev = False
         for k in range(1, samples + 1):
             t = k / (samples + 1.0)
             x = sx + (rx - sx) * t
             y = sy + (ry - sy) * t
-            # plume centre height varies linearly between release and receptor
-            zc = he + (zr - he) * t
+            zc = he + (zr - he) * t              # plume centre at this station
+            # vertical scale of the plume here; without sigma_z use a spread
+            # proportional to travel, floored so near-source values are sane
+            sz = (sigma_z if sigma_z else max(3.0, 0.12 * t *
+                                              math.hypot(rx - sx, ry - sy)))
             hb = self.at(x, y)
-            hit = hb > max(1.0, zc * 0.7)
-            if hit:
-                blocked += 1
+            if hb > 1.0:
+                # share of the plume's vertical profile below the roof line
+                frac = 0.5 * (1.0 + math.erf((hb - zc) / (math.sqrt(2.0) * sz)))
+                total += max(0.0, min(1.0, frac))
                 if not prev:
                     obstacles += 1
-            prev = hit
-        return blocked / float(samples), obstacles
+                prev = True
+            else:
+                prev = False
+        return total / float(samples), obstacles
 
 
 def _lee_shelter(ring_xy, he, H_bldg, sx, sy_src, rx, ry, wdir):
@@ -5804,6 +5815,11 @@ class AermodQuery(BaseModel):
     grid_levels: list = []              # e.g. [1.5, 10, 20, 40]
     section: bool = True                # vertical slice along the wind axis
     section_top_m: float = 150.0
+    # orthogonal cut planes through the field, in LOCAL metres relative to the
+    # building: XY at height z, XZ at north offset y, YZ at east offset x
+    plane_z_m: float = 1.5
+    plane_y_m: float = 0.0
+    plane_x_m: float = 0.0
     albedo: float = 0.18
     background: float = 0.0
 
@@ -6216,6 +6232,75 @@ def aermod_run(q: AermodQuery):
                          "Left is upwind, right is downwind."),
             }
 
+        # ---- three orthogonal cut planes -------------------------------
+        # XY (plan at a height), XZ (vertical, east-west) and YZ (vertical,
+        # north-south). Together they let a plume be read the way a CFD post-
+        # processor would present it.
+        def _field_at(px, py, pz):
+            """Concentration at arbitrary local coordinates (arrays allowed)."""
+            tot = np.zeros_like(np.asarray(px, dtype=float))
+            for wd_i, wgt_i in dirs:
+                th_ = math.radians(wd_i)
+                wx_, wy_ = -math.sin(th_), -math.cos(th_)
+                for e in elements:
+                    dx_, dy_ = px - e["x"], py - e["y"]
+                    xd_ = dx_ * wx_ + dy_ * wy_
+                    yd_ = -dx_ * wy_ + dy_ * wx_
+                    ok_ = xd_ > 1.0
+                    xv_ = np.where(ok_, xd_, 1.0)
+                    sw_, sv_ = _sigma_wv(max(e["he"], 2.0), pbl, conv)
+                    t_ = xv_ / max(0.3, u_ref)
+                    Tly_ = 300.0 if conv else 100.0
+                    Tlz_ = 200.0 if conv else 50.0
+                    sy_ = sv_ * t_ / np.sqrt(1.0 + t_ / (2 * Tly_))
+                    sz_ = np.minimum(sw_ * t_ / np.sqrt(1.0 + t_ / (2 * Tlz_)),
+                                     0.9 * zi)
+                    lat_ = np.exp(-(yd_ ** 2) / (2 * sy_ ** 2)) / \
+                        (np.sqrt(2 * np.pi) * sy_)
+                    vert_ = np.zeros_like(xv_)
+                    for m_ in range(-2, 3):
+                        vert_ += np.exp(-((pz - e["he"] - 2 * m_ * zi) ** 2) /
+                                        (2 * sz_ ** 2))
+                        vert_ += np.exp(-((pz + e["he"] + 2 * m_ * zi) ** 2) /
+                                        (2 * sz_ ** 2))
+                    cc_ = e["q"] / (np.sqrt(2 * np.pi) * max(0.3, u_ref) *
+                                    sz_) * vert_ * lat_
+                    tot += np.where(ok_, cc_, 0.0) * wgt_i
+            return tot * scale + float(q.background or 0.0)
+
+        np_ = 90
+        top_p = max(30.0, min(600.0, float(q.section_top_m)))
+        ax_p = np.linspace(-gr, gr, np_)
+        az_p = np.linspace(0.5, top_p, max(30, np_ // 2))
+
+        # XY: plan view at the chosen height
+        PX, PY = np.meshgrid(ax_p, ax_p)
+        xy_v = _field_at(PX, PY, float(q.plane_z_m))
+        # XZ: vertical, running east-west at the chosen north offset
+        QX, QZ = np.meshgrid(ax_p, az_p)
+        xz_v = _field_at(QX, np.full_like(QX, float(q.plane_y_m)), QZ)
+        # YZ: vertical, running north-south at the chosen east offset
+        RY, RZ = np.meshgrid(ax_p, az_p)
+        yz_v = _field_at(np.full_like(RY, float(q.plane_x_m)), RY, RZ)
+
+        def _pack(vals, a1, a2, l1, l2, at, atlab):
+            return {"values": [[round(float(v), 4) for v in row] for row in vals],
+                    "axis1": [round(float(v), 1) for v in a1],
+                    "axis2": [round(float(v), 1) for v in a2],
+                    "label1": l1, "label2": l2,
+                    "at": round(float(at), 1), "at_label": atlab,
+                    "max": round(float(np.max(vals)), 3),
+                    "mean": round(float(np.mean(vals)), 3)}
+
+        planes_out = {
+            "xy": _pack(xy_v, ax_p, ax_p, "east (m)", "north (m)",
+                        q.plane_z_m, "height"),
+            "xz": _pack(xz_v, ax_p, az_p, "east (m)", "height (m)",
+                        q.plane_y_m, "north offset"),
+            "yz": _pack(yz_v, ax_p, az_p, "north (m)", "height (m)",
+                        q.plane_x_m, "east offset"),
+        }
+
         gmax = float(np.max(field))
         png = _plume_png(field, gmax if gmax > 0 else 1.0)
         # downsample the field so it can travel to the browser and be draped
@@ -6234,6 +6319,7 @@ def aermod_run(q: AermodQuery):
             "receptor_height_m": zr,
             "levels": levels_out,
             "section": section_out,
+            "planes": planes_out,
             "note": (f"Ground-level field at {zr} m, on a {gn}x{gn} grid over "
                      f"\u00b1{int(gr)} m. Building downwash is applied at the "
                      "facade receptors but NOT across this grid, which would "
@@ -7161,6 +7247,58 @@ def aermod_verify():
         "element strengths sum to the source strength",
         "7.000000 g/s", f"{s:.6f} g/s over {len(els)} elements",
         "Discretisation must not create or destroy mass.")
+
+    # ---- 11. leeward sheltering: the subject building must block itself ----
+    # A 20x20 m building, 15 m tall, wind from the west (270 deg) so the plume
+    # travels east. A receptor on the WEST wall is windward; one on the EAST
+    # wall is leeward and must receive substantially less.
+    ring_xy = [(-10.0, -10.0), (10.0, -10.0), (10.0, 10.0), (-10.0, 10.0)]
+    s_win = _lee_shelter(ring_xy, 5.0, 15.0, -200.0, 0.0, -10.5, 0.0, 270.0)
+    s_lee = _lee_shelter(ring_xy, 5.0, 15.0, -200.0, 0.0, 10.5, 0.0, 270.0)
+    add("Building shelters its own leeward facade",
+        s_lee < 0.5 * s_win,
+        "windward wall fully exposed, leeward wall strongly sheltered",
+        "shelter(lee) well below shelter(windward)",
+        f"windward {s_win:.3f}, leeward {s_lee:.3f} "
+        f"({(1-s_lee/max(1e-9,s_win))*100:.0f}% reduction)",
+        "Without this the plume passes straight through the building and both "
+        "facades read almost the same, which is physically wrong.")
+
+    # ---- 12. a plume released well above the roof is NOT blocked ----
+    s_high = _lee_shelter(ring_xy, 60.0, 15.0, -200.0, 0.0, 10.5, 0.0, 270.0)
+    add("A plume above roof height passes over the building",
+        s_high > 0.9,
+        "an elevated release is not intercepted by a short building",
+        "shelter close to 1.0", f"{s_high:.3f}",
+        "Sheltering must depend on release height, or tall stacks would be "
+        "wrongly screened by low buildings.")
+
+    # ---- 13. intervening buildings attenuate cumulatively ----
+    def blocked_conc(n_bldg, H):
+        bl = [{"cx": 30.0 + i * 22.0, "cy": 0.0, "h": H, "area_m2": 300.0}
+              for i in range(n_bldg)]
+        hr = _HeightRaster(bl, 400.0)
+        fb, nob = hr.path_blockage(0.0, 0.0, 200.0, 0.0, 8.0, 1.5)
+        return fb, nob
+    f0, n0 = blocked_conc(0, 0)
+    f1, n1 = blocked_conc(4, 15.0)
+    f2, n2 = blocked_conc(8, 15.0)
+    add("Blockage grows with the number of intervening buildings",
+        f0 == 0.0 and f1 > 0.0 and f2 > f1,
+        "path blockage fraction increases as more buildings are crossed",
+        "0 < f(4 buildings) < f(8 buildings)",
+        f"open {f0:.2f}, 4 buildings {f1:.2f}, 8 buildings {f2:.2f}",
+        "This is what makes the individual building heights matter, rather "
+        "than only the single tallest obstacle.")
+
+    # ---- 14. taller intervening buildings block more ----
+    fl, _ = blocked_conc(6, 6.0)
+    fh, _ = blocked_conc(6, 25.0)
+    add("Taller intervening buildings block more",
+        fh > fl,
+        "for the same layout, taller buildings intercept more of the plume",
+        "f(25 m) > f(6 m)", f"6 m -> {fl:.2f}, 25 m -> {fh:.2f}",
+        "Height, not just presence, must matter or the volume data is wasted.")
 
     n_pass = sum(1 for t in tests if t["pass"])
     return {"tests": tests, "passed": n_pass, "total": len(tests),
