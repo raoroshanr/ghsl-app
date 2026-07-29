@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v122"
+APP_VERSION = "deepseego-v123"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5489,6 +5489,54 @@ class _HeightRaster:
         return total / float(samples), obstacles
 
 
+def _facade_wind(z, normal_deg, wind_from_deg, pbl, H_bldg):
+    """Wind speed at a facade receptor.
+
+    Two parts:
+      1. The undisturbed profile u(z) from Monin-Obukhov similarity - the same
+         solution the dispersion uses, so the two are consistent.
+      2. A facade factor for the flow distortion around the building. Windward
+         walls sit in a stagnation region where speed DROPS at the surface;
+         side walls see accelerated flow round the corners; leeward walls sit
+         in the separated wake.
+
+    The factors follow the standard pattern from wind engineering. This is not
+    CFD - the flow field is not solved - so treat these as indicative surface
+    conditions, useful for comparing facades rather than as design pressures.
+    """
+    us = max(0.01, pbl["ustar"])
+    z0 = max(1e-3, pbl.get("z0_m", 0.5))
+    L = pbl.get("L", 1e6)
+    zz = max(z0 * 1.5, float(z))
+    # log profile with a stability correction
+    if L and abs(L) < 1e5:
+        if L > 0:                                   # stable
+            psi = -5.0 * (zz - z0) / L
+        else:                                       # unstable
+            x = (1.0 - 16.0 * zz / L) ** 0.25
+            psi = (2.0 * math.log((1 + x) / 2) + math.log((1 + x * x) / 2)
+                   - 2.0 * math.atan(x) + math.pi / 2)
+    else:
+        psi = 0.0
+    u_free = max(0.1, us / KARMAN * (math.log(zz / z0) - psi))
+
+    # angle between the wall's outward normal and the direction the wind comes
+    # from: 0 deg means the wall faces straight into the wind
+    d = abs(((normal_deg - wind_from_deg + 180.0) % 360.0) - 180.0)
+    if d <= 45.0:                                   # windward
+        f = 0.55 + 0.25 * (d / 45.0)
+        regime = "windward"
+    elif d <= 115.0:                                # flanking, accelerated
+        f = 0.80 + 0.45 * min(1.0, (d - 45.0) / 45.0)
+        regime = "flanking"
+    else:                                           # leeward wake
+        f = 0.45 - 0.20 * min(1.0, (d - 115.0) / 65.0)
+        regime = "leeward"
+    # near the ground the wall boundary layer slows things further
+    f *= 0.75 + 0.25 * min(1.0, zz / max(3.0, 0.5 * H_bldg))
+    return u_free, max(0.05, u_free * f), regime, round(d, 1)
+
+
 def _lee_shelter(ring_xy, he, H_bldg, sx, sy_src, rx, ry, wdir):
     """Does the building of interest itself stand between source and receptor?
 
@@ -6060,6 +6108,16 @@ def aermod_run(q: AermodQuery):
               c *= wgt * shelter        # frequency weight x leeward shelter
               total += c
               contrib[e["src"]] += c
+        # facade wind, weighted by direction frequency like the concentration
+        uf_sum = uw_sum = 0.0
+        reg = ""
+        for wdir_i, wgt in dirs:
+            u_free, u_face, regime, ang = _facade_wind(
+                z, r["normal_deg"], wdir_i, pbl, float(q.building_h_m))
+            uf_sum += u_free * wgt
+            uw_sum += u_face * wgt
+            if wgt >= max(w for _, w in dirs):
+                reg = regime
         val = total * scale + float(q.background or 0.0)
         for i, cv in enumerate(contrib):
             if i < len(per_source):
@@ -6067,19 +6125,31 @@ def aermod_run(q: AermodQuery):
         out_recs.append({"lat": r["lat"], "lon": r["lon"], "z": round(z, 1),
                          "facing": r["facing"], "normal_deg": r["normal_deg"],
                          "conc": round(val, 4),
+                         "wind_ms": round(uw_sum, 3),
+                         "wind_free_ms": round(uf_sum, 3),
+                         "wind_regime": reg,
                          "_contrib": [c * scale for c in contrib]})
 
     # ---- aggregate by facade orientation and by height ----
     by_face, by_level = {}, {}
+    wf_face, wf_level = {}, {}
+    reg_face = {}
     for r in out_recs:
         by_face.setdefault(r["facing"], []).append(r["conc"])
         by_level.setdefault(r["z"], []).append(r["conc"])
+        wf_face.setdefault(r["facing"], []).append(r["wind_ms"])
+        wf_level.setdefault(r["z"], []).append(r["wind_ms"])
+        reg_face[r["facing"]] = r.get("wind_regime", "")
     faces = [{"facing": k, "mean": round(sum(v) / len(v), 3),
-              "max": round(max(v), 3), "receptors": len(v)}
+              "max": round(max(v), 3), "receptors": len(v),
+              "wind_mean_ms": round(sum(wf_face[k]) / len(wf_face[k]), 3),
+              "wind_max_ms": round(max(wf_face[k]), 3),
+              "wind_regime": reg_face.get(k, "")}
              for k, v in by_face.items()]
     faces.sort(key=lambda f: -f["max"])
     levels = [{"height_m": k, "mean": round(sum(v) / len(v), 3),
-               "max": round(max(v), 3)}
+               "max": round(max(v), 3),
+               "wind_mean_ms": round(sum(wf_level[k]) / len(wf_level[k]), 3)}
               for k, v in sorted(by_level.items())]
 
     # source apportionment at the worst receptor
@@ -6381,6 +6451,18 @@ def aermod_run(q: AermodQuery):
                      "receptor_count": len(out_recs), "levels": q.levels},
         "facades": faces,
         "levels": levels,
+        "wind_on_facades": {
+            "note": ("Surface wind speed at each facade receptor: the "
+                     "similarity wind profile u(z) modified by a factor for "
+                     "flow distortion around the building. Windward walls sit "
+                     "in a stagnation region (speed drops at the surface), "
+                     "flanking walls see accelerated corner flow, leeward "
+                     "walls sit in the wake."),
+            "caveat": ("The flow field is NOT solved - this is not CFD. Use "
+                       "these to compare facades, not as design wind loads."),
+            "windiest": max(faces, key=lambda f: f["wind_max_ms"])["facing"],
+            "calmest": min(faces, key=lambda f: f["wind_max_ms"])["facing"],
+        },
         "worst": {"facing": worst["facing"], "height_m": worst["z"],
                   "conc": worst["conc"], "lat": worst["lat"], "lon": worst["lon"]},
         "peak": round(peak, 3),
@@ -6870,6 +6952,19 @@ def scene_extract(q: SceneQuery):
     # Overpass is frequently unreachable from a data centre, and silently
     # returning an empty scene was hiding that. Open Buildings comes through
     # Earth Engine, which always works here.
+    # Sanity check: how many buildings SHOULD be here, from the GHSL built-up
+    # surface? If OSM returned far fewer, its response was partial.
+    expected = None
+    if built_s and built_s > 0:
+        # typical footprint in Indian settlements is of order 80-120 m2
+        expected = max(1, int(built_s / 100.0))
+    osm_partial = (expected is not None and len(bldgs) < 0.25 * expected)
+    if osm_partial and bldgs:
+        bldg_error = (f"OpenStreetMap returned only {len(bldgs)} buildings but "
+                      f"the built-up surface implies roughly {expected}; "
+                      "treating that as a partial response")
+        bldgs = []
+
     if not bldgs:
         try:
             fc = (ee.FeatureCollection(
@@ -6895,8 +6990,8 @@ def scene_extract(q: SceneQuery):
                               "height_source": "pending"})
             if bldgs:
                 bldg_source = "Google Open Buildings v3"
-                bldg_error = (bldg_error + " - fell back to Open Buildings"
-                              if bldg_error else None)
+                if bldg_error:
+                    bldg_error += " - used Open Buildings instead"
         except Exception as _e2:
             bldg_error = ((bldg_error or "") +
                           f" | Open Buildings: {type(_e2).__name__}")[:200]
@@ -7033,6 +7128,14 @@ def scene_extract(q: SceneQuery):
                   "building_count": len(bldgs), "road_count": len(roads),
                   "building_source": bldg_source,
                   "building_error": bldg_error,
+                  "buildings_expected": expected,
+                  "count_note": (
+                      f"{len(bldgs)} buildings used"
+                      + (f"; GHSL built-up surface implies roughly {expected}"
+                         if expected else "")
+                      + (". Counts are consistent because Open Buildings is "
+                         "used whenever OpenStreetMap looks incomplete."
+                         if bldg_source != "OpenStreetMap" else ".")),
                   "height_stats": h_stats,
                   "road_error": road_error},
         "suggested_sources": suggested,
