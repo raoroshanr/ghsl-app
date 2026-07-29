@@ -1257,7 +1257,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v126</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v127</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1424,7 +1424,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v126";
+const DSG_VERSION = "deepseego-v127";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4386,6 +4386,7 @@ function admRenderScenePanel(j){
     ` \u00b7 ${j.scene.road_count} roads (${j.scene.road_source})` +
     (j.scene.rail_count ? ` \u00b7 ${j.scene.rail_count} rail` : '') +
     (j.scene.terrain ? ' \u00b7 terrain' : ' \u00b7 <span style="color:#E9C46A">no terrain</span>') +
+    ` \u00b7 <span style="color:#E4572E">orange = emission sources</span>` +
     ` \u00b7 drag to orbit, scroll to zoom`;
   const d = j.derived, b = j.built, t = j.terrain;
   const lulcRows = j.lulc.slice(0, 8).map(l =>
@@ -4542,6 +4543,10 @@ async function admDraw3D(j){
   });
   scene.add(compass);
 
+  // One place that converts backend (east, north) metres into world space.
+  // north -> -z, matching the buildings, the compass and the drape.
+  const world = (x, y, h) => new THREE.Vector3(x, h, -y);
+
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
   const sun = new THREE.DirectionalLight(0xffffff, 0.85);
   sun.position.set(R*0.6, R*0.9, R*0.5); scene.add(sun);
@@ -4592,7 +4597,7 @@ async function admDraw3D(j){
 
   // roads, drawn just above the ground
   (j.scene.roads || []).forEach(rd => {
-    const pts = rd.pts.map(([x, y]) => new THREE.Vector3(x, 1.0, y));
+    const pts = rd.pts.map(([x, y]) => world(x, y, 1.0));
     if(pts.length < 2) return;
     const w = rd.class === 'motorway' || rd.class === 'trunk' ? 3
             : rd.class === 'primary' ? 2 : 1;
@@ -4604,7 +4609,7 @@ async function admDraw3D(j){
 
   // railways
   (j.scene.rails || []).forEach(rl => {
-    const pts = rl.pts.map(([x, y]) => new THREE.Vector3(x, 1.4, y));
+    const pts = rl.pts.map(([x, y]) => world(x, y, 1.4));
     if(pts.length < 2) return;
     scene.add(new THREE.Line(
       new THREE.BufferGeometry().setFromPoints(pts),
@@ -4652,6 +4657,44 @@ async function admDraw3D(j){
     camR = Math.max(R*0.6, Math.min(R*6, camR * (1 + Math.sign(e.deltaY)*0.12)));
     place();
   }, {passive:false});
+
+  // emission sources, at their real release heights
+  const mlatS = 110540, mlonS = 111320 * Math.cos((ADM.building
+    ? ADM.building.lat : 0) * Math.PI / 180);
+  const srcXY = (la, lo) => [ (lo - (ADM.building ? ADM.building.lon : lo)) * mlonS,
+                              (la - (ADM.building ? ADM.building.lat : la)) * mlatS ];
+  (ADM.sources || []).forEach(s => {
+    if(s.enabled === false) return;
+    const h = Math.max(2, s.h_m || 5);
+    if(s.kind === 'point' && s.lat != null){
+      const [x, y] = srcXY(s.lat, s.lon);
+      // a mast to the release height, capped with a marker
+      const mast = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.2, 1.2, h, 8),
+        new THREE.MeshBasicMaterial({color: 0xE4572E}));
+      mast.position.copy(world(x, y, h / 2));
+      scene.add(mast);
+      const cap = new THREE.Mesh(
+        new THREE.SphereGeometry(5, 12, 10),
+        new THREE.MeshBasicMaterial({color: 0xE4572E}));
+      cap.position.copy(world(x, y, h + 4));
+      scene.add(cap);
+    } else if(s.kind === 'line' && (s.points || []).length > 1){
+      const pts = s.points.map(([la, lo]) => {
+        const [x, y] = srcXY(la, lo);
+        return world(x, y, h + 1);
+      });
+      scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({color: 0xE4572E})));
+    } else if(s.kind === 'area' && (s.ring || []).length > 2){
+      const pts = s.ring.concat([s.ring[0]]).map(([la, lo]) => {
+        const [x, y] = srcXY(la, lo);
+        return world(x, y, h + 1);
+      });
+      scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({color: 0xE4572E})));
+    }
+  });
 
   _S3.cam = cam;
   (function loop(){ _sceneAnim = requestAnimationFrame(loop); rend.render(scene, cam); })();
