@@ -1250,7 +1250,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v122</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v123</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1417,7 +1417,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v122";
+const DSG_VERSION = "deepseego-v123";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4632,9 +4632,9 @@ function admPlaneDraw(){
       const c = admConcColour(t).map(x => Math.round(x * 255));
       g.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${Math.min(1, .18 + t)})`;
       // vertical planes have height on axis2, so draw bottom-up
-      const yPix = (ADM_PLANE === 'xy')
-        ? pad.t + iy * chh
-        : pad.t + ph - (iy + 1) * chh;
+      // all planes draw bottom-up: north up for XY, height up for the
+      // vertical sections
+      const yPix = pad.t + ph - (iy + 1) * chh;
       g.fillRect(pad.l + ix * cw, yPix, Math.ceil(cw) + .5, Math.ceil(chh) + .5);
     }
   }
@@ -4642,14 +4642,22 @@ function admPlaneDraw(){
   g.strokeStyle = '#7FD0BC'; g.lineWidth = 1.4;
   const a1 = p.axis1, a2 = p.axis2;
   const X = v => pad.l + (v - a1[0]) / (a1[a1.length-1] - a1[0]) * pw;
-  const Y = v => (ADM_PLANE === 'xy')
-    ? pad.t + (v - a2[0]) / (a2[a2.length-1] - a2[0]) * ph
-    : pad.t + ph - (v - a2[0]) / (a2[a2.length-1] - a2[0]) * ph;
+  const Y = v => pad.t + ph - (v - a2[0]) / (a2[a2.length-1] - a2[0]) * ph;
   const bh = parseFloat($('admH').value) || 12;
   if(ADM_PLANE === 'xy'){
-    g.strokeRect(X(-12), Y(-12), X(12)-X(-12), Y(12)-Y(-12));
+    g.strokeRect(X(-12), Y(12), X(12)-X(-12), Y(-12)-Y(12));
   } else {
     g.strokeRect(X(-12), Y(bh), X(12)-X(-12), Y(0)-Y(bh));
+  }
+  // a north arrow on the plan, so the orientation is unambiguous
+  if(ADM_PLANE === 'xy'){
+    const nx = pad.l + pw - 16, ny = pad.t + 8;
+    g.strokeStyle = '#E7EDE8'; g.fillStyle = '#E7EDE8'; g.lineWidth = 1.2;
+    g.beginPath(); g.moveTo(nx, ny + 20); g.lineTo(nx, ny + 4); g.stroke();
+    g.beginPath(); g.moveTo(nx, ny); g.lineTo(nx - 4, ny + 7);
+    g.lineTo(nx + 4, ny + 7); g.closePath(); g.fill();
+    g.font = 'bold 9px Arial, Helvetica, sans-serif';
+    g.fillText('N', nx - 3, ny + 30);
   }
   // axes
   g.strokeStyle = '#5c6b64'; g.lineWidth = 1;
@@ -4660,7 +4668,7 @@ function admPlaneDraw(){
     const v1 = a1[0] + (a1[a1.length-1]-a1[0])*f;
     g.fillText(Math.round(v1), pad.l + f*pw - 10, H - 10);
     const v2 = a2[0] + (a2[a2.length-1]-a2[0])*f;
-    g.fillText(Math.round(v2), 6, (ADM_PLANE==='xy' ? pad.t + f*ph : pad.t + ph - f*ph) + 3);
+    g.fillText(Math.round(v2), 6, pad.t + ph - f*ph + 3);
   });
   g.fillStyle = '#8A968F';
   g.fillText(p.label1, pad.l + pw/2 - 20, H - 1);
@@ -5305,13 +5313,18 @@ async function admRun(){
     // receptors on the map, coloured by load
     admDrawScene();
     const mx = Math.max(1e-9, ...j.receptors.map(r => r.conc));
+    const wmx = Math.max(1e-9, ...j.receptors.map(r => r.wind_ms || 0));
     j.receptors.forEach(r => {
       const t = r.conc / mx;
       L.circleMarker([r.lat, r.lon],
         {radius: 3 + 4*t, color:'#fff', weight:.6,
          fillColor: wgColour(t), fillOpacity:.92}).addTo(admLayer)
-        .bindTooltip(`${r.facing} facade \u00b7 ${r.z} m<br><b>${r.conc} ${j.pollutant.unit}</b>`,
-                     {sticky:true});
+        .bindTooltip(
+          `<b>${r.facing} facade \u00b7 ${r.z} m</b><br>` +
+          `${r.conc} ${j.pollutant.unit}<br>` +
+          `wind ${r.wind_ms} m/s (${r.wind_regime})<br>` +
+          `<span style="opacity:.7">undisturbed ${r.wind_free_ms} m/s</span>`,
+          {sticky:true});
     });
 
     // concentration map across the region
@@ -5379,6 +5392,34 @@ async function admRun(){
           : `No building downwash \u2014 extract the scene first so individual building heights can influence the plume.`) +
         `</div>` : '') +
       `<div class="paneLabel">Facade loading (peak)</div>${faceRows}` +
+      (j.wind_on_facades ? (() => {
+        const wmax = Math.max(1e-9, ...j.facades.map(f => f.wind_max_ms));
+        const rows = j.facades.slice().sort((a,b) => b.wind_max_ms - a.wind_max_ms)
+          .map(f => {
+            const w = Math.round(100 * f.wind_max_ms / wmax);
+            return `<div class="admFace"><span class="admFaceName">${f.facing}</span>` +
+                   `<span class="admBar"><i style="width:${w}%;` +
+                   `background:linear-gradient(90deg,#0d3b4f,#00B4D8,#7FD0BC)"></i></span>` +
+                   `<span class="admFaceVal">${f.wind_max_ms} m/s</span></div>` +
+                   `<div class="per" style="margin:-2px 0 4px 54px">${f.wind_regime}` +
+                   ` \u00b7 mean ${f.wind_mean_ms} m/s</div>`;
+          }).join('');
+        return `<div class="paneLabel" style="margin-top:12px">Wind speed at each facade</div>` +
+          rows +
+          `<table class="aqTable" style="margin-top:6px">` +
+          `<tr><td>Windiest facade</td><td style="text-align:right"><b>${j.wind_on_facades.windiest}</b></td></tr>` +
+          `<tr><td>Calmest facade</td><td style="text-align:right"><b>${j.wind_on_facades.calmest}</b></td></tr>` +
+          `</table>` +
+          `<div class="paneLabel" style="margin-top:8px">Wind by height</div>` +
+          `<table class="aqTable"><tr><td><b>Level</b></td>` +
+          `<td style="text-align:right"><b>Mean wind</b></td>` +
+          `<td style="text-align:right"><b>Mean conc.</b></td></tr>` +
+          j.levels.map(L => `<tr><td>${L.height_m} m</td>` +
+            `<td style="text-align:right">${L.wind_mean_ms} m/s</td>` +
+            `<td style="text-align:right">${L.mean}</td></tr>`).join('') +
+          `</table>` +
+          `<p class="srcNote">${j.wind_on_facades.note}<br><b>${j.wind_on_facades.caveat}</b></p>`;
+      })() : '') +
       `<table class="aqTable" style="margin-top:8px">` +
       `<tr><td>Worst facade</td><td style="text-align:right"><b>${j.worst.facing}</b> at ${j.worst.height_m} m</td></tr>` +
       `<tr><td>Peak concentration</td><td style="text-align:right"><b>${j.peak} ${u}</b></td></tr>` +
