@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v125"
+APP_VERSION = "deepseego-v126"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -6469,6 +6469,22 @@ def aermod_run(q: AermodQuery):
                       "quantitative; the spatial pattern is more reliable "
                       "than the absolute values.",
         })
+    # where does each source sit relative to the building, along the wind?
+    th_w = math.radians(wdir)
+    wxw, wyw = -math.sin(th_w), -math.cos(th_w)
+    upwind, downwind = [], []
+    for si, s in enumerate(srcs):
+        ex = [e for e in elements if e["src"] == si]
+        if not ex:
+            continue
+        qs = sum(e["q"] for e in ex) or 1.0
+        cx = sum(e["x"] * e["q"] for e in ex) / qs
+        cy = sum(e["y"] * e["q"] for e in ex) / qs
+        along = cx * wxw + cy * wyw      # >0 means downwind of the building
+        lbl = s.get("label") or s.get("kind") or f"source {si+1}"
+        (downwind if along > 0 else upwind).append(
+            (lbl, abs(round(along))))
+
     if peak <= 1e-9:
         warnings.append({
             "level": "medium",
@@ -6479,6 +6495,21 @@ def aermod_run(q: AermodQuery):
                 "a real result, not a failure - but if you expected loading, "
                 "check the wind direction against where your sources sit, or "
                 "use the climatology option to average over all directions."),
+        })
+    elif downwind and not upwind:
+        warnings.append({
+            "level": "medium",
+            "title": "Every source is downwind of the building",
+            "detail": (
+                f"The wind is FROM {_compass16(wdir)}, so material travels "
+                f"towards the {_compass16((wdir + 180) % 360)}. These sources "
+                "sit on that side of the building: "
+                + ", ".join(f"{n} ({d} m)" for n, d in downwind[:4])
+                + ". The map will show a strong plume while the facades stay "
+                "near zero - both are correct, because the plume moves away "
+                "from the envelope. Only a source UPWIND of the building can "
+                "load it. Try another wind direction, or the climatology "
+                "option, which averages over the whole wind rose."),
         })
     if zi < 150:
         warnings.append({
@@ -6570,6 +6601,17 @@ def aermod_run(q: AermodQuery):
                               "mixing and plume capture behind buildings. NOT "
                               "PRIME - no cavity mass balance or streamline "
                               "deflection.")},
+        "source_geometry": {
+            "wind_from": _compass16(wdir),
+            "plume_travels_to": _compass16((wdir + 180) % 360),
+            "upwind_of_building": [{"label": n, "distance_m": d}
+                                   for n, d in upwind],
+            "downwind_of_building": [{"label": n, "distance_m": d}
+                                     for n, d in downwind],
+            "note": ("Only sources UPWIND of the building can load its "
+                     "facades. Sources downwind appear on the map but never "
+                     "reach the envelope."),
+        },
         "warnings": warnings,
         "elements": len(elements),
         "model": "AERMOD-formulation (not EPA AERMOD - see the model panel)",
