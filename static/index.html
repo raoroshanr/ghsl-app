@@ -1257,7 +1257,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v125</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v126</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1424,7 +1424,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v125";
+const DSG_VERSION = "deepseego-v126";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4557,6 +4557,8 @@ async function admDraw3D(j){
     for(const row of t.z) for(const v of row)
       if(v != null && isFinite(v)){ sum += v; cnt++; }
     const meanZ = cnt ? sum / cnt : 0;
+    // Earth Engine sampleRectangle returns rows north-to-south, which already
+    // matches PlaneGeometry's top-down vertex order - no flip needed here.
     let k = 0;
     for(let iy = 0; iy < t.rows; iy++)
       for(let ix = 0; ix < t.cols; ix++){
@@ -4948,22 +4950,24 @@ function admDrapeConcentration(grid){
   const t3 = _S3.terrain;
   let k = 0;
   for(let iy = 0; iy < rows; iy++){
+    // vertex row 0 is the NORTH edge; data row 0 is the SOUTH edge
+    const dy = rows - 1 - iy;
     for(let ix = 0; ix < cols; ix++){
-      const v = vals[iy][ix];
+      const v = vals[dy][ix];
       const t = v > 0 ? (Math.log10(v) - lo) / Math.max(1e-9, hi - lo) : 0;
       const c = admConcColour(t);
       colours[k*3] = c[0]; colours[k*3+1] = c[1]; colours[k*3+2] = c[2];
       // hide anything outside the circular region of interest, with a soft
       // edge so the boundary does not look like a cut-out artefact
       const px = -Rlim + (ix / (cols - 1)) * size;
-      const py = -Rlim + (iy / (rows - 1)) * size;
+      const py = -Rlim + (dy / (rows - 1)) * size;
       const rr = Math.hypot(px, py);
       alphas[k] = rr > Rlim ? 0.0
                 : (rr > Rlim * 0.94 ? (Rlim - rr) / (Rlim * 0.06) : 1.0);
       // sit just above the terrain so it is visible but not z-fighting
       // one consistent datum: terrain height where known, the grid mean where
       // not, so the surface is continuous instead of stepped
-      const tv = admTerrainAt(t3, iy / (rows - 1), ix / (cols - 1));
+      const tv = admTerrainAt(t3, dy / (rows - 1), ix / (cols - 1));
       pos.setZ(k, (tv == null ? (_S3.terrainMean || 0) : tv) + 2.0);
       k++;
     }
@@ -5001,18 +5005,19 @@ function admDrapeConcentration(grid){
     const p2 = g2.attributes.position;
     let kk = 0;
     for(let iy = 0; iy < rr2; iy++){
+      const dy2 = rr2 - 1 - iy;          // same north/south correction
       for(let ix = 0; ix < cc2; ix++){
-        const v = L.values[iy][ix];
+        const v = L.values[dy2][ix];
         const t = v > 0 ? (Math.log10(v) - lo) / Math.max(1e-9, hi - lo) : 0;
         const c = admConcColour(t);
         col2[kk*3] = c[0]; col2[kk*3+1] = c[1]; col2[kk*3+2] = c[2];
         const px = -Rlim + (ix / (cc2 - 1)) * size;
-        const py = -Rlim + (iy / (rr2 - 1)) * size;
+        const py = -Rlim + (dy2 / (rr2 - 1)) * size;
         const rr3 = Math.hypot(px, py);
         // only show where there is something to see, else the stack becomes
         // an opaque sandwich hiding the buildings
         al2[kk] = (rr3 > Rlim) ? 0 : Math.max(0, Math.min(0.75, t * 0.95));
-        const tv2 = admTerrainAt(t3, iy / (rr2 - 1), ix / (cc2 - 1));
+        const tv2 = admTerrainAt(t3, dy2 / (rr2 - 1), ix / (cc2 - 1));
         p2.setZ(kk, (tv2 == null ? (_S3.terrainMean || 0) : tv2) + L.height_m);
         kk++;
       }
@@ -5471,6 +5476,21 @@ async function admRun(){
           `<table class="aqTable mmTable">${rows}</table>` +
           `<p class="srcNote">${j.building_effects.consequence}</p>` +
           `<p class="srcNote">${(j.downwash || {}).note || ''}</p>`;
+      })() : '') +
+      (j.source_geometry ? (() => {
+        const g = j.source_geometry;
+        const row = (arr, lab, col) => arr.length
+          ? `<tr><td>${lab}</td><td style="text-align:right;color:${col}">` +
+            arr.map(s => `${s.label} <span class="per">(${s.distance_m} m)</span>`).join('<br>') +
+            `</td></tr>`
+          : `<tr><td>${lab}</td><td style="text-align:right" class="per">none</td></tr>`;
+        return `<div class="paneLabel" style="margin-top:12px">Source geometry</div>` +
+          `<table class="aqTable">` +
+          `<tr><td>Wind is FROM</td><td style="text-align:right"><b>${g.wind_from}</b></td></tr>` +
+          `<tr><td>Plume travels towards</td><td style="text-align:right"><b>${g.plume_travels_to}</b></td></tr>` +
+          row(g.upwind_of_building, 'Upwind of the building <span class="per">(can load it)</span>', '#84CC16') +
+          row(g.downwind_of_building, 'Downwind <span class="per">(cannot reach it)</span>', '#E9C46A') +
+          `</table><p class="srcNote">${g.note}</p>`;
       })() : '') +
       `<div class="paneLabel">Facade loading (peak)</div>${faceRows}` +
       (j.wind_on_facades ? (() => {
