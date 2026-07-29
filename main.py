@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v123"
+APP_VERSION = "deepseego-v124"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -5411,6 +5411,33 @@ def _sigmas(x, u, sw, sv, zi, convective):
     return sy, min(sz, 0.9 * zi)
 
 
+def _blockage_field(hras, elements, GX, GY, he_mean, zr, samples=14):
+    """Path blockage from the source cloud to every point of the map grid.
+
+    Previously buildings affected the facade receptors but NOT the map, so the
+    two disagreed - the facades were sheltered while the map showed an
+    open-terrain plume. That inconsistency was confusing and is now removed.
+
+    The approximation: blockage is evaluated from the emission-weighted CENTRE
+    of the sources rather than from each element separately. Per-element paths
+    would be ~100x more work for a map whose purpose is the spatial pattern.
+    Facade receptors keep the exact per-element treatment.
+    """
+    if hras is None or not hras.any or not elements:
+        return None
+    qsum = sum(e["q"] for e in elements) or 1.0
+    sx = sum(e["x"] * e["q"] for e in elements) / qsum
+    sy = sum(e["y"] * e["q"] for e in elements) / qsum
+    rows, cols = GX.shape
+    out = np.zeros_like(GX)
+    for i in range(rows):
+        for j in range(cols):
+            fb, _ = hras.path_blockage(sx, sy, float(GX[i, j]), float(GY[i, j]),
+                                       he_mean, zr, samples=samples)
+            out[i, j] = fb
+    return out
+
+
 class _HeightRaster:
     """A coarse raster of building heights, so a source-to-receptor path can be
     tested against EVERY building it crosses rather than just the tallest one.
@@ -6203,6 +6230,15 @@ def aermod_run(q: AermodQuery):
                     cc *= np.exp(-math.log(2) * (xv / max(0.3, u_ref)) /
                                  (spec["half_life_h"] * 3600.0))
                 field += np.where(ok, cc, 0.0) * wgt
+        # buildings attenuate the map exactly as they attenuate the facades
+        blk = None
+        if hras is not None and hras.any and elements:
+            he_mean = sum(e["he"] * e["q"] for e in elements) / \
+                (sum(e["q"] for e in elements) or 1.0)
+            blk = _blockage_field(hras, elements, GX, GY, he_mean, zr)
+            if blk is not None:
+                field *= np.exp(-1.4 * blk)
+
         field = field * scale + float(q.background or 0.0)
 
         # ---- additional heights, for the 3D field ----
@@ -6239,6 +6275,8 @@ def aermod_run(q: AermodQuery):
                         cc = e["q"] / (np.sqrt(2 * np.pi) * max(0.3, u_ref) *
                                        sz) * vert * lat_f
                         fz += np.where(ok, cc, 0.0) * wgt
+                if blk is not None:
+                    fz *= np.exp(-1.4 * blk * max(0.0, 1.0 - zl / 60.0))
                 fz = fz * scale + float(q.background or 0.0)
                 fzs = fz[::step_v, ::step_v]
                 levels_out.append({
@@ -6390,11 +6428,20 @@ def aermod_run(q: AermodQuery):
             "levels": levels_out,
             "section": section_out,
             "planes": planes_out,
-            "note": (f"Ground-level field at {zr} m, on a {gn}x{gn} grid over "
-                     f"\u00b1{int(gr)} m. Building downwash is applied at the "
-                     "facade receptors but NOT across this grid, which would "
-                     "be far more costly - so the map is the open-terrain "
-                     "field."),
+            "buildings_applied": bool(blk is not None),
+            "note": (
+                f"Ground-level field at {zr} m, on a {gn}x{gn} grid over "
+                f"\u00b1{int(gr)} m. "
+                + ("Building blockage IS applied here, so the map and the "
+                   "facade figures are consistent. The map uses paths from the "
+                   "emission-weighted source centre (one path per grid point); "
+                   "the facade receptors use exact per-element paths plus wake "
+                   "and leeward sheltering, so they remain the more precise "
+                   "numbers."
+                   if blk is not None else
+                   "No scene buildings were supplied, so this is the "
+                   "open-terrain field. Extract the scene to include building "
+                   "effects.")),
         }
 
     limits = spec.get("limits") or {}
@@ -7068,9 +7115,61 @@ def scene_extract(q: SceneQuery):
     except Exception as _e3:
         road_error = f"{type(_e3).__name__}: {_e3}"[:160]
         roads = []
+    road_source = "OpenStreetMap"
+    if not roads:
+        # Overpass is often unreachable from a data centre; GRIP4 comes through
+        # Earth Engine and always resolves, so the layer is never simply absent
+        try:
+            fc = _vector_fc(DATASETS["roads"]).filterBounds(ring).limit(300)
+            gj = fc.getInfo()
+            for f in gj.get("features", []):
+                g_ = f.get("geometry") or {}
+                cs = g_.get("coordinates") or []
+                lines = ([cs] if g_.get("type") == "LineString"
+                         else cs if g_.get("type") == "MultiLineString" else [])
+                for ln in lines:
+                    if len(ln) < 2:
+                        continue
+                    pts = [xy(c[1], c[0]) for c in ln]
+                    L = sum(math.dist(pts[i], pts[i + 1])
+                            for i in range(len(pts) - 1))
+                    roads.append({"pts": pts, "class": "grip", "name": "",
+                                  "length_m": round(L, 1), "veh_per_day": 8000,
+                                  "latlon": [[round(c[1], 6), round(c[0], 6)]
+                                             for c in ln]})
+            if roads:
+                road_source = "GRIP4 (Earth Engine)"
+                road_error = ((road_error or "OSM unavailable")
+                              + " - used GRIP4 instead")
+        except Exception as _e4:
+            road_error = ((road_error or "") +
+                          f" | GRIP4: {type(_e4).__name__}")[:200]
+
+    # ---- railways: a distinct line-source type worth separating out ----
+    rails, rail_error = [], None
+    try:
+        rq = (f'[out:json][timeout:25];'
+              f'way["railway"~"^(rail|light_rail|subway|tram)$"]'
+              f'(around:{int(r)},{q.lat},{q.lon});out geom;')
+        js = _overpass(rq)
+        for el in (js or {}).get("elements", []):
+            g_ = el.get("geometry") or []
+            if len(g_) < 2:
+                continue
+            t = el.get("tags") or {}
+            pts = [xy(p["lat"], p["lon"]) for p in g_]
+            L = sum(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+            rails.append({"pts": pts, "name": t.get("name", ""),
+                          "kind": t.get("railway", "rail"),
+                          "length_m": round(L, 1),
+                          "latlon": [[round(p["lat"], 6), round(p["lon"], 6)]
+                                     for p in g_]})
+        rails = rails[:60]
+    except Exception as _e5:
+        rail_error = f"{type(_e5).__name__}"[:80]
 
     # ---- terrain grid for the 3D floor ----
-    terrain_grid = None
+    terrain_grid, terrain_error = None, None
     try:
         n = 24
         rect = ee.Geometry.Rectangle(
@@ -7095,8 +7194,36 @@ def scene_extract(q: SceneQuery):
                 "z": [[None if not math.isfinite(v) else round(float(v) - base, 2)
                        for v in row] for row in Zs],
             }
-    except Exception:
+    except Exception as _e6:
+        terrain_error = f"{type(_e6).__name__}: {_e6}"[:160]
         terrain_grid = None
+        # retry once at a coarser sample - sampleRectangle can exceed its
+        # request limit at fine resolution over a large box
+        try:
+            small = ee.Geometry.Rectangle(
+                [q.lon - r / mlon, q.lat - r / mlat,
+                 q.lon + r / mlon, q.lat + r / mlat], None, False)
+            arr2 = (dem.reduceResolution(ee.Reducer.mean(), maxPixels=1024)
+                    .reproject(crs="EPSG:4326", scale=90)
+                    .sampleRectangle(region=small, defaultValue=-9999).getInfo())
+            band2 = None
+            for k, v in (arr2.get("properties") or {}).items():
+                if isinstance(v, list) and v and isinstance(v[0], list):
+                    band2 = v
+                    break
+            if band2:
+                Z2 = np.array(band2, dtype=float)
+                Z2[Z2 <= -9000] = np.nan
+                base2 = (float(np.nanmin(Z2)) if not np.all(np.isnan(Z2)) else 0.0)
+                terrain_grid = {
+                    "rows": Z2.shape[0], "cols": Z2.shape[1],
+                    "base_m": round(base2, 2), "size_m": 2 * r,
+                    "z": [[None if not math.isfinite(v) else round(float(v) - base2, 2)
+                           for v in row] for row in Z2]}
+                terrain_error = (terrain_error or "") + " - recovered at 90 m"
+        except Exception as _e7:
+            terrain_error = ((terrain_error or "") +
+                             f" | retry: {type(_e7).__name__}")[:200]
 
     # ---- suggested line sources, from the roads actually found ----
     suggested = []
@@ -7123,9 +7250,46 @@ def scene_extract(q: SceneQuery):
     return {
         "centre": {"lat": q.lat, "lon": q.lon}, "radius_m": r,
         "area_m2": round(area_m2, 1),
-        "scene": {"buildings": bldgs, "roads": roads,
+        "layer_status": [
+            {"layer": "Land cover", "source": "ESA WorldCover 2021 (10 m)",
+             "ok": bool(lulc), "detail": f"{len(lulc)} classes present"},
+            {"layer": "Built-up surface & volume",
+             "source": "GHSL P2023A (100 m)",
+             "ok": built_s is not None and built_v is not None,
+             "detail": (f"{round(built_s or 0):,} m\u00b2 surface, "
+                        f"{round(built_v or 0):,} m\u00b3 volume")},
+            {"layer": "Building footprints", "source": bldg_source,
+             "ok": bool(bldgs),
+             "detail": (f"{len(bldgs)} buildings"
+                        + (f" (expected ~{expected})" if expected else "")
+                        + (f" \u2014 {bldg_error}" if bldg_error else ""))},
+            {"layer": "Building heights",
+             "source": "Open Buildings 2.5D / OSM tags / GHSL mean",
+             "ok": bool(h_stats),
+             "detail": (f"{h_stats['min']}\u2013{h_stats['max']} m, "
+                        f"{h_stats['individual']} individually measured"
+                        if h_stats else "no heights")},
+            {"layer": "Road network", "source": road_source,
+             "ok": bool(roads),
+             "detail": (f"{len(roads)} segments"
+                        + (f" \u2014 {road_error}" if road_error else ""))},
+            {"layer": "Railways", "source": "OpenStreetMap",
+             "ok": bool(rails),
+             "detail": (f"{len(rails)} segments" if rails
+                        else ("none within the radius" if not rail_error
+                              else rail_error))},
+            {"layer": "Terrain (DEM)", "source": "Copernicus GLO-30",
+             "ok": terrain_grid is not None,
+             "detail": ((f"{terrain_grid['rows']}\u00d7{terrain_grid['cols']} grid"
+                         if terrain_grid else "unavailable")
+                        + (f" \u2014 {terrain_error}" if terrain_error else ""))},
+        ],
+        "scene": {"buildings": bldgs, "roads": roads, "rails": rails,
                   "terrain": terrain_grid,
                   "building_count": len(bldgs), "road_count": len(roads),
+                  "rail_count": len(rails),
+                  "road_source": road_source,
+                  "terrain_error": terrain_error,
                   "building_source": bldg_source,
                   "building_error": bldg_error,
                   "buildings_expected": expected,
