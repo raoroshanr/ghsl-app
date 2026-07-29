@@ -436,6 +436,13 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
 #admDrawerBody{flex:1 1 auto;overflow-y:auto;padding:12px 14px 20px}
 #admScene3D{width:100%;height:320px;background:#0B1310;border:1px solid #2A3A33;
   border-radius:8px;position:relative;overflow:hidden}
+.admRose{position:absolute;top:8px;right:8px;display:flex;flex-direction:column;
+  align-items:center;gap:4px;pointer-events:none}
+.admRose svg{width:54px;height:54px}
+.admRoseBtn{pointer-events:auto;font:600 9.5px Arial,Helvetica,sans-serif;
+  padding:2px 7px;background:#12201B;color:#9FB0A8;border:1px solid #2E3E37;
+  border-radius:5px;cursor:pointer}
+.admRoseBtn:hover{background:#1D2D26;color:#E7EDE8}
 #admPlaneCv{width:100%;height:230px;background:#0B1310;border:1px solid #2A3A33;
   border-radius:8px;display:block;margin-top:6px}
 #admProfileCv{width:100%;height:130px;background:#0B1310;border:1px solid #2A3A33;
@@ -1250,7 +1257,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v124</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v125</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1417,7 +1424,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v124";
+const DSG_VERSION = "deepseego-v125";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4485,11 +4492,26 @@ async function admDraw3D(j){
   scene.background = new THREE.Color(0x0B1310);
   const cam = new THREE.PerspectiveCamera(48, W/H, 1, 8000);
   const R = j.radius_m;
-  let camAz = -0.6, camEl = 0.55, camR = R * 2.6;
+  let camAz = 0, camEl = 0.55, camR = R * 2.6;   // 0 = north up
   const rend = new THREE.WebGLRenderer({antialias:true});
   rend.setSize(W, H); rend.setPixelRatio(Math.min(2, window.devicePixelRatio||1));
   host.innerHTML = '';
   host.appendChild(rend.domElement);
+  const rose = document.createElement('div');
+  rose.className = 'admRose';
+  rose.innerHTML =
+    '<svg viewBox="0 0 54 54"><g id="roseG">' +
+    '<circle cx="27" cy="27" r="24" fill="rgba(11,19,16,.72)" stroke="#2E3E37"/>' +
+    '<polygon points="27,6 22,28 32,28" fill="#E4572E"/>' +
+    '<polygon points="27,48 22,26 32,26" fill="#6b7a72"/>' +
+    '<text x="27" y="17" text-anchor="middle" font-size="10" fill="#fff" ' +
+    'font-family="Arial">N</text></g></svg>' +
+    '<button class="admRoseBtn" title="Reset to north up">north up</button>';
+  host.appendChild(rose);
+  rose.querySelector('.admRoseBtn').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    camAz = 0; camEl = 0.55; camR = R * 2.6; place();
+  });
   _S3 = {scene, rend, cam: null, conc: null, concLevels: [], R: R,
          terrain: j.scene.terrain || null, terrainMean: 0};
   if(j.scene.terrain && j.scene.terrain.z){
@@ -4498,6 +4520,27 @@ async function admDraw3D(j){
       if(v != null && isFinite(v)){ s += v; n2++; }
     _S3.terrainMean = n2 ? s / n2 : 0;
   }
+
+  // compass marks on the ground: N/E/S/W drawn at the domain edge, plus a
+  // north spoke, so orientation stays obvious when the view is rotated
+  const compass = new THREE.Group();
+  [['N', 0], ['E', 90], ['S', 180], ['W', 270]].forEach(([lab, deg]) => {
+    const a = deg * Math.PI / 180;
+    // bearing 0 = north = -z ; bearing 90 = east = +x
+    const px = Math.sin(a) * R * 1.04, pz = -Math.cos(a) * R * 1.04;
+    const pts = [new THREE.Vector3(Math.sin(a)*R*0.97, 1, -Math.cos(a)*R*0.97),
+                 new THREE.Vector3(px, 1, pz)];
+    compass.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({color: lab === 'N' ? 0xE4572E : 0x6b7a72})));
+    // a small marker cube; the HTML overlay carries the letters
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(lab === 'N' ? 26 : 14, 6, lab === 'N' ? 26 : 14),
+      new THREE.MeshBasicMaterial({color: lab === 'N' ? 0xE4572E : 0x8A968F}));
+    m.position.set(px, 4, pz);
+    compass.add(m);
+  });
+  scene.add(compass);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
   const sun = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -4588,6 +4631,9 @@ async function admDraw3D(j){
                      camR*Math.sin(camEl),
                      camR*Math.cos(camEl)*Math.cos(camAz));
     cam.lookAt(0, 0, 0);
+    const g = rose.querySelector('#roseG');
+    if(g) g.setAttribute('transform',
+      `rotate(${(camAz * 180 / Math.PI).toFixed(1)} 27 27)`);
   }
   place();
   let drag = false, lx = 0, ly = 0;
@@ -5407,11 +5453,25 @@ async function admRun(){
         (draped ? ` <b>draped over the 3D scene above</b>` : ` (3D drape unavailable)`) +
         `, at ${j.grid.receptor_height_m} m above ground over \u00b1${j.grid.radius_m} m. ` +
         `Peak ${j.grid.max} ${j.pollutant.unit}, mean ${j.grid.mean}. ${j.grid.note}</p>` : '') +
-      (j.downwash ? `<div class="mmVerdict ${j.downwash.applied ? 'ok' : 'warn'}" style="font-size:11px">` +
-        (j.downwash.applied
-          ? `Building downwash applied using <b>${j.downwash.buildings} individual buildings</b> from the extracted scene. ${j.downwash.note}`
-          : `No building downwash \u2014 extract the scene first so individual building heights can influence the plume.`) +
-        `</div>` : '') +
+      (j.building_effects ? (() => {
+        const rows = j.building_effects.rows.map(r =>
+          `<tr><td><b>${r.output}</b><div class="per">${r.note}</div></td>` +
+          `<td style="text-align:right;white-space:nowrap;vertical-align:top">` +
+          `<span style="color:${r.treatment === 'Full' ? '#84CC16' : '#E9C46A'}">` +
+          `${r.treatment}</span></td></tr>` +
+          `<tr><td colspan="2" class="mmSrc" style="padding-bottom:6px">` +
+          r.includes.map(x => '\u00b7 ' + x).join('<br>') + `</td></tr>`).join('');
+        return `<div class="paneLabel" style="margin-top:12px">How buildings are treated</div>` +
+          `<div class="mmVerdict ${j.downwash && j.downwash.applied ? 'ok' : 'warn'}"
+             style="font-size:11px">` +
+          (j.downwash && j.downwash.applied
+            ? `Using <b>${j.downwash.buildings} individual buildings</b> from the extracted scene. ${j.building_effects.summary}`
+            : `No scene buildings supplied \u2014 run "Extract scene" so building heights can influence the plume.`) +
+          `</div>` +
+          `<table class="aqTable mmTable">${rows}</table>` +
+          `<p class="srcNote">${j.building_effects.consequence}</p>` +
+          `<p class="srcNote">${(j.downwash || {}).note || ''}</p>`;
+      })() : '') +
       `<div class="paneLabel">Facade loading (peak)</div>${faceRows}` +
       (j.wind_on_facades ? (() => {
         const wmax = Math.max(1e-9, ...j.facades.map(f => f.wind_max_ms));
