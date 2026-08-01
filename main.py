@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v127"
+APP_VERSION = "deepseego-v129"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -7435,6 +7435,945 @@ def scene_extract(q: SceneQuery):
             "Building heights without an OSM tag fall back to the GHSL area "
             "mean, so individual buildings may be well off even where the "
             "area average is sound.",
+        ],
+    }
+
+
+# ============================================================================
+# RIVER INTELLIGENCE
+#
+# WHAT IS SOLID: water extent, river width, cross-section geometry, cloud
+# screening and change through time. These are direct measurements from
+# Sentinel-1/2 and are reliable to about a pixel.
+#
+# WHAT IS NOT: discharge. Satellites see WIDTH; discharge needs width, DEPTH
+# and VELOCITY. Depth and velocity are not observable from orbit. Inverting
+# discharge from width uses hydraulic geometry (Leopold & Maddock 1953),
+#     w = a Q^b   =>   Q = (w/a)^(1/b)
+# and b is typically 0.1-0.3, so 1/b is 3 to 8. A ONE-PIXEL width error can
+# therefore produce a 50-120% discharge error. Uncalibrated "AI discharge from
+# imagery" claims founder on exactly this.
+#
+# So discharge here is offered two ways, both labelled: a physically-based
+# Manning estimate with an explicit uncertainty band, and a calibrated mode
+# that fits a and b to gauge measurements the user supplies. The calibrated
+# route is the only one suitable for quantitative work.
+# ============================================================================
+class RiverSceneQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 3000
+    start: str = "2024-01-01"
+    end: str = "2025-01-01"
+    sensor: str = "s2"            # s2 | s1
+    max_cloud: float = 40.0
+
+
+@app.post("/river_scenes")
+@ee_errors
+def river_scenes(q: RiverSceneQuery):
+    """Available satellite scenes with cloud cover, so a usable date can be
+    chosen before any processing is done."""
+    ensure_ee()
+    ring = ee.Geometry.Point([q.lon, q.lat]).buffer(float(q.radius_m))
+    if q.sensor == "s1":
+        col = (ee.ImageCollection("COPERNICUS/S1_GRD")
+               .filterBounds(ring).filterDate(q.start, q.end)
+               .filter(ee.Filter.eq("instrumentMode", "IW"))
+               .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV")))
+        info = col.limit(80).reduceColumns(
+            ee.Reducer.toList(3),
+            ["system:time_start", "orbitProperties_pass", "system:index"]
+        ).getInfo()
+        out = []
+        for t, orb, idx in (info.get("list") or []):
+            out.append({"id": idx, "date": _ms_to_date(t), "cloud": None,
+                        "orbit": orb, "usable": True,
+                        "note": "SAR - unaffected by cloud"})
+    else:
+        col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+               .filterBounds(ring).filterDate(q.start, q.end))
+        info = col.limit(120).reduceColumns(
+            ee.Reducer.toList(3),
+            ["system:time_start", "CLOUDY_PIXEL_PERCENTAGE", "system:index"]
+        ).getInfo()
+        out = []
+        for t, cl, idx in (info.get("list") or []):
+            cl = float(cl) if cl is not None else 100.0
+            out.append({"id": idx, "date": _ms_to_date(t),
+                        "cloud": round(cl, 1), "orbit": None,
+                        "usable": cl <= q.max_cloud,
+                        "note": ("usable" if cl <= q.max_cloud
+                                 else "too cloudy for reliable water detection")})
+    out.sort(key=lambda s: s["date"])
+    usable = [s for s in out if s["usable"]]
+    return {"sensor": q.sensor, "scenes": out,
+            "count": len(out), "usable_count": len(usable),
+            "note": ("Sentinel-2 sees water optically but is blocked by cloud; "
+                     "Sentinel-1 radar sees through cloud and is the better "
+                     "choice in monsoon conditions."),
+            "recommended": (min(usable, key=lambda s: s["cloud"] or 0)["date"]
+                            if usable and q.sensor == "s2"
+                            else (usable[-1]["date"] if usable else None))}
+
+
+def _ms_to_date(ms):
+    return _dt.datetime.utcfromtimestamp(float(ms) / 1000.0).strftime("%Y-%m-%d")
+
+
+class RiverWaterQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 3000
+    date: str = ""                # single scene; blank = median of the window
+    start: str = "2024-01-01"
+    end: str = "2025-01-01"
+    sensor: str = "s2"
+    method: str = "mndwi"         # mndwi | ndwi | otsu_sar
+    threshold: Optional[float] = None
+
+
+def _water_mask(q, ring):
+    """Water mask plus the image used, so the caller can also render it."""
+    if q.sensor == "s1":
+        col = (ee.ImageCollection("COPERNICUS/S1_GRD")
+               .filterBounds(ring)
+               .filter(ee.Filter.eq("instrumentMode", "IW"))
+               .filter(ee.Filter.listContains(
+                   "transmitterReceiverPolarisation", "VV"))
+               .select("VV"))
+        if q.date:
+            col = col.filterDate(q.date, _plus_days(q.date, 1))
+        else:
+            col = col.filterDate(q.start, q.end)
+        img = col.median()
+        # water is specular: very low backscatter. -16 dB is the usual cut.
+        thr = -16.0 if q.threshold is None else float(q.threshold)
+        water = img.lt(thr).rename("water")
+        idx = img.rename("index")
+        used = {"band": "VV (dB)", "threshold": thr,
+                "rule": "backscatter below the threshold is water"}
+    else:
+        col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+               .filterBounds(ring))
+        if q.date:
+            col = col.filterDate(q.date, _plus_days(q.date, 1))
+        else:
+            col = col.filterDate(q.start, q.end).filter(
+                ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 40))
+        img = col.median()
+        if q.method == "ndwi":
+            idx = img.normalizedDifference(["B3", "B8"]).rename("index")
+            lbl, thr = "NDWI (green-NIR)", 0.0
+        else:
+            idx = img.normalizedDifference(["B3", "B11"]).rename("index")
+            lbl, thr = "MNDWI (green-SWIR)", 0.0
+        thr = thr if q.threshold is None else float(q.threshold)
+        water = idx.gt(thr).rename("water")
+        used = {"band": lbl, "threshold": thr,
+                "rule": "index above the threshold is water"}
+    return water, idx, used
+
+
+def _plus_days(d, n):
+    dt = _dt.datetime.strptime(d[:10], "%Y-%m-%d") + _dt.timedelta(days=n)
+    return dt.strftime("%Y-%m-%d")
+
+
+@app.post("/river_water")
+@ee_errors
+def river_water(q: RiverWaterQuery):
+    """Detect open water and report its extent."""
+    ensure_ee()
+    pt = ee.Geometry.Point([q.lon, q.lat])
+    ring = pt.buffer(float(q.radius_m))
+    water, idx, used = _water_mask(q, ring)
+
+    scale = 10
+    area = (water.selfMask().multiply(ee.Image.pixelArea())
+            .reduceRegion(ee.Reducer.sum(), ring, scale, maxPixels=1e9)
+            .get("water"))
+    # JRC permanent water, as an independent reference for the same place
+    jrc = ee.Image("JRC/GSW1_4/GlobalSurfaceWater").select("occurrence")
+    perm = (jrc.gte(80).selfMask().multiply(ee.Image.pixelArea())
+            .reduceRegion(ee.Reducer.sum(), ring, 30, maxPixels=1e9)
+            .get("occurrence"))
+    stats = ee.Dictionary({"area": area, "perm": perm}).getInfo()
+    a_m2 = float(stats.get("area") or 0.0)
+    p_m2 = float(stats.get("perm") or 0.0)
+
+    vis = water.selfMask().visualize(palette=["1f6feb"], opacity=1)
+    url = vis.getThumbURL({"region": ring, "dimensions": 900, "format": "png"})
+    b = ring.bounds(1).getInfo()["coordinates"][0]
+    lons = [c[0] for c in b]; lats = [c[1] for c in b]
+
+    return {
+        "water_area_m2": round(a_m2, 1),
+        "water_area_km2": round(a_m2 / 1e6, 4),
+        "jrc_permanent_km2": round(p_m2 / 1e6, 4),
+        "ratio_to_permanent": (round(a_m2 / p_m2, 3) if p_m2 > 0 else None),
+        "png": url,
+        "bounds": [[min(lats), min(lons)], [max(lats), max(lons)]],
+        "detection": used,
+        "sensor": ("Sentinel-1 SAR" if q.sensor == "s1"
+                   else "Sentinel-2 optical"),
+        "caveats": [
+            "A single index threshold misclassifies shadow, wet soil and dark "
+            "roofs as water; check the overlay against the basemap.",
+            "Sentinel resolution is 10 m, so the shoreline is uncertain by at "
+            "least one pixel.",
+            "Optical scenes need low cloud; SAR is unaffected but is degraded "
+            "by wind roughening the water surface.",
+        ],
+        "reference": ("JRC Global Surface Water permanent extent is shown for "
+                      "comparison - a detected area far below it suggests "
+                      "under-detection, far above suggests flooding or false "
+                      "positives."),
+    }
+
+
+class RiverWidthQuery(BaseModel):
+    centerline: list = []         # [[lat,lon], ...] drawn along the river
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    n_sections: int = 12
+    max_width_m: float = 1200
+    date: str = ""
+    start: str = "2024-01-01"
+    end: str = "2025-01-01"
+    sensor: str = "s2"
+    method: str = "mndwi"
+    threshold: Optional[float] = None
+
+
+@app.post("/river_width")
+@ee_errors
+def river_width(q: RiverWidthQuery):
+    """Width at cross-sections placed perpendicular to a drawn centreline.
+
+    The section is sampled as a transect of water/not-water pixels; width is
+    the length of the wetted run containing the centreline point. Sampling
+    perpendicular to the local channel direction matters - an oblique section
+    over-reads width by 1/cos(angle).
+    """
+    ensure_ee()
+    cl = [[float(p[0]), float(p[1])] for p in (q.centerline or [])
+          if len(p) >= 2]
+    if len(cl) < 2:
+        raise HTTPException(status_code=400, detail=(
+            "Draw a centreline of at least two points along the river."))
+
+    mlat = 110540.0
+    lat0 = sum(p[0] for p in cl) / len(cl)
+    mlon = 111320.0 * math.cos(math.radians(lat0))
+    xy = [((p[1] - cl[0][1]) * mlon, (p[0] - cl[0][0]) * mlat) for p in cl]
+
+    # cumulative distance, so sections are evenly spaced along the channel
+    seg = [0.0]
+    for a, b in zip(xy[:-1], xy[1:]):
+        seg.append(seg[-1] + math.dist(a, b))
+    total = seg[-1]
+    if total < 20:
+        raise HTTPException(status_code=400,
+                            detail="The centreline is too short to measure.")
+
+    n = max(3, min(40, int(q.n_sections)))
+    half = float(q.max_width_m) / 2.0
+    ring = ee.Geometry.LineString([[p[1], p[0]] for p in cl]).buffer(
+        max(300.0, half * 1.4))
+    wq = RiverWaterQuery(lat=lat0, lon=cl[0][1], radius_m=1,
+                         date=q.date, start=q.start, end=q.end,
+                         sensor=q.sensor, method=q.method,
+                         threshold=q.threshold)
+    water, idx, used = _water_mask(wq, ring)
+
+    sections, feats = [], []
+    for k in range(n):
+        s = total * (k + 0.5) / n
+        # locate the point and the local direction
+        i = max(0, min(len(seg) - 2,
+                       next((j for j in range(len(seg) - 1)
+                             if seg[j + 1] >= s), len(seg) - 2)))
+        f = (s - seg[i]) / max(1e-9, seg[i + 1] - seg[i])
+        cx = xy[i][0] + (xy[i + 1][0] - xy[i][0]) * f
+        cy = xy[i][1] + (xy[i + 1][1] - xy[i][1]) * f
+        dx = xy[i + 1][0] - xy[i][0]
+        dy = xy[i + 1][1] - xy[i][1]
+        L = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / L, dx / L          # unit normal = section direction
+        a = (cl[0][0] + (cy - ny * half) / mlat,
+             cl[0][1] + (cx - nx * half) / mlon)
+        b = (cl[0][0] + (cy + ny * half) / mlat,
+             cl[0][1] + (cx + nx * half) / mlon)
+        feats.append(ee.Feature(
+            ee.Geometry.LineString([[a[1], a[0]], [b[1], b[0]]]),
+            {"k": k, "bearing": (math.degrees(math.atan2(nx, ny)) + 360) % 360}))
+        sections.append({"k": k, "chainage_m": round(s, 1),
+                         "a": [round(a[0], 6), round(a[1], 6)],
+                         "b": [round(b[0], 6), round(b[1], 6)]})
+
+    # sample each transect at 10 m and count the wetted run through the centre
+    fc = ee.FeatureCollection(feats)
+    samp = water.rename("w").reduceRegions(
+        collection=fc, reducer=ee.Reducer.mean(), scale=10).getInfo()
+    frac = {}
+    for ft in samp.get("features", []):
+        p = ft.get("properties") or {}
+        if p.get("w") is not None:
+            frac[int(p["k"])] = float(p["w"])
+
+    px = 10.0
+    for s in sections:
+        fr = frac.get(s["k"])
+        if fr is None:
+            s.update({"width_m": None, "note": "no data on this transect"})
+            continue
+        w = fr * float(q.max_width_m)
+        s["width_m"] = round(w, 1)
+        s["wet_fraction"] = round(fr, 4)
+        # a shoreline is uncertain by about a pixel at each bank
+        s["uncertainty_m"] = round(2 * px, 1)
+        s["note"] = ("transect fully wet - widen the search span"
+                     if fr > 0.97 else
+                     "no water found on this transect" if fr < 1e-6 else "")
+
+    widths = [s["width_m"] for s in sections
+              if s.get("width_m") and 0 < s["width_m"] < float(q.max_width_m) * 0.97]
+    stats = None
+    if widths:
+        arr = np.array(widths)
+        stats = {"n": len(widths), "mean_m": round(float(arr.mean()), 1),
+                 "median_m": round(float(np.median(arr)), 1),
+                 "min_m": round(float(arr.min()), 1),
+                 "max_m": round(float(arr.max()), 1),
+                 "std_m": round(float(arr.std()), 1),
+                 "cv": round(float(arr.std() / max(1e-9, arr.mean())), 3)}
+
+    return {
+        "sections": sections, "stats": stats,
+        "centerline_length_m": round(total, 1),
+        "detection": used,
+        "sensor": ("Sentinel-1 SAR" if q.sensor == "s1" else "Sentinel-2 optical"),
+        "method_note": (
+            "Each section is placed perpendicular to the local channel "
+            "direction and sampled at 10 m. Width is the wetted length across "
+            "the transect."),
+        "caveats": [
+            "Width is uncertain by roughly one pixel at each bank, so "
+            "about \u00b120 m for Sentinel.",
+            "Islands and braided reaches inflate the wetted fraction; check "
+            "the overlay before using a section.",
+            "Sections reading the full search span mean the channel is wider "
+            "than the span - increase it.",
+        ],
+    }
+
+
+class RiverDischargeQuery(BaseModel):
+    width_m: float
+    slope: Optional[float] = None      # channel slope, m/m
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    manning_n: float = 0.035
+    # calibration pairs from a gauge: [[width_m, discharge_m3s], ...]
+    calibration: list = []
+    channel_type: str = "alluvial"     # confined | alluvial | braided
+
+
+HYDRAULIC_GEOMETRY = {
+    # Leopold & Maddock style exponents. b is the width exponent in w = a Q^b.
+    "confined":  {"b": 0.12, "f": 0.45, "label": "Confined / incised",
+                  "note": "Width barely responds to discharge - the poorest "
+                          "case for width-based inversion."},
+    "alluvial":  {"b": 0.26, "f": 0.40, "label": "Typical alluvial",
+                  "note": "The usual mid-range case."},
+    "braided":   {"b": 0.45, "f": 0.30, "label": "Braided / floodplain",
+                  "note": "Width responds strongly - the most tractable case."},
+}
+
+
+@app.post("/river_discharge")
+def river_discharge(q: RiverDischargeQuery):
+    """Discharge estimate. Read the uncertainty before using any number."""
+    W = float(q.width_m)
+    if W <= 0:
+        raise HTTPException(status_code=400, detail="Width must be positive.")
+    hg = HYDRAULIC_GEOMETRY.get(q.channel_type, HYDRAULIC_GEOMETRY["alluvial"])
+    b = hg["b"]
+    out = {"width_m": W, "channel_type": hg["label"],
+           "hydraulic_geometry": {"b_width_exponent": b,
+                                  "inversion_power": round(1.0 / b, 2),
+                                  "note": hg["note"]}}
+
+    # --- 1. calibrated inversion, if gauge pairs were supplied -------------
+    cal = [(float(w), float(Q)) for w, Q in (q.calibration or [])
+           if float(w) > 0 and float(Q) > 0]
+    if len(cal) >= 3:
+        lw = np.log([c[0] for c in cal])
+        lq = np.log([c[1] for c in cal])
+        # w = a Q^b  ->  ln w = ln a + b ln Q
+        bfit, lna = np.polyfit(lq, lw, 1)
+        pred = np.exp(lna + bfit * lq)
+        obs = np.array([c[0] for c in cal])
+        r2 = 1.0 - float(np.sum((obs - pred) ** 2) /
+                         max(1e-12, np.sum((obs - obs.mean()) ** 2)))
+        Qc = float(np.exp((math.log(W) - lna) / bfit)) if bfit > 1e-6 else None
+        # propagate a one-pixel bank error through the inversion
+        lo = float(np.exp((math.log(max(1.0, W - 20)) - lna) / bfit)) if bfit > 1e-6 else None
+        hi = float(np.exp((math.log(W + 20) - lna) / bfit)) if bfit > 1e-6 else None
+        out["calibrated"] = {
+            "available": True, "n_pairs": len(cal),
+            "fitted_b": round(float(bfit), 4),
+            "fitted_a": round(float(np.exp(lna)), 4),
+            "r_squared": round(r2, 4),
+            "discharge_m3s": (None if Qc is None else round(Qc, 2)),
+            "range_from_pixel_error": (None if lo is None else
+                                       [round(lo, 2), round(hi, 2)]),
+            "verdict": ("Usable for quantitative work if R\u00b2 is high and "
+                        "the calibration spans the discharge range of "
+                        "interest."
+                        if r2 > 0.7 else
+                        "Poor fit - width is not tracking discharge at this "
+                        "site. Do not use the number."),
+        }
+    else:
+        out["calibrated"] = {
+            "available": False,
+            "needed": "at least 3 paired width/discharge measurements",
+            "why": ("Without calibration the coefficient a is unknown, and it "
+                    "varies by an order of magnitude between rivers. This is "
+                    "the step that 'no flow gauge needed' claims omit."),
+        }
+
+    # --- 2. physically-based Manning estimate ------------------------------
+    S = q.slope
+    if S is None and q.lat is not None and q.lon is not None:
+        try:
+            ensure_ee()
+            pt = ee.Geometry.Point([q.lon, q.lat])
+            dem = ee.ImageCollection("COPERNICUS/DEM/GLO30").select("DEM").mosaic()
+            slope_img = ee.Terrain.slope(dem)
+            sdeg = slope_img.reduceRegion(ee.Reducer.mean(), pt.buffer(500), 30,
+                                          bestEffort=True).get("slope").getInfo()
+            if sdeg is not None:
+                # terrain slope is an upper bound on water-surface slope
+                S = max(1e-5, math.tan(math.radians(float(sdeg))) * 0.3)
+        except Exception:
+            S = None
+    if S is None:
+        S = 5e-4          # a common lowland default
+        s_note = "no slope available - assumed 5e-4 (lowland default)"
+    else:
+        s_note = f"slope {S:.2e} m/m"
+
+    n_man = max(0.01, float(q.manning_n))
+    # depth from width via regional hydraulic geometry: d ~ 0.27 W^0.30
+    d = 0.27 * W ** 0.30
+    A = W * d
+    R = (W * d) / (W + 2 * d)
+    Qm = (1.0 / n_man) * A * R ** (2.0 / 3.0) * math.sqrt(S)
+
+    def manning(Wx, dx, nx, Sx):
+        Ax = Wx * dx
+        Rx = (Wx * dx) / (Wx + 2 * dx)
+        return (1.0 / nx) * Ax * Rx ** (2.0 / 3.0) * math.sqrt(Sx)
+
+    # uncertainty: depth +/-50%, n +/-40%, slope factor 3, width +/-20 m
+    lo = manning(max(1.0, W - 20), d * 0.5, n_man * 1.4, S / 3.0)
+    hi = manning(W + 20, d * 1.5, n_man * 0.6, S * 3.0)
+    out["manning"] = {
+        "discharge_m3s": round(Qm, 2),
+        "range_m3s": [round(lo, 2), round(hi, 2)],
+        "spread_factor": round(hi / max(1e-9, lo), 1),
+        "inputs": {"width_m": W, "assumed_depth_m": round(d, 2),
+                   "manning_n": n_man, "slope": S, "slope_note": s_note,
+                   "area_m2": round(A, 1)},
+        "equation": "Q = (1/n) A R^(2/3) S^(1/2)",
+        "depth_relation": "d = 0.27 W^0.30 (regional hydraulic geometry)",
+        "verdict": ("Order-of-magnitude only. Depth, roughness and slope are "
+                    "all assumed, and the plausible range spans a factor of "
+                    f"{round(hi/max(1e-9,lo),1)}. Use it to sanity-check a "
+                    "calibrated estimate, not on its own."),
+    }
+
+    out["honest_summary"] = (
+        "Satellites measure WIDTH. Discharge needs width, depth and velocity; "
+        "the last two are not observable from orbit. Inverting discharge from "
+        f"width raises the width error to the power {round(1.0/b, 1)}, so a "
+        "one-pixel bank error becomes a large discharge error. A calibrated "
+        "fit against gauge data is the only route to a quantitative number - "
+        "which means gauge data is required somewhere, contrary to the common "
+        "claim that satellite discharge removes the need for gauges entirely.")
+    out["better_methods"] = [
+        {"method": "SWOT satellite altimetry",
+         "note": "Measures water surface elevation, slope AND width, so "
+                 "Manning can be closed without assuming depth. The genuine "
+                 "answer to gauge-free discharge, available since 2023."},
+        {"method": "AMHG (at-many-stations hydraulic geometry)",
+         "note": "Gleason & Smith (2014): uses many cross-sections along a "
+                 "reach to constrain a and b without a gauge. Still an "
+                 "estimate, but a principled one."},
+        {"method": "Width + surface velocity from optical flow",
+         "note": "Where imagery has enough texture, tracking surface features "
+                 "between frames gives velocity directly."},
+    ]
+    return out
+
+
+class RiverHistoryQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 3000
+    start: str = "2019-01-01"
+    end: str = "2025-01-01"
+    sensor: str = "s1"            # SAR is the sensible default for a time series
+    step_days: int = 30
+
+
+@app.post("/river_history")
+@ee_errors
+def river_history(q: RiverHistoryQuery):
+    """Water extent through time, plus the JRC long-term reference."""
+    ensure_ee()
+    ring = ee.Geometry.Point([q.lon, q.lat]).buffer(float(q.radius_m))
+    d0 = _dt.datetime.strptime(q.start[:10], "%Y-%m-%d")
+    d1 = _dt.datetime.strptime(q.end[:10], "%Y-%m-%d")
+    step = max(7, int(q.step_days))
+    windows = []
+    cur = d0
+    while cur < d1 and len(windows) < 90:
+        nxt = min(d1, cur + _dt.timedelta(days=step))
+        windows.append((cur.strftime("%Y-%m-%d"), nxt.strftime("%Y-%m-%d")))
+        cur = nxt
+
+    def area_for(a, b):
+        if q.sensor == "s1":
+            col = (ee.ImageCollection("COPERNICUS/S1_GRD")
+                   .filterBounds(ring).filterDate(a, b)
+                   .filter(ee.Filter.eq("instrumentMode", "IW"))
+                   .filter(ee.Filter.listContains(
+                       "transmitterReceiverPolarisation", "VV")).select("VV"))
+            w = col.median().lt(-16)
+        else:
+            col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                   .filterBounds(ring).filterDate(a, b)
+                   .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 40)))
+            w = col.median().normalizedDifference(["B3", "B11"]).gt(0)
+        return (w.selfMask().multiply(ee.Image.pixelArea())
+                .reduceRegion(ee.Reducer.sum(), ring, 20, maxPixels=1e9)
+                .values().get(0))
+
+    stats = {}
+    for i, (a, b) in enumerate(windows):
+        stats[f"w{i}"] = area_for(a, b)
+    info, failed = _eval_stats_resiliently(stats)
+
+    series = []
+    for i, (a, b) in enumerate(windows):
+        v = info.get(f"w{i}")
+        series.append({"start": a, "end": b,
+                       "area_km2": (None if v is None
+                                    else round(float(v) / 1e6, 4))})
+    vals = [s["area_km2"] for s in series if s["area_km2"] is not None]
+    summ = None
+    if vals:
+        arr = np.array(vals)
+        imax = int(arr.argmax()); imin = int(arr.argmin())
+        got = [s for s in series if s["area_km2"] is not None]
+        summ = {"n": len(vals), "mean_km2": round(float(arr.mean()), 4),
+                "min_km2": round(float(arr.min()), 4),
+                "max_km2": round(float(arr.max()), 4),
+                "range_ratio": round(float(arr.max() / max(1e-9, arr.min())), 2),
+                "max_at": got[imax]["start"], "min_at": got[imin]["start"]}
+    return {
+        "series": series, "summary": summ,
+        "sensor": ("Sentinel-1 SAR" if q.sensor == "s1" else "Sentinel-2"),
+        "gaps": len(failed),
+        "note": ("Water extent, not discharge. Extent responds to stage, so "
+                 "it is a useful relative indicator of flood and drought "
+                 "timing even where discharge cannot be quantified."),
+        "caveat": ("Windows with no usable scene return null rather than "
+                   "zero - a gap is not a dry river."),
+    }
+
+
+# ============================================================================
+# WALKABILITY / 15-MINUTE CITY
+#
+# The whole point is NETWORK distance, not straight-line buffers. A 1200 m
+# circle around a point crosses rivers, railways and motorways as if they were
+# not there. Routing on the actual pedestrian graph is what reveals barriers -
+# and the detour ratio (network distance / straight-line distance) is the
+# diagnostic that quantifies them.
+# ============================================================================
+WALK_CATEGORIES = {
+    "retail": {
+        "label": "Retail & daily needs", "colour": "#E4572E",
+        "osm": ['["shop"]', '["amenity"~"^(marketplace|bakery|pharmacy)$"]'],
+        "good_m": 400, "max_m": 1200,
+        "note": "Shops, markets, pharmacies - the errands of daily life.",
+    },
+    "transit": {
+        "label": "Public transport", "colour": "#00B4D8",
+        "osm": ['["highway"="bus_stop"]', '["public_transport"="platform"]',
+                '["railway"~"^(station|halt|tram_stop)$"]'],
+        "good_m": 400, "max_m": 1000,
+        "note": "400 m is the usual planning standard for a bus stop.",
+    },
+    "education": {
+        "label": "Education", "colour": "#E9C46A",
+        "osm": ['["amenity"~"^(school|kindergarten|college|university)$"]'],
+        "good_m": 600, "max_m": 1500,
+        "note": "Schools and colleges.",
+    },
+    "healthcare": {
+        "label": "Healthcare", "colour": "#84CC16",
+        "osm": ['["amenity"~"^(clinic|doctors|hospital|pharmacy)$"]',
+                '["healthcare"]'],
+        "good_m": 800, "max_m": 2000,
+        "note": "Clinics, doctors, hospitals.",
+    },
+    "parks": {
+        "label": "Parks & open space", "colour": "#2A9D8F",
+        "osm": ['["leisure"~"^(park|garden|playground|pitch|sports_centre)$"]',
+                '["landuse"="recreation_ground"]'],
+        "good_m": 400, "max_m": 1200,
+        "note": "Green and recreational space.",
+    },
+}
+
+# Ways a pedestrian can actually use. Motorways and trunk roads are excluded:
+# they are barriers, not routes.
+WALK_HIGHWAYS = ("footway|path|pedestrian|steps|living_street|residential|"
+                 "service|unclassified|tertiary|secondary|primary|track|"
+                 "cycleway|road")
+
+
+class WalkQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 1500
+    walk_m: float = 1200          # 15 minutes at ~80 m/min
+    hex_m: float = 150            # hexagon width
+    categories: list = []         # blank = all five
+    weights: dict = {}            # per-category weighting
+
+
+def _walk_graph(lat, lon, r):
+    """Pedestrian network from OSM as an adjacency graph in local metres."""
+    q = (f'[out:json][timeout:60];'
+         f'way["highway"~"^({WALK_HIGHWAYS})$"]'
+         f'["foot"!~"^(no|private)$"]'
+         f'["access"!~"^(no|private)$"]'
+         f'(around:{int(r)},{lat},{lon});out geom;')
+    js = _overpass(q)
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat))
+    nodes = {}          # rounded (x,y) -> index
+    coords = []         # index -> (x, y)
+    adj = {}            # index -> [(neighbour, length_m), ...]
+    edges = 0
+
+    def nid(la, lo):
+        x = (lo - lon) * mlon
+        y = (la - lat) * mlat
+        k = (round(x, 1), round(y, 1))     # 0.1 m snapping joins shared ends
+        if k not in nodes:
+            nodes[k] = len(coords)
+            coords.append((x, y))
+            adj[nodes[k]] = []
+        return nodes[k]
+
+    for el in (js or {}).get("elements", []):
+        g = el.get("geometry") or []
+        if len(g) < 2:
+            continue
+        prev = None
+        for p in g:
+            cur = nid(p["lat"], p["lon"])
+            if prev is not None and prev != cur:
+                d = math.dist(coords[prev], coords[cur])
+                if d > 0:
+                    adj[prev].append((cur, d))
+                    adj[cur].append((prev, d))
+                    edges += 1
+            prev = cur
+    return coords, adj, edges
+
+
+def _multi_source_dijkstra(coords, adj, sources, cutoff):
+    """Shortest network distance from ANY source to every reachable node."""
+    import heapq
+    dist = [float("inf")] * len(coords)
+    h = []
+    for s in sources:
+        if 0 <= s < len(coords):
+            dist[s] = 0.0
+            heapq.heappush(h, (0.0, s))
+    while h:
+        d, u = heapq.heappop(h)
+        if d > dist[u] or d > cutoff:
+            continue
+        for v, w in adj.get(u, ()):
+            nd = d + w
+            if nd < dist[v] and nd <= cutoff:
+                dist[v] = nd
+                heapq.heappush(h, (nd, v))
+    return dist
+
+
+def _nearest_node(coords, x, y, cell_index, cell):
+    """Nearest graph node via a coarse spatial index."""
+    ci, cj = int(x // cell), int(y // cell)
+    best, bd = None, float("inf")
+    for di in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            for k in cell_index.get((ci + di, cj + dj), ()):
+                d = (coords[k][0] - x) ** 2 + (coords[k][1] - y) ** 2
+                if d < bd:
+                    bd, best = d, k
+    return best, (math.sqrt(bd) if best is not None else None)
+
+
+def _amenities(lat, lon, r, cat):
+    """Amenity points for one category."""
+    spec = WALK_CATEGORIES[cat]
+    parts = []
+    for sel in spec["osm"]:
+        for kind in ("node", "way"):
+            parts.append(f'{kind}{sel}(around:{int(r)},{lat},{lon});')
+    q = f'[out:json][timeout:45];({"".join(parts)});out center;'
+    js = _overpass(q)
+    out = []
+    for el in (js or {}).get("elements", []):
+        c = el.get("center") or {}
+        la = el.get("lat", c.get("lat"))
+        lo = el.get("lon", c.get("lon"))
+        if la is None or lo is None:
+            continue
+        t = el.get("tags") or {}
+        out.append({"lat": la, "lon": lo,
+                    "name": t.get("name", ""),
+                    "kind": (t.get("shop") or t.get("amenity") or
+                             t.get("leisure") or t.get("railway") or
+                             t.get("highway") or "")})
+    return out
+
+
+def _hex_grid(radius_m, size_m):
+    """Pointy-top hexagon centres covering a disc, in local metres.
+
+    size_m is the hexagon WIDTH (flat-to-flat), so the circumradius is
+    size/sqrt(3) and centres sit on a lattice of spacing size in x and
+    1.5*R in y, with alternate rows offset by half a hexagon.
+    """
+    R = size_m / math.sqrt(3.0)          # circumradius
+    dx = size_m
+    dy = 1.5 * R
+    out = []
+    jmax = int(radius_m / dy) + 2
+    imax = int(radius_m / dx) + 2
+    for j in range(-jmax, jmax + 1):
+        y = j * dy
+        off = (dx / 2.0) if (j % 2) else 0.0
+        for i in range(-imax, imax + 1):
+            x = i * dx + off
+            if math.hypot(x, y) <= radius_m:
+                out.append((x, y))
+    return out, R
+
+
+def _hex_ring(cx, cy, R, lat0, lon0, mlat, mlon):
+    """Hexagon corners as [lat,lon], pointy-top."""
+    pts = []
+    for k in range(6):
+        a = math.radians(60 * k - 90)
+        x = cx + R * math.cos(a)
+        y = cy + R * math.sin(a)
+        pts.append([round(lat0 + y / mlat, 6), round(lon0 + x / mlon, 6)])
+    pts.append(pts[0])
+    return pts
+
+
+def _score_from_distance(d, good, mx):
+    """0-100 from network distance. Full marks within `good`, tapering to zero
+    at `mx`. Unreachable scores zero, which is the point of using the network."""
+    if d is None or not math.isfinite(d):
+        return 0.0
+    if d <= good:
+        return 100.0
+    if d >= mx:
+        return 0.0
+    return round(100.0 * (mx - d) / (mx - good), 1)
+
+
+@app.post("/walk_analyse")
+def walk_analyse(q: WalkQuery):
+    """15-minute-city accessibility on the real pedestrian network."""
+    r_net = max(500.0, min(4000.0, float(q.radius_m) + float(q.walk_m)))
+    cats = [c for c in (q.categories or list(WALK_CATEGORIES))
+            if c in WALK_CATEGORIES]
+    if not cats:
+        cats = list(WALK_CATEGORIES)
+
+    coords, adj, n_edges = _walk_graph(q.lat, q.lon, r_net)
+    if len(coords) < 20:
+        raise HTTPException(status_code=502, detail=(
+            "The pedestrian network could not be retrieved, or is too sparse "
+            "here. OpenStreetMap footway coverage varies; try a larger radius "
+            "or a more densely mapped area."))
+
+    # coarse spatial index for nearest-node lookups
+    cell = 120.0
+    cell_index = {}
+    for k, (x, y) in enumerate(coords):
+        cell_index.setdefault((int(x // cell), int(y // cell)), []).append(k)
+
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(q.lat))
+    cutoff = float(q.walk_m) * 1.6      # allow detours beyond the nominal walk
+
+    per_cat, dists, counts = {}, {}, {}
+    amen_xy = []
+    for c in cats:
+        pts = _amenities(q.lat, q.lon, r_net, c)
+        counts[c] = len(pts)
+        srcs = []
+        for p in pts:
+            x = (p["lon"] - q.lon) * mlon
+            y = (p["lat"] - q.lat) * mlat
+            nd, snap = _nearest_node(coords, x, y, cell_index, cell)
+            # an amenity more than 150 m from any mapped way is unroutable
+            if nd is not None and snap is not None and snap < 150:
+                srcs.append(nd)
+                amen_xy.append((x, y))
+        dists[c] = (_multi_source_dijkstra(coords, adj, srcs, cutoff)
+                    if srcs else [float("inf")] * len(coords))
+        per_cat[c] = {"label": WALK_CATEGORIES[c]["label"],
+                      "colour": WALK_CATEGORIES[c]["colour"],
+                      "found": len(pts), "routable": len(srcs),
+                      "good_m": WALK_CATEGORIES[c]["good_m"],
+                      "max_m": WALK_CATEGORIES[c]["max_m"],
+                      "note": WALK_CATEGORIES[c]["note"]}
+
+    # weights, normalised
+    w = {c: float((q.weights or {}).get(c, 1.0)) for c in cats}
+    wsum = sum(w.values()) or 1.0
+
+    centres, R = _hex_grid(float(q.radius_m), float(q.hex_m))
+    feats = []
+    scores_all, detours = [], []
+    for (cx, cy) in centres:
+        nd, snap = _nearest_node(coords, cx, cy, cell_index, cell)
+        if nd is None or snap is None or snap > 200:
+            continue          # no walkable street near this cell
+        props = {"snap_m": round(snap, 1)}
+        total = 0.0
+        for c in cats:
+            d = dists[c][nd]
+            s = _score_from_distance(d, WALK_CATEGORIES[c]["good_m"],
+                                     WALK_CATEGORIES[c]["max_m"])
+            props[c] = s
+            props[c + "_m"] = (None if not math.isfinite(d) else round(d))
+            total += s * w[c]
+        score = total / wsum
+        props["score"] = round(score, 1)
+
+        # Detour ratio: network distance to the nearest amenity against the
+        # straight-line distance to the nearest amenity. A high ratio means
+        # the network forces a long way round - the signature of a river,
+        # railway or motorway severing the neighbourhood.
+        best_d = min((dists[c][nd] for c in cats
+                      if math.isfinite(dists[c][nd])), default=None)
+        if best_d is not None and best_d > 1:
+            props["nearest_any_m"] = round(best_d)
+            if amen_xy:
+                sl = min(math.hypot(ax - cx, ay - cy) for ax, ay in amen_xy)
+                if sl > 30:
+                    ratio = best_d / sl
+                    props["detour_ratio"] = round(ratio, 2)
+                    props["straight_m"] = round(sl)
+                    detours.append(ratio)
+        scores_all.append(score)
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [
+                [[p[1], p[0]] for p in
+                 _hex_ring(cx, cy, R, q.lat, q.lon, mlat, mlon)]]},
+            "properties": props})
+
+    if not feats:
+        raise HTTPException(status_code=502, detail=(
+            "No hexagon fell near a walkable street. The network may be too "
+            "sparse here."))
+
+    arr = np.array(scores_all)
+    bands = [
+        {"band": "70-100 (high)", "count": int((arr >= 70).sum())},
+        {"band": "50-69 (moderate)", "count": int(((arr >= 50) & (arr < 70)).sum())},
+        {"band": "30-49 (low)", "count": int(((arr >= 30) & (arr < 50)).sum())},
+        {"band": "0-29 (very low)", "count": int((arr < 30).sum())},
+    ]
+    for b in bands:
+        b["percent"] = round(100.0 * b["count"] / len(arr), 1)
+
+    det = np.array(detours) if detours else None
+    barrier = None
+    if det is not None and len(det) > 4:
+        severed = int((det >= 2.0).sum())
+        barrier = {
+            "median_detour": round(float(np.median(det)), 2),
+            "p90_detour": round(float(np.percentile(det, 90)), 2),
+            "max_detour": round(float(det.max()), 2),
+            "severed_cells": severed,
+            "severed_percent": round(100.0 * severed / len(det), 1),
+            "what_it_means": (
+                "The detour ratio is network distance divided by straight-line "
+                "distance to the nearest amenity. Around 1.2-1.4 is a normal "
+                "street grid. Values above 2 mean the network forces a long "
+                "way round - the signature of a river, railway line or "
+                "motorway with few crossings."),
+            "verdict": (
+                f"{severed} of {len(det)} cells ({round(100.0*severed/len(det),1)}%) "
+                "have a detour ratio above 2, indicating a severe barrier."
+                if severed > 0.1 * len(det) else
+                "Detour ratios are mostly normal - the network is well "
+                "connected here, with no dominant barrier."),
+        }
+
+    return {
+        "barriers": barrier,
+        "hexes": {"type": "FeatureCollection", "features": feats},
+        "hex_count": len(feats),
+        "hex_m": q.hex_m,
+        "walk_m": q.walk_m,
+        "categories": per_cat,
+        "network": {"nodes": len(coords), "edges": n_edges,
+                    "radius_m": r_net},
+        "summary": {
+            "mean_score": round(float(arr.mean()), 1),
+            "median_score": round(float(np.median(arr)), 1),
+            "min": round(float(arr.min()), 1),
+            "max": round(float(arr.max()), 1),
+            "bands": bands,
+            "is_15_min": round(100.0 * float((arr >= 70).mean()), 1),
+        },
+        "method": (
+            "Distances are measured ALONG the pedestrian street network with "
+            "a multi-source Dijkstra from every amenity, not as straight-line "
+            "buffers. Motorways and trunk roads are excluded from the walking "
+            "graph, and ways tagged foot=no or access=private are dropped."),
+        "caveats": [
+            "OpenStreetMap footway coverage is uneven. Informal paths, common "
+            "in Indian settlements, are often unmapped, so scores can be "
+            "pessimistic where people really do walk.",
+            "An amenity's presence says nothing about its quality, capacity, "
+            "opening hours or affordability.",
+            "The score is a chosen weighting of five categories with chosen "
+            "distance thresholds - it is a defensible convention, not an "
+            "objective measure. Change the weights and the map changes.",
+            "Crossings, signals, footpath width, shade and safety are not "
+            "represented, and they matter as much as distance in practice.",
         ],
     }
 
