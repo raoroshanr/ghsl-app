@@ -386,6 +386,12 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
   font-family:Arial,Helvetica,sans-serif}
 .slDl button:hover{background:#1D2D26}
 .slDl button:disabled{opacity:.4;cursor:default}
+.wkCat{display:flex;align-items:center;gap:8px;margin-top:5px}
+.wkCat label{flex:1;display:flex;align-items:center;gap:6px;font-size:11.5px;
+  color:#C9D3CC;font-family:Arial,Helvetica,sans-serif}
+.wkCat i{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
+.wkCat input[type=range]{flex:0 0 78px;accent-color:#7FD0BC}
+.wkCat b{flex:0 0 22px;text-align:right;font-size:10.5px;color:#E9C46A}
 .slChk{display:flex;align-items:flex-start;gap:7px;margin-top:5px;
   font-size:11px;line-height:1.4;color:#C9D3CC;
   font-family:Arial,Helvetica,sans-serif}
@@ -472,6 +478,9 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
   border-radius:4px;overflow:hidden}
 .admBar i{display:block;height:100%;background:linear-gradient(90deg,#2A9D8F,#E9C46A,#E4572E)}
 .admFaceVal{flex:0 0 92px;text-align:right;font-size:11px;color:#C9D3CC}
+#rvCal{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
+  font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
+  border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
 #dxValData{width:100%;box-sizing:border-box;padding:7px 8px;font-size:12px;
   font-family:Arial,Helvetica,sans-serif;border:1px solid #2E3E37;
   border-radius:6px;background:#12201B;color:#E7EDE8;resize:vertical}
@@ -761,6 +770,8 @@ label.chk input{width:auto}
       <button data-tab="site">Site Brief</button>
       <button data-tab="adv">Zonal Analysis</button>
       <button data-tab="slope">Slope Analysis</button>
+      <button data-tab="river">River</button>
+      <button data-tab="walk">Walk</button>
       <button data-tab="weather">Weather</button>
       <button data-tab="adm">Air Dispersion Model</button>
       <button data-tab="thermal">Heat</button>
@@ -1016,6 +1027,90 @@ label.chk input{width:auto}
       </div>
     </div><!-- /tab-bhuvan -->
 
+    <div id="tab-river" hidden>
+    <section>
+      <h2>River Intelligence</h2>
+      <p class="hint">Water extent, river width and change through time from Sentinel-1 radar and Sentinel-2 optical imagery.</p>
+
+      <label class="fld">1 &middot; Reach of interest</label>
+      <div id="rvStatus" class="hint">Draw a centreline along the river, or pick a point for water extent only.</div>
+      <div style="display:flex;gap:5px;margin-top:6px">
+        <button id="rvDraw" style="flex:2">Draw river centreline</button>
+        <button id="rvUndo" class="ghost" style="flex:1">Undo</button>
+      </div>
+      <button id="rvPoint" class="ghost" style="width:100%;margin-top:6px">Pick a point instead</button>
+
+      <label class="fld" for="rvSensor">2 &middot; Sensor</label>
+      <select id="rvSensor">
+        <option value="s1" selected>Sentinel-1 radar &mdash; sees through cloud</option>
+        <option value="s2">Sentinel-2 optical &mdash; needs a clear sky</option>
+      </select>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>From</label><input type="text" id="rvStart" value="2024-01-01"></div>
+        <div><label>To</label><input type="text" id="rvEnd" value="2025-01-01"></div>
+      </div>
+      <button id="rvScenes" class="ghost" style="width:100%;margin-top:6px">List scenes &amp; cloud cover</button>
+      <select id="rvScene" style="margin-top:6px" hidden></select>
+
+      <label class="fld">3 &middot; Analysis</label>
+      <button id="rvWater" class="primary" style="width:100%">Detect water extent</button>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Cross-sections</label><input type="text" id="rvN" value="12"></div>
+        <div><label>Search span (m)</label><input type="text" id="rvSpan" value="1200"></div>
+      </div>
+      <button id="rvWidth" class="primary" style="width:100%;margin-top:6px">Measure river width</button>
+      <button id="rvHistory" class="ghost" style="width:100%;margin-top:6px">Water extent through time</button>
+
+      <div class="stepH" style="margin-top:14px">Discharge estimate</div>
+      <div class="mmVerdict warn" style="font-size:11px">
+        Satellites measure <b>width</b>. Discharge also needs <b>depth</b> and <b>velocity</b>, which are not observable from orbit. Read the uncertainty before using any number.
+      </div>
+      <label class="fld" for="rvChannel">Channel type</label>
+      <select id="rvChannel">
+        <option value="confined">Confined / incised</option>
+        <option value="alluvial" selected>Typical alluvial</option>
+        <option value="braided">Braided / floodplain</option>
+      </select>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Manning n</label><input type="text" id="rvN_man" value="0.035"></div>
+        <div><label>Slope (m/m, blank = DEM)</label><input type="text" id="rvSlope" placeholder="auto"></div>
+      </div>
+      <label class="fld" for="rvCal">Gauge calibration (optional but important)</label>
+      <p class="hint" style="font-size:10.5px">One pair per line: <code>width_m, discharge_m3s</code>. Three or more enables a calibrated estimate &mdash; the only route to a quantitative number.</p>
+      <textarea id="rvCal" rows="4" placeholder="180, 320&#10;215, 640&#10;260, 1250"></textarea>
+      <button id="rvDischarge" class="primary" style="width:100%;margin-top:6px">Estimate discharge</button>
+      <button id="rvClear" class="ghost" style="width:100%;margin-top:6px">Clear</button>
+      <div id="rvInfo" class="hint" style="min-height:18px"></div>
+    </section>
+    </div><!-- /tab-river -->
+
+    <div id="tab-walk" hidden>
+    <section>
+      <h2>Walkability &mdash; 15-minute city</h2>
+      <p class="hint">Pedestrian accessibility scored on a hexagonal mesh, using distances measured <b>along the street network</b> rather than straight-line buffers &mdash; which is what reveals barriers.</p>
+
+      <label class="fld">1 &middot; Study area</label>
+      <div id="wkStatus" class="hint">Pick the centre of the area to assess.</div>
+      <button id="wkPick" style="width:100%;margin-top:6px">Pick centre on map</button>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Study radius (m)</label><input type="text" id="wkRadius" value="1200"></div>
+        <div><label>Hexagon size (m)</label><input type="text" id="wkHex" value="150"></div>
+      </div>
+      <label class="fld" for="wkWalk">Walking distance &mdash; <span id="wkWalkLbl">1200 m (~15 min)</span></label>
+      <input type="range" id="wkWalk" min="400" max="2000" step="100" value="1200">
+
+      <label class="fld">2 &middot; Amenities and weighting</label>
+      <div id="wkCats"></div>
+
+      <button id="wkRun" class="primary" style="width:100%;margin-top:10px">Run walkability analysis</button>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <button id="wkLayer" class="ghost" style="flex:1">Show category</button>
+        <button id="wkClear" class="ghost" style="flex:1">Clear</button>
+      </div>
+      <div id="wkInfo" class="hint" style="min-height:18px"></div>
+    </section>
+    </div><!-- /tab-walk -->
+
     <div id="tab-weather" hidden>
     <section>
       <h2>Live weather</h2>
@@ -1257,7 +1352,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v127</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v129</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1424,7 +1519,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v127";
+const DSG_VERSION = "deepseego-v129";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3023,6 +3118,25 @@ map.on('click', ev => {
   if(!mapClickMode) return;
   const {lat, lng} = ev.latlng;
 
+  if(mapClickMode === 'wkCentre'){
+    mapClickMode = null; WK.centre = [lat, lng];
+    walkLayer.clearLayers();
+    L.circleMarker([lat, lng], {radius:6, color:'#fff', weight:2,
+      fillColor:'#7FD0BC', fillOpacity:1}).addTo(walkLayer);
+    $('wkStatus').textContent =
+      `Centre set \u00b7 ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    return;
+  }
+
+  if(mapClickMode === 'rvLine'){
+    RV.line.push([lat, lng]); rvDrawScene(); rvStatus();
+    return;
+  }
+  if(mapClickMode === 'rvPoint'){
+    mapClickMode = null; RV.point = [lat, lng]; rvDrawScene(); rvStatus();
+    return;
+  }
+
   if(mapClickMode === 'admBldg'){
     mapClickMode = null;
     admSetBuilding(lat, lng);
@@ -4310,6 +4424,482 @@ function drawSunPath(){
       if(b) b.classList.add('open');
     }catch(e){ toast('Model docs: ' + e.message, 8000); }
   });
+}
+
+/* ---------- Walkability / 15-minute city -----------------------------------
+   Hexagonal accessibility mesh scored on NETWORK distance. The detour ratio
+   is surfaced separately because it is what identifies severed places.
+--------------------------------------------------------------------------- */
+const walkLayer = L.featureGroup().addTo(map);
+let WK = {centre: null, last: null, layer: 'score'};
+const WK_CATS = [
+  {key:'retail',     label:'Retail & daily needs', colour:'#E4572E'},
+  {key:'transit',    label:'Public transport',     colour:'#00B4D8'},
+  {key:'education',  label:'Education',            colour:'#E9C46A'},
+  {key:'healthcare', label:'Healthcare',           colour:'#84CC16'},
+  {key:'parks',      label:'Parks & open space',   colour:'#2A9D8F'},
+];
+
+function wkScoreColour(s){
+  // red -> amber -> green, the convention for accessibility scores
+  const stops = [[0,[178,34,34]],[30,[224,120,60]],[50,[233,196,106]],
+                 [70,[132,204,22]],[100,[26,140,90]]];
+  for(let i=0;i<stops.length-1;i++){
+    const [a,ca]=stops[i],[b,cb]=stops[i+1];
+    if(s>=a && s<=b){
+      const f=(b===a)?0:(s-a)/(b-a);
+      const c=ca.map((v,k)=>Math.round(v+(cb[k]-v)*f));
+      return `rgb(${c[0]},${c[1]},${c[2]})`;
+    }
+  }
+  return 'rgb(26,140,90)';
+}
+
+function wkInit(){
+  if(wkInit._done) return; wkInit._done = true;
+  $('wkCats').innerHTML = WK_CATS.map(c =>
+    `<div class="wkCat">
+       <label><input type="checkbox" data-cat="${c.key}" checked>
+         <i style="background:${c.colour}"></i>${c.label}</label>
+       <input type="range" data-w="${c.key}" min="0" max="3" step="0.5" value="1">
+       <b data-wl="${c.key}">1</b>
+     </div>`).join('');
+  $('wkCats').querySelectorAll('[data-w]').forEach(el =>
+    el.addEventListener('input', () => {
+      $('wkCats').querySelector(`[data-wl="${el.dataset.w}"]`).textContent = el.value;
+    }));
+  $('wkWalk').addEventListener('input', () => {
+    const v = +$('wkWalk').value;
+    $('wkWalkLbl').textContent = `${v} m (~${Math.round(v/80)} min)`;
+  });
+  $('wkPick').addEventListener('click', () => {
+    mapClickMode = 'wkCentre';
+    $('wkStatus').textContent = 'Tap the centre of the study area\u2026';
+  });
+  $('wkRun').addEventListener('click', wkRun);
+  $('wkLayer').addEventListener('click', wkCycleLayer);
+  $('wkClear').addEventListener('click', () => {
+    walkLayer.clearLayers(); WK = {centre:null, last:null, layer:'score'};
+    $('wkInfo').textContent = '';
+    $('wkStatus').textContent = 'Pick the centre of the area to assess.';
+  });
+}
+
+async function wkRun(){
+  if(!WK.centre) return toast('Pick the centre of the study area first');
+  const cats = [...$('wkCats').querySelectorAll('[data-cat]:checked')]
+    .map(el => el.dataset.cat);
+  if(!cats.length) return toast('Select at least one amenity type');
+  const weights = {};
+  cats.forEach(k => { weights[k] =
+    parseFloat($('wkCats').querySelector(`[data-w="${k}"]`).value) || 1; });
+
+  const b = $('wkRun'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Routing\u2026';
+  Progress.start('Walkability',
+                 'Building the pedestrian network and routing from every amenity\u2026', 0);
+  try{
+    const j = await api('/walk_analyse', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat:WK.centre[0], lon:WK.centre[1],
+        radius_m: parseFloat($('wkRadius').value)||1200,
+        hex_m: parseFloat($('wkHex').value)||150,
+        walk_m: +$('wkWalk').value,
+        categories: cats, weights})}, true);
+    WK.last = j; WK.layer = 'score';
+    wkDraw();
+    map.fitBounds(walkLayer.getBounds().pad(0.05));
+    wkPanel(j);
+    $('wkInfo').innerHTML = `mean score <b>${j.summary.mean_score}</b> \u00b7 ` +
+      `${j.summary.is_15_min}% of cells score 70+`;
+  }catch(e){ $('wkInfo').textContent = e.message; toast('Walk: '+e.message, 11000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+function wkDraw(){
+  walkLayer.clearLayers();
+  const j = WK.last;
+  if(!j) return;
+  const key = WK.layer;
+  L.geoJSON(j.hexes, {
+    style: f => {
+      const p = f.properties;
+      let v = (key === 'detour')
+        ? (p.detour_ratio ? Math.max(0, 100 - (p.detour_ratio - 1) * 50) : 100)
+        : (p[key] != null ? p[key] : 0);
+      return {color:'#0B1310', weight:0.4, fillColor: wkScoreColour(v),
+              fillOpacity: 0.72};
+    },
+    onEachFeature: (f, lyr) => {
+      const p = f.properties;
+      const rows = WK_CATS.filter(c => p[c.key] != null).map(c =>
+        `${c.label}: <b>${p[c.key]}</b>` +
+        (p[c.key+'_m'] != null ? ` <span style="opacity:.7">(${p[c.key+'_m']} m walk)</span>`
+                               : ' <span style="opacity:.7">(beyond range)</span>')).join('<br>');
+      lyr.bindTooltip(
+        `<b>Score ${p.score}</b><br>${rows}` +
+        (p.detour_ratio ? `<br>detour ratio <b>${p.detour_ratio}\u00d7</b> ` +
+          `(${p.nearest_any_m} m walk vs ${p.straight_m} m straight)` : ''),
+        {sticky:true});
+    }}).addTo(walkLayer);
+}
+
+function wkCycleLayer(){
+  if(!WK.last) return toast('Run the analysis first');
+  const keys = ['score', ...WK_CATS.filter(c => WK.last.categories[c.key])
+    .map(c => c.key), 'detour'];
+  WK.layer = keys[(keys.indexOf(WK.layer) + 1) % keys.length];
+  wkDraw();
+  const lbl = WK.layer === 'score' ? 'Combined score'
+    : WK.layer === 'detour' ? 'Detour ratio (barriers)'
+    : (WK_CATS.find(c => c.key === WK.layer) || {}).label;
+  $('wkLayer').textContent = lbl;
+  toast('Showing: ' + lbl, 3000);
+}
+
+function wkPanel(j){
+  const s = j.summary;
+  const bands = s.bands.map(b =>
+    `<tr><td>${b.band}</td><td style="text-align:right">${b.count}</td>` +
+    `<td style="text-align:right"><b>${b.percent}%</b></td></tr>`).join('');
+  const cats = Object.entries(j.categories).map(([k, c]) =>
+    `<tr><td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;` +
+    `background:${c.colour};margin-right:6px"></i>${c.label}</td>` +
+    `<td style="text-align:right">${c.found}</td>` +
+    `<td style="text-align:right">${c.good_m}/${c.max_m} m</td></tr>` +
+    (c.found !== c.routable
+      ? `<tr><td colspan="3" class="mmSrc">${c.found - c.routable} not near a mapped street, so unroutable</td></tr>`
+      : '')).join('');
+  const b = j.barriers;
+
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'Walkability \u00b7 15-minute city';
+  $('siteWrap').innerHTML =
+    `<div class="siteSec"><div class="paneLabel">Is this a 15-minute neighbourhood?</div>` +
+    `<div class="mmVerdict ${s.is_15_min >= 50 ? 'ok' : 'warn'}" style="font-size:12px">` +
+    `<b>${s.is_15_min}%</b> of the area scores 70 or above within a ` +
+    `${j.walk_m} m walk (about ${Math.round(j.walk_m/80)} minutes).</div>` +
+    `<table class="aqTable">` +
+    `<tr><td>Mean score</td><td style="text-align:right"><b>${s.mean_score}</b></td></tr>` +
+    `<tr><td>Median</td><td style="text-align:right">${s.median_score}</td></tr>` +
+    `<tr><td>Range</td><td style="text-align:right">${s.min}\u2013${s.max}</td></tr>` +
+    `<tr><td>Hexagons (${j.hex_m} m)</td><td style="text-align:right">${j.hex_count}</td></tr>` +
+    `<tr><td>Network</td><td style="text-align:right">${j.network.nodes.toLocaleString()} nodes, ${j.network.edges.toLocaleString()} edges</td></tr>` +
+    `</table>` +
+    `<div class="paneLabel" style="margin-top:12px">Score distribution</div>` +
+    `<table class="aqTable"><tr><td><b>Band</b></td><td style="text-align:right"><b>Cells</b></td>` +
+    `<td style="text-align:right"><b>Share</b></td></tr>${bands}</table>` +
+    `<div class="paneLabel" style="margin-top:12px">Amenities found</div>` +
+    `<table class="aqTable"><tr><td><b>Category</b></td><td style="text-align:right"><b>Count</b></td>` +
+    `<td style="text-align:right"><b>Good/Max</b></td></tr>${cats}</table>` +
+    (b ? `<div class="paneLabel" style="margin-top:12px">Barriers &mdash; detour ratio</div>` +
+      `<div class="mmVerdict ${b.severed_percent > 10 ? 'warn' : 'ok'}" style="font-size:11px">${b.verdict}</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Median detour</td><td style="text-align:right">${b.median_detour}\u00d7</td></tr>` +
+      `<tr><td>90th percentile</td><td style="text-align:right"><b>${b.p90_detour}\u00d7</b></td></tr>` +
+      `<tr><td>Worst</td><td style="text-align:right">${b.max_detour}\u00d7</td></tr>` +
+      `<tr><td>Severed cells (>2\u00d7)</td><td style="text-align:right">${b.severed_cells} (${b.severed_percent}%)</td></tr>` +
+      `</table><p class="srcNote">${b.what_it_means}</p>` : '') +
+    `<div class="paneLabel" style="margin-top:12px">Method</div>` +
+    `<p class="srcNote">${j.method}</p>` +
+    `<div class="paneLabel" style="margin-top:8px">Caveats</div>` +
+    `<ul class="mmList">${j.caveats.map(x=>`<li>${x}</li>`).join('')}</ul></div>`;
+}
+
+/* ---------- River intelligence ---------------------------------------------
+   Water extent, width and change through time from Sentinel-1/2. Discharge is
+   presented with its uncertainty rather than as a single confident number,
+   because width alone cannot determine it.
+--------------------------------------------------------------------------- */
+const riverLayer = L.featureGroup().addTo(map);
+let RV = {line: [], point: null, overlay: null, lastWidth: null};
+
+function rvInit(){
+  if(rvInit._done) return; rvInit._done = true;
+  $('rvDraw').addEventListener('click', () => {
+    mapClickMode = 'rvLine'; RV.line = [];
+    $('rvStatus').textContent = 'Tap along the river, following the channel\u2026';
+    rvDrawScene();
+  });
+  $('rvUndo').addEventListener('click', () => {
+    RV.line.pop(); rvDrawScene(); rvStatus();
+  });
+  $('rvPoint').addEventListener('click', () => {
+    mapClickMode = 'rvPoint';
+    $('rvStatus').textContent = 'Tap the river\u2026';
+  });
+  $('rvScenes').addEventListener('click', rvScenes);
+  $('rvWater').addEventListener('click', rvWater);
+  $('rvWidth').addEventListener('click', rvWidth);
+  $('rvHistory').addEventListener('click', rvHistory);
+  $('rvDischarge').addEventListener('click', rvDischarge);
+  $('rvClear').addEventListener('click', () => {
+    RV = {line: [], point: null, overlay: null, lastWidth: null};
+    riverLayer.clearLayers();
+    if(window._rvOverlay){ map.removeLayer(window._rvOverlay); window._rvOverlay = null; }
+    $('rvInfo').textContent = ''; rvStatus();
+  });
+  rvStatus();
+}
+
+function rvStatus(){
+  $('rvStatus').textContent = RV.line.length >= 2
+    ? `Centreline with ${RV.line.length} points \u00b7 ready to measure width`
+    : RV.point ? `Point set \u00b7 ${RV.point[0].toFixed(5)}, ${RV.point[1].toFixed(5)}`
+    : 'Draw a centreline along the river, or pick a point for water extent only.';
+}
+
+function rvDrawScene(){
+  riverLayer.clearLayers();
+  if(RV.line.length){
+    L.polyline(RV.line, {color:'#00B4D8', weight:3}).addTo(riverLayer);
+    RV.line.forEach(p => L.circleMarker(p, {radius:3, color:'#fff', weight:1,
+      fillColor:'#00B4D8', fillOpacity:1}).addTo(riverLayer));
+  }
+  if(RV.point)
+    L.marker(RV.point).addTo(riverLayer).bindTooltip('River point');
+}
+
+function rvCentre(){
+  if(RV.line.length) return [
+    RV.line.reduce((s,p)=>s+p[0],0)/RV.line.length,
+    RV.line.reduce((s,p)=>s+p[1],0)/RV.line.length];
+  return RV.point;
+}
+
+async function rvScenes(){
+  const c = rvCentre();
+  if(!c) return toast('Pick a point or draw a centreline first');
+  const b = $('rvScenes'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Listing\u2026';
+  try{
+    const j = await api('/river_scenes', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat:c[0], lon:c[1], radius_m:3000,
+        start:$('rvStart').value, end:$('rvEnd').value,
+        sensor:$('rvSensor').value})}, true);
+    const sel = $('rvScene');
+    sel.hidden = false;
+    sel.innerHTML = '<option value="">Median of the whole window</option>' +
+      j.scenes.map(s => `<option value="${s.date}"${s.usable?'':' disabled'}>` +
+        `${s.date}${s.cloud != null ? ' \u00b7 ' + s.cloud + '% cloud' : ''}` +
+        `${s.usable ? '' : ' \u2014 too cloudy'}</option>`).join('');
+    if(j.recommended) sel.value = j.recommended;
+    $('rvInfo').innerHTML = `${j.usable_count}/${j.count} scenes usable` +
+      (j.recommended ? ` \u00b7 clearest ${j.recommended}` : '') +
+      `<br><span class="per">${j.note}</span>`;
+  }catch(e){ toast('Scenes: ' + e.message, 9000); }
+  b.disabled = false; b.textContent = o;
+}
+
+async function rvWater(){
+  const c = rvCentre();
+  if(!c) return toast('Pick a point or draw a centreline first');
+  const b = $('rvWater'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Detecting\u2026';
+  Progress.start('Water detection', 'Building the water mask\u2026', 0);
+  try{
+    const j = await api('/river_water', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat:c[0], lon:c[1], radius_m:3000,
+        date:$('rvScene').value || '', start:$('rvStart').value,
+        end:$('rvEnd').value, sensor:$('rvSensor').value})}, true);
+    if(window._rvOverlay) map.removeLayer(window._rvOverlay);
+    window._rvOverlay = L.imageOverlay(j.png, j.bounds, {opacity:0.6}).addTo(map);
+    map.fitBounds(L.latLngBounds(j.bounds).pad(0.05));
+    const ratio = j.ratio_to_permanent;
+    rvPanel('Water extent',
+      `<table class="aqTable">` +
+      `<tr><td>Detected water</td><td style="text-align:right"><b>${j.water_area_km2} km\u00b2</b></td></tr>` +
+      `<tr><td>JRC permanent water</td><td style="text-align:right">${j.jrc_permanent_km2} km\u00b2</td></tr>` +
+      (ratio != null ? `<tr><td>Ratio to permanent</td><td style="text-align:right"><b>${ratio}\u00d7</b></td></tr>` : '') +
+      `<tr><td>Sensor</td><td style="text-align:right">${j.sensor}</td></tr>` +
+      `<tr><td>Rule</td><td style="text-align:right">${j.detection.band} ${j.detection.rule.includes('below')?'<':'>'} ${j.detection.threshold}</td></tr>` +
+      `</table>` +
+      (ratio != null && (ratio > 1.5 || ratio < 0.6)
+        ? `<div class="mmVerdict warn" style="font-size:11px">Detected extent is ${ratio}\u00d7 the long-term permanent water. ` +
+          (ratio > 1.5 ? 'That may be genuine flooding, or false positives from shadow and wet ground.'
+                       : 'That suggests under-detection, or a genuinely low stage.') + `</div>`
+        : `<div class="mmVerdict ok" style="font-size:11px">Detected extent is consistent with the long-term permanent water.</div>`) +
+      `<p class="srcNote">${j.reference}</p>` +
+      `<ul class="mmList">${j.caveats.map(x=>`<li>${x}</li>`).join('')}</ul>`);
+    $('rvInfo').innerHTML = `${j.water_area_km2} km\u00b2 detected`;
+  }catch(e){ $('rvInfo').textContent = e.message; toast('Water: '+e.message, 10000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+async function rvWidth(){
+  if(RV.line.length < 2) return toast('Draw a centreline along the river first');
+  const b = $('rvWidth'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Measuring\u2026';
+  Progress.start('River width', 'Placing cross-sections\u2026', 0);
+  try{
+    const j = await api('/river_width', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({centerline:RV.line,
+        n_sections:parseInt($('rvN').value)||12,
+        max_width_m:parseFloat($('rvSpan').value)||1200,
+        date:$('rvScene').value || '', start:$('rvStart').value,
+        end:$('rvEnd').value, sensor:$('rvSensor').value})}, true);
+    RV.lastWidth = j;
+    rvDrawScene();
+    j.sections.forEach(s => {
+      const ok = s.width_m != null && !s.note;
+      L.polyline([s.a, s.b], {color: ok ? '#E9C46A' : '#8A968F',
+        weight: ok ? 2.5 : 1, opacity: ok ? .95 : .5, dashArray: ok ? null : '4 4'})
+        .addTo(riverLayer)
+        .bindTooltip(s.width_m != null
+          ? `Section ${s.k+1}: <b>${s.width_m} m</b> \u00b1${s.uncertainty_m}` +
+            (s.note ? `<br><span style="color:#E9C46A">${s.note}</span>` : '')
+          : `Section ${s.k+1}: ${s.note}`, {sticky:true});
+    });
+    const st = j.stats;
+    const rows = j.sections.map(s =>
+      `<tr><td>${s.k+1}</td><td style="text-align:right">${Math.round(s.chainage_m)} m</td>` +
+      `<td style="text-align:right">${s.width_m != null ? s.width_m+' m' : '\u2014'}</td>` +
+      `<td class="mmSrc">${s.note||''}</td></tr>`).join('');
+    rvPanel('River width',
+      (st ? `<table class="aqTable">` +
+        `<tr><td>Mean width</td><td style="text-align:right"><b>${st.mean_m} m</b></td></tr>` +
+        `<tr><td>Median</td><td style="text-align:right">${st.median_m} m</td></tr>` +
+        `<tr><td>Range</td><td style="text-align:right">${st.min_m}\u2013${st.max_m} m</td></tr>` +
+        `<tr><td>Variability (CV)</td><td style="text-align:right">${st.cv}</td></tr>` +
+        `<tr><td>Usable sections</td><td style="text-align:right">${st.n} of ${j.sections.length}</td></tr>` +
+        `<tr><td>Reach length</td><td style="text-align:right">${Math.round(j.centerline_length_m)} m</td></tr>` +
+        `</table>` : '<p class="srcNote">No usable sections.</p>') +
+      `<div class="paneLabel" style="margin-top:10px">Sections</div>` +
+      `<table class="aqTable"><tr><td><b>#</b></td><td style="text-align:right"><b>Chainage</b></td>` +
+      `<td style="text-align:right"><b>Width</b></td><td></td></tr>${rows}</table>` +
+      `<p class="srcNote">${j.method_note}</p>` +
+      `<ul class="mmList">${j.caveats.map(x=>`<li>${x}</li>`).join('')}</ul>`);
+    if(st) $('rvInfo').innerHTML = `mean width <b>${st.mean_m} m</b> over ${st.n} sections`;
+  }catch(e){ $('rvInfo').textContent = e.message; toast('Width: '+e.message, 10000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+async function rvHistory(){
+  const c = rvCentre();
+  if(!c) return toast('Pick a point or draw a centreline first');
+  const b = $('rvHistory'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Building series\u2026';
+  Progress.start('Water history', 'Sampling each time window\u2026', 0);
+  try{
+    const j = await api('/river_history', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat:c[0], lon:c[1], radius_m:3000,
+        start:$('rvStart').value, end:$('rvEnd').value,
+        sensor:$('rvSensor').value, step_days:30})}, true);
+    const s = j.summary;
+    rvPanel('Water extent through time',
+      (s ? `<table class="aqTable">` +
+        `<tr><td>Mean extent</td><td style="text-align:right">${s.mean_km2} km\u00b2</td></tr>` +
+        `<tr><td>Maximum</td><td style="text-align:right"><b>${s.max_km2} km\u00b2</b> (${s.max_at})</td></tr>` +
+        `<tr><td>Minimum</td><td style="text-align:right">${s.min_km2} km\u00b2 (${s.min_at})</td></tr>` +
+        `<tr><td>Seasonal range</td><td style="text-align:right"><b>${s.range_ratio}\u00d7</b></td></tr>` +
+        `</table>` : '') +
+      `<canvas id="rvChart" style="width:100%;height:170px;background:#0B1310;` +
+      `border:1px solid #2A3A33;border-radius:8px;margin-top:8px"></canvas>` +
+      `<p class="srcNote">${j.note}<br>${j.caveat}` +
+      (j.gaps ? ` ${j.gaps} window(s) had no usable scene.` : '') + `</p>`);
+    rvChart(j.series);
+    if(s) $('rvInfo').innerHTML = `seasonal range <b>${s.range_ratio}\u00d7</b>`;
+  }catch(e){ $('rvInfo').textContent = e.message; toast('History: '+e.message, 10000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+function rvChart(series){
+  const cv = document.getElementById('rvChart');
+  if(!cv) return;
+  const W = cv.clientWidth || 400, H = 170;
+  cv.width = W*2; cv.height = H*2;
+  const g = cv.getContext('2d'); g.setTransform(2,0,0,2,0,0);
+  const pts = series.filter(s => s.area_km2 != null);
+  if(pts.length < 2) return;
+  const pad = {l:46,r:10,t:10,b:22};
+  const pw = W-pad.l-pad.r, ph = H-pad.t-pad.b;
+  const mx = Math.max(...pts.map(p=>p.area_km2));
+  const mn = Math.min(...pts.map(p=>p.area_km2));
+  g.strokeStyle='#5c6b64'; g.lineWidth=1;
+  g.beginPath(); g.moveTo(pad.l,pad.t); g.lineTo(pad.l,pad.t+ph);
+  g.lineTo(pad.l+pw,pad.t+ph); g.stroke();
+  g.beginPath();
+  pts.forEach((p,i)=>{
+    const x = pad.l + i/(pts.length-1)*pw;
+    const y = pad.t + ph - (p.area_km2-mn)/Math.max(1e-9,mx-mn)*ph;
+    i ? g.lineTo(x,y) : g.moveTo(x,y);
+  });
+  g.strokeStyle='#00B4D8'; g.lineWidth=2; g.stroke();
+  g.lineTo(pad.l+pw,pad.t+ph); g.lineTo(pad.l,pad.t+ph); g.closePath();
+  g.fillStyle='rgba(0,180,216,.18)'; g.fill();
+  g.fillStyle='#9FB0A8'; g.font='10px Arial, Helvetica, sans-serif';
+  g.fillText(mx.toFixed(2), 4, pad.t+8);
+  g.fillText(mn.toFixed(2), 4, pad.t+ph+3);
+  g.fillText(pts[0].start, pad.l, H-6);
+  g.fillText(pts[pts.length-1].start, pad.l+pw-52, H-6);
+  g.fillText('km\u00b2', 4, pad.t-1);
+}
+
+async function rvDischarge(){
+  const st = RV.lastWidth && RV.lastWidth.stats;
+  if(!st) return toast('Measure the river width first');
+  const c = rvCentre();
+  const cal = [];
+  ($('rvCal').value || '').split(/\n+/).forEach(line => {
+    const p = line.split(/[,\t;]+/).map(x=>parseFloat(x.trim()));
+    if(p.length>=2 && isFinite(p[0]) && isFinite(p[1])) cal.push([p[0],p[1]]);
+  });
+  const b = $('rvDischarge'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Estimating\u2026';
+  try{
+    const body = {width_m: st.median_m, channel_type: $('rvChannel').value,
+      manning_n: parseFloat($('rvN_man').value)||0.035, calibration: cal};
+    const sl = parseFloat($('rvSlope').value);
+    if(isFinite(sl)) body.slope = sl; else if(c){ body.lat=c[0]; body.lon=c[1]; }
+    const j = await api('/river_discharge', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}, true);
+    const cb = j.calibrated, m = j.manning, hg = j.hydraulic_geometry;
+    rvPanel('Discharge estimate',
+      `<div class="mmVerdict warn" style="font-size:11px">${j.honest_summary}</div>` +
+      (cb.available
+        ? `<div class="paneLabel">Calibrated against your gauge data</div>` +
+          `<div class="mmVerdict ${cb.r_squared>0.7?'ok':'warn'}" style="font-size:11px">${cb.verdict}</div>` +
+          `<table class="aqTable">` +
+          `<tr><td>Discharge</td><td style="text-align:right"><b>${cb.discharge_m3s} m\u00b3/s</b></td></tr>` +
+          `<tr><td>Range from a 1-pixel bank error</td><td style="text-align:right">${cb.range_from_pixel_error ? cb.range_from_pixel_error.join(' \u2013 ')+' m\u00b3/s' : '\u2014'}</td></tr>` +
+          `<tr><td>Fitted exponent b</td><td style="text-align:right">${cb.fitted_b}</td></tr>` +
+          `<tr><td>R\u00b2 of the fit</td><td style="text-align:right">${cb.r_squared}</td></tr>` +
+          `<tr><td>Calibration pairs</td><td style="text-align:right">${cb.n_pairs}</td></tr>` +
+          `</table>`
+        : `<div class="paneLabel">Calibrated estimate</div>` +
+          `<div class="mmVerdict warn" style="font-size:11px">Not available \u2014 needs ${cb.needed}.<br>${cb.why}</div>`) +
+      `<div class="paneLabel" style="margin-top:12px">Physically-based (Manning)</div>` +
+      `<table class="aqTable">` +
+      `<tr><td>Discharge</td><td style="text-align:right"><b>${m.discharge_m3s} m\u00b3/s</b></td></tr>` +
+      `<tr><td>Plausible range</td><td style="text-align:right">${m.range_m3s.join(' \u2013 ')} m\u00b3/s</td></tr>` +
+      `<tr><td>Spread</td><td style="text-align:right"><b>${m.spread_factor}\u00d7</b></td></tr>` +
+      `<tr><td>Assumed depth</td><td style="text-align:right">${m.inputs.assumed_depth_m} m</td></tr>` +
+      `<tr><td>Slope</td><td style="text-align:right">${m.inputs.slope.toExponential(2)}</td></tr>` +
+      `</table>` +
+      `<div class="mmVerdict warn" style="font-size:11px">${m.verdict}</div>` +
+      `<p class="srcNote"><b>${m.equation}</b> \u00b7 ${m.depth_relation}<br>` +
+      `Channel type ${j.channel_type}: width exponent b = ${hg.b_width_exponent}, ` +
+      `so discharge inverts as width^${hg.inversion_power}. ${hg.note}</p>` +
+      `<div class="paneLabel" style="margin-top:12px">Methods that do better</div>` +
+      `<ul class="mmList">${j.better_methods.map(x=>`<li><b>${x.method}</b> \u2014 ${x.note}</li>`).join('')}</ul>`);
+    $('rvInfo').innerHTML = cb.available
+      ? `calibrated <b>${cb.discharge_m3s} m\u00b3/s</b>`
+      : `Manning <b>${m.discharge_m3s}</b> m\u00b3/s (\u00b1${m.spread_factor}\u00d7)`;
+  }catch(e){ $('rvInfo').textContent = e.message; toast('Discharge: '+e.message, 10000); }
+  b.disabled = false; b.textContent = o;
+}
+
+function rvPanel(title, html){
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'River \u00b7 ' + title;
+  $('siteWrap').innerHTML = `<div class="siteSec">` +
+    `<div class="paneLabel">${title}</div>${html}</div>`;
 }
 
 /* ---------- 3D scene + input extraction -------------------------------------
@@ -6262,10 +6852,10 @@ async function runSlope(){
 /* ---------- Advanced Analysis: guided zone wizard ---------- */
 const BASKETS = {
   sat: {sub: ['explore'], default: 'explore'},
-  urban: {sub: ['site', 'adv', 'slope'], default: 'site'},
+  urban: {sub: ['site', 'adv', 'slope', 'river', 'walk'], default: 'site'},
   climate: {sub: ['weather', 'adm', 'thermal', 'sunlight', 'noise'], default: 'weather'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'weather', 'adm', 'thermal', 'sunlight', 'noise'];
+const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'river', 'walk', 'weather', 'adm', 'thermal', 'sunlight', 'noise'];
 function wipeMapAnalysis(){
   // clear ALL analysis overlays so switching tabs leaves a clean map.
   // wrapped in try/catch: this may run at initial load before the layer
@@ -6275,7 +6865,7 @@ function wipeMapAnalysis(){
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
    slopeLayer, sunPathLayer, shadowLayer, createLayer,
    weatherGridLayer, dxLayer, siteLayerGroup, solarLayer,
-   admLayer].forEach(g => {
+   admLayer, riverLayer, walkLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -6300,6 +6890,8 @@ function showTab(tab){
     x.classList.toggle('active', x.dataset.tab === tab));
   if(tab === 'adv'){ loadShapesOnce(); populateAdvSelectors(); }
   if(tab === 'adm') admInit();
+  if(tab === 'river') rvInit();
+  if(tab === 'walk') wkInit();
   if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight'){ sunlightInit(); solInit(); }
