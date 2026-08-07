@@ -1154,6 +1154,18 @@ label.chk input{width:auto}
       </div>
       <button id="pvScan" class="primary" style="width:100%;margin-top:8px">Scan for PV installations</button>
 
+      <div class="stepH" style="margin-top:14px">Ensemble detection (recommended)</div>
+      <p class="hint">Combines registries, a spectral proposer, <b>vision on 0.3&ndash;0.6&nbsp;m imagery</b>, and web evidence. Each source votes; agreement is reported.</p>
+      <label class="slChk"><input type="checkbox" id="pvUseReg" checked> Registries &mdash; OpenStreetMap + WRI power plants</label>
+      <label class="slChk"><input type="checkbox" id="pvUseSpec" checked> Spectral screen &mdash; proposes where to look</label>
+      <label class="slChk"><input type="checkbox" id="pvUseVis" checked> Vision verification &mdash; decides (needs ANTHROPIC_API_KEY)</label>
+      <label class="slChk"><input type="checkbox" id="pvUseWeb" checked> Web evidence &mdash; capacity, developer, dates</label>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Max vision calls</label><input type="text" id="pvMaxVis" value="12"></div>
+        <div><label>Tile span (m)</label><input type="text" id="pvTileSpan" value="400"></div>
+      </div>
+      <button id="pvEnsemble" class="primary" style="width:100%;margin-top:8px">Run ensemble detection</button>
+
       <label class="fld" for="pvSelect">3 &middot; Installation to date</label>
       <select id="pvSelect"><option value="">Run a scan first</option></select>
       <div class="dxGrid" style="margin-top:6px">
@@ -1417,7 +1429,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v132</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v133</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1584,7 +1596,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v132";
+const DSG_VERSION = "deepseego-v133";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4515,6 +4527,7 @@ function pvInit(){
     $('pvStatus').textContent = 'Tap the centre of the scan\u2026';
   });
   $('pvScan').addEventListener('click', pvScan);
+  $('pvEnsemble').addEventListener('click', pvEnsemble);
   $('pvScore').addEventListener('input', () => {
     $('pvScoreLbl').textContent = (+$('pvScore').value).toFixed(2);
   });
@@ -4536,6 +4549,146 @@ function pvInit(){
     PV.centre = [regionSpec.center[0], regionSpec.center[1]];
     $('pvStatus').textContent = 'Using the Region of Interest centre.';
   }
+}
+
+async function pvEnsemble(){
+  if(!PV.centre) return toast('Pick the centre of the scan first');
+  const b = $('pvEnsemble'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Running ensemble\u2026';
+  Progress.start('Ensemble PV detection',
+                 'Registries, spectral proposals, vision on high-res imagery, web evidence\u2026', 0);
+  try{
+    const j = await api('/pv_ensemble', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat:PV.centre[0], lon:PV.centre[1],
+        radius_m: Math.max(...[...$('pvRadii').querySelectorAll('[data-r]:checked')]
+          .map(el => +el.dataset.r).concat([3000])),
+        use_registries: $('pvUseReg').checked,
+        use_spectral: $('pvUseSpec').checked,
+        use_vision: $('pvUseVis').checked,
+        use_web: $('pvUseWeb').checked,
+        max_vision_tiles: parseInt($('pvMaxVis').value)||12,
+        tile_span_m: parseFloat($('pvTileSpan').value)||400,
+        year: parseInt($('pvYear').value)||2024})}, true);
+    PV.scan = {centre:j.centre, radii_m:[j.radius_m], rings:[],
+               installations:j.sites, total:j.total,
+               mapped_total:j.confirmed, candidate_total:j.provisional};
+    pvDrawEnsemble(j);
+    $('pvSelect').innerHTML = j.sites.length
+      ? j.sites.map(s => `<option value="${s.id}">${s.label} \u00b7 ` +
+          `${Math.round(s.distance_m)} m ${s.direction} \u00b7 ` +
+          `${s.agreement} source${s.agreement>1?'s':''}</option>`).join('')
+      : '<option value="">Nothing found</option>';
+    ['pvTemporal','pvTemporalAll','pvReport'].forEach(i =>
+      $(i).disabled = !j.sites.length);
+    pvEnsemblePanel(j);
+    $('pvInfo').innerHTML = `<b>${j.confirmed}</b> confirmed \u00b7 ` +
+      `${j.provisional} provisional \u00b7 ${j.rejected_by_vision.length} rejected`;
+  }catch(e){ $('pvInfo').textContent = e.message; toast('Ensemble: '+e.message, 12000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+function pvDrawEnsemble(j){
+  pvLayer.clearLayers();
+  const c = [j.centre.lat, j.centre.lon];
+  L.circleMarker(c, {radius:6, color:'#fff', weight:2,
+    fillColor:'#E9C46A', fillOpacity:1}).addTo(pvLayer).bindTooltip('Scan centre');
+  L.circle(c, {radius:j.radius_m, color:'#7FD0BC', weight:1, opacity:.5,
+    fill:false, dashArray:'5 5'}).addTo(pvLayer);
+  j.sites.forEach(s => {
+    const col = s.agreement >= 2 ? '#84CC16' : '#E9C46A';
+    if(s.ring && s.ring.length > 2)
+      L.polygon(s.ring, {color:col, weight:2, fillColor:col,
+        fillOpacity:.35}).addTo(pvLayer).bindTooltip(pvEnsTip(s), {sticky:true});
+    L.circleMarker([s.lat, s.lon], {radius: 4 + 2*s.agreement, color:'#fff',
+      weight:1.2, fillColor:col, fillOpacity:.95}).addTo(pvLayer)
+      .bindTooltip(pvEnsTip(s), {sticky:true});
+  });
+  (j.rejected_by_vision||[]).forEach(rj =>
+    L.circleMarker([rj.lat, rj.lon], {radius:4, color:'#6b2f1c', weight:1,
+      fillColor:'#3a1a10', fillOpacity:.7}).addTo(pvLayer)
+      .bindTooltip(`Rejected by vision<br>${rj.why}`, {sticky:true}));
+  try{ map.fitBounds(pvLayer.getBounds().pad(0.08)); }catch(e){}
+}
+
+function pvEnsTip(s){
+  const v = s.vision;
+  return `<b>${s.label}</b><br>${Math.round(s.distance_m)} m ${s.direction}` +
+    `<br>agreement: <b>${s.agreement}</b> (${s.agreeing_sources.join(', ')})` +
+    (s.capacity ? `<br>${s.capacity}` : '') +
+    (v ? `<br><span style="opacity:.8">vision: ${v.pv_present?'PV present':'no PV'} ` +
+         `(${Math.round((v.confidence||0)*100)}%)</span>` +
+         (v.visual_evidence && v.visual_evidence.length
+           ? `<br><span style="opacity:.7">${v.visual_evidence.slice(0,2).join('; ')}</span>` : '')
+       : '');
+}
+
+function pvEnsemblePanel(j){
+  const rows = j.sites.map(s =>
+    `<tr><td>${s.label}<div class="per">${s.agreeing_sources.join(' + ')}</div></td>` +
+    `<td style="text-align:right">${Math.round(s.distance_m).toLocaleString()} m</td>` +
+    `<td style="text-align:right">${s.direction}</td>` +
+    `<td style="text-align:right;color:${s.agreement>=2?'#84CC16':'#E9C46A'}">` +
+    `<b>${s.agreement}</b></td></tr>`).join('');
+  const vis = (j.vision.results||[]).map(v =>
+    `<details style="margin-top:5px"><summary style="cursor:pointer;font-size:11.5px;` +
+    `color:${v.verdict.pv_present?'#84CC16':'#E4572E'}">` +
+    `${v.verdict.pv_present ? '\u2713 PV present' : '\u2717 not PV'} ` +
+    `(${Math.round((v.verdict.confidence||0)*100)}%) \u2014 ${v.why}</summary>` +
+    `<div class="per" style="margin-top:4px">` +
+    (v.verdict.visual_evidence && v.verdict.visual_evidence.length
+      ? `<b>Saw:</b> ${v.verdict.visual_evidence.join('; ')}<br>` : '') +
+    (v.verdict.against && v.verdict.against.length
+      ? `<b>Against:</b> ${v.verdict.against.join('; ')}<br>` : '') +
+    (v.verdict.alternative ? `<b>Instead:</b> ${v.verdict.alternative}<br>` : '') +
+    (v.verdict.mounting ? `mounting: ${v.verdict.mounting} \u00b7 ` : '') +
+    (v.imagery ? `imagery ${v.imagery.span_m} m across at zoom ${v.imagery.zoom}` : '') +
+    `</div></details>`).join('');
+  const w = j.web_evidence;
+  const layers = j.method.layers.map(l =>
+    `<tr><td><b>${l.source}</b><div class="per">${l.role}</div></td>` +
+    `<td class="mmSrc">+ ${l.strength}<br>\u2212 ${l.weakness}</td></tr>`).join('');
+
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'PV ensemble detection';
+  $('siteWrap').innerHTML =
+    `<div class="siteSec"><div class="paneLabel">Result</div>` +
+    `<div class="mmVerdict ${j.confirmed ? 'ok' : 'warn'}" style="font-size:11.5px">` +
+    `<b>${j.confirmed}</b> confirmed by two or more independent sources \u00b7 ` +
+    `<b>${j.provisional}</b> provisional \u00b7 ` +
+    `<b>${j.rejected_by_vision.length}</b> rejected on visual inspection</div>` +
+    (rows ? `<table class="aqTable"><tr><td><b>Site</b></td>` +
+      `<td style="text-align:right"><b>Distance</b></td>` +
+      `<td style="text-align:right"><b>Dir</b></td>` +
+      `<td style="text-align:right"><b>Sources</b></td></tr>${rows}</table>` : '') +
+    (j.rejected_by_vision.length
+      ? `<div class="paneLabel" style="margin-top:12px">Rejected on inspection</div>` +
+        `<p class="srcNote">The spectral screen proposed these; high-resolution imagery showed they are not PV. This is the ensemble working.</p>` +
+        `<table class="aqTable">` + j.rejected_by_vision.map(rj =>
+          `<tr><td>spectral score ${rj.spectral_score}</td>` +
+          `<td style="text-align:right">${rj.why}</td></tr>`).join('') + `</table>` : '') +
+    (vis ? `<div class="paneLabel" style="margin-top:12px">Vision inspections ` +
+      `(${j.vision.calls} of ${j.vision.ceiling} allowed)</div>` +
+      `<p class="srcNote">${j.vision.note}</p>${vis}` : '') +
+    (w ? `<div class="paneLabel" style="margin-top:12px">Web evidence</div>` +
+      `<div class="mmVerdict ${w.found ? 'ok' : 'warn'}" style="font-size:11px">` +
+      `${w.summary || (w.found ? 'Evidence found.' : 'No documentary evidence found.')}` +
+      (w.place_searched ? `<br><span class="per">searched: ${w.place_searched}</span>` : '') +
+      `</div>` + ((w.installations||[]).length
+        ? `<table class="aqTable">` + w.installations.map(x =>
+            `<tr><td>${x.name||'unnamed'}</td>` +
+            `<td style="text-align:right">${x.capacity_mw ? x.capacity_mw+' MW' : '\u2014'}</td>` +
+            `<td style="text-align:right">${x.commissioned||'\u2014'}</td></tr>` +
+            (x.developer ? `<tr><td colspan="3" class="mmSrc">${x.developer}</td></tr>` : '')
+          ).join('') + `</table>` : '') : '') +
+    `<div class="paneLabel" style="margin-top:12px">How the sources combine</div>` +
+    `<table class="aqTable mmTable">${layers}</table>` +
+    `<p class="srcNote">${j.method.why_ensemble}</p>` +
+    (Object.keys(j.errors||{}).length
+      ? `<p class="srcNote" style="color:#E9C46A">Errors: ` +
+        Object.entries(j.errors).map(([k,v])=>`${k}: ${v}`).join(' \u00b7 ') + `</p>` : '') +
+    `</div>`;
 }
 
 async function pvScan(){
