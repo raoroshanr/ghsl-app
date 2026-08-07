@@ -386,6 +386,8 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
   font-family:Arial,Helvetica,sans-serif}
 .slDl button:hover{background:#1D2D26}
 .slDl button:disabled{opacity:.4;cursor:default}
+#pvRadar{width:100%;height:250px;background:#0B1310;border:1px solid #2A3A33;
+  border-radius:8px;display:block}
 .wkCat{display:flex;align-items:center;gap:8px;margin-top:5px}
 .wkCat label{flex:1;display:flex;align-items:center;gap:6px;font-size:11.5px;
   color:#C9D3CC;font-family:Arial,Helvetica,sans-serif}
@@ -764,6 +766,7 @@ label.chk input{width:auto}
       <button class="active" data-basket="sat">Satellite</button>
       <button data-basket="urban">Urban</button>
       <button data-basket="climate">Atmosphere</button>
+      <button data-basket="pv">PV</button>
     </div>
     <div class="subTabs" id="subBar">
       <button class="active" data-tab="explore">Explore</button>
@@ -1111,6 +1114,54 @@ label.chk input{width:auto}
     </section>
     </div><!-- /tab-walk -->
 
+    <div id="tab-pv" hidden>
+    <section>
+      <h2>PV Radar</h2>
+      <p class="hint">Scan outward from a point for photovoltaic installations, then date their construction from the satellite archive.</p>
+      <div class="mmVerdict warn" style="font-size:11px">
+        At Sentinel-2's 10&nbsp;m resolution a rooftop array is sub-pixel. This finds <b>ground-mounted, utility-scale</b> installations.
+      </div>
+
+      <label class="fld">1 &middot; Centre of the scan</label>
+      <div id="pvStatus" class="hint">Pick a point, or use the current Region of Interest.</div>
+      <button id="pvPick" style="width:100%;margin-top:6px">Pick centre on map</button>
+
+      <label class="fld">2 &middot; Scan rings</label>
+      <div id="pvRadii">
+        <label class="slChk"><input type="checkbox" data-r="100" checked> 100 m</label>
+        <label class="slChk"><input type="checkbox" data-r="500" checked> 500 m</label>
+        <label class="slChk"><input type="checkbox" data-r="1000" checked> 1 km</label>
+        <label class="slChk"><input type="checkbox" data-r="10000" checked> 10 km</label>
+      </div>
+      <label class="slChk"><input type="checkbox" id="pvSpectral" checked> Also run the spectral screen (finds unmapped farms, produces candidates)</label>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>Min area (m&sup2;)</label><input type="text" id="pvMinArea" value="2000"></div>
+        <div><label>Imagery year</label><input type="text" id="pvYear" value="2024"></div>
+      </div>
+      <button id="pvScan" class="primary" style="width:100%;margin-top:8px">Scan for PV installations</button>
+
+      <label class="fld" for="pvSelect">3 &middot; Installation to date</label>
+      <select id="pvSelect"><option value="">Run a scan first</option></select>
+      <div class="dxGrid" style="margin-top:6px">
+        <div><label>From year</label><input type="text" id="pvY0" value="2013"></div>
+        <div><label>To year</label><input type="text" id="pvY1" value="2025"></div>
+      </div>
+      <label class="slChk"><input type="checkbox" id="pvSentinel" checked> Use Sentinel-2 (10&nbsp;m) from 2016 &mdash; Landsat (30&nbsp;m) covers everything earlier, back to 1984</label>
+      <div style="display:flex;gap:5px;margin-top:5px">
+        <button class="ghost" data-era="1984" style="flex:1;padding:4px;font-size:10px">Since 1984</button>
+        <button class="ghost" data-era="2000" style="flex:1;padding:4px;font-size:10px">Since 2000</button>
+        <button class="ghost" data-era="2013" style="flex:1;padding:4px;font-size:10px">Since 2013</button>
+      </div>
+      <button id="pvTemporal" class="primary" style="width:100%;margin-top:6px" disabled>Date this installation</button>
+      <button id="pvTemporalAll" class="ghost" style="width:100%;margin-top:6px" disabled>Date all mapped sites (slower)</button>
+
+      <label class="fld">4 &middot; Report</label>
+      <button id="pvReport" class="ghost" style="width:100%" disabled>Download PDF evidence report</button>
+      <button id="pvClear" class="ghost" style="width:100%;margin-top:6px">Clear</button>
+      <div id="pvInfo" class="hint" style="min-height:18px"></div>
+    </section>
+    </div><!-- /tab-pv -->
+
     <div id="tab-weather" hidden>
     <section>
       <h2>Live weather</h2>
@@ -1352,7 +1403,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v129</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v131</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1519,7 +1570,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v129";
+const DSG_VERSION = "deepseego-v131";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3118,6 +3169,16 @@ map.on('click', ev => {
   if(!mapClickMode) return;
   const {lat, lng} = ev.latlng;
 
+  if(mapClickMode === 'pvCentre'){
+    mapClickMode = null; PV.centre = [lat, lng];
+    pvLayer.clearLayers();
+    L.circleMarker([lat,lng], {radius:6, color:'#fff', weight:2,
+      fillColor:'#E9C46A', fillOpacity:1}).addTo(pvLayer);
+    $('pvStatus').textContent =
+      `Centre set \u00b7 ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    return;
+  }
+
   if(mapClickMode === 'wkCentre'){
     mapClickMode = null; WK.centre = [lat, lng];
     walkLayer.clearLayers();
@@ -4424,6 +4485,345 @@ function drawSunPath(){
       if(b) b.classList.add('open');
     }catch(e){ toast('Model docs: ' + e.message, 8000); }
   });
+}
+
+/* ---------- PV radar --------------------------------------------------------
+   Scan outward for photovoltaic installations, then date each one from the
+   Sentinel-2 archive by change detection.
+--------------------------------------------------------------------------- */
+const pvLayer = L.featureGroup().addTo(map);
+let PV = {centre: null, scan: null, temporal: []};
+
+function pvInit(){
+  if(pvInit._done) return; pvInit._done = true;
+  $('pvPick').addEventListener('click', () => {
+    mapClickMode = 'pvCentre';
+    $('pvStatus').textContent = 'Tap the centre of the scan\u2026';
+  });
+  $('pvScan').addEventListener('click', pvScan);
+  $('pvTemporal').addEventListener('click', () => pvTemporal(false));
+  $('pvTemporalAll').addEventListener('click', () => pvTemporal(true));
+  $('pvReport').addEventListener('click', pvReport);
+  document.querySelectorAll('[data-era]').forEach(b =>
+    b.addEventListener('click', () => { $('pvY0').value = b.dataset.era; }));
+  $('pvClear').addEventListener('click', () => {
+    pvLayer.clearLayers(); PV = {centre:null, scan:null, temporal:[]};
+    $('pvSelect').innerHTML = '<option value="">Run a scan first</option>';
+    ['pvTemporal','pvTemporalAll','pvReport'].forEach(i => $(i).disabled = true);
+    $('pvInfo').textContent = '';
+    $('pvStatus').textContent = 'Pick a point, or use the current Region of Interest.';
+  });
+  // fall back to the ROI centre if one is set
+  if(!PV.centre && typeof regionSpec !== 'undefined' && regionSpec &&
+     regionSpec.type === 'circle' && regionSpec.center){
+    PV.centre = [regionSpec.center[0], regionSpec.center[1]];
+    $('pvStatus').textContent = 'Using the Region of Interest centre.';
+  }
+}
+
+async function pvScan(){
+  if(!PV.centre) return toast('Pick the centre of the scan first');
+  const radii = [...$('pvRadii').querySelectorAll('[data-r]:checked')]
+    .map(el => +el.dataset.r);
+  if(!radii.length) return toast('Select at least one ring');
+  const b = $('pvScan'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Scanning\u2026';
+  Progress.start('PV radar', 'Searching OpenStreetMap and screening imagery\u2026', 0);
+  try{
+    const j = await api('/pv_scan', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({lat:PV.centre[0], lon:PV.centre[1], radii_m:radii,
+        spectral: $('pvSpectral').checked,
+        min_area_m2: parseFloat($('pvMinArea').value)||2000,
+        year: parseInt($('pvYear').value)||2024})}, true);
+    PV.scan = j; PV.temporal = [];
+    pvDrawScan(j);
+    $('pvSelect').innerHTML = j.installations.length
+      ? j.installations.map(f =>
+          `<option value="${f.id}">${f.label} \u00b7 ${Math.round(f.distance_m)} m ${f.direction}` +
+          `${f.source.startsWith('Open') ? '' : ' (candidate)'}</option>`).join('')
+      : '<option value="">Nothing found</option>';
+    const has = j.installations.length > 0;
+    $('pvTemporal').disabled = !has;
+    $('pvTemporalAll').disabled = !has;
+    $('pvReport').disabled = !has;
+    pvPanel(j);
+    $('pvInfo').innerHTML = `<b>${j.total}</b> found \u00b7 ` +
+      `${j.mapped_total} mapped, ${j.candidate_total} candidates`;
+  }catch(e){ $('pvInfo').textContent = e.message; toast('Scan: '+e.message, 11000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+function pvDrawScan(j){
+  pvLayer.clearLayers();
+  const c = [j.centre.lat, j.centre.lon];
+  L.circleMarker(c, {radius:6, color:'#fff', weight:2,
+    fillColor:'#E9C46A', fillOpacity:1}).addTo(pvLayer)
+    .bindTooltip('Scan centre');
+  j.radii_m.forEach(r => {
+    L.circle(c, {radius:r, color:'#7FD0BC', weight:1, opacity:.55,
+      fill:false, dashArray:'5 5'}).addTo(pvLayer)
+      .bindTooltip(r >= 1000 ? (r/1000)+' km' : r+' m', {permanent:false});
+  });
+  j.installations.forEach(f => {
+    const mapped = f.source.startsWith('Open');
+    if(f.ring && f.ring.length > 2){
+      L.polygon(f.ring, {color: mapped ? '#E4572E' : '#E9C46A', weight:2,
+        fillColor: mapped ? '#E4572E' : '#E9C46A', fillOpacity:.35})
+        .addTo(pvLayer).bindTooltip(pvTip(f), {sticky:true});
+    }
+    L.circleMarker([f.lat, f.lon], {radius: mapped ? 6 : 4,
+      color:'#fff', weight:1.2,
+      fillColor: mapped ? '#E4572E' : '#E9C46A', fillOpacity:.95})
+      .addTo(pvLayer).bindTooltip(pvTip(f), {sticky:true});
+  });
+  try{ map.fitBounds(pvLayer.getBounds().pad(0.06)); }catch(e){}
+}
+
+function pvTip(f){
+  return `<b>${f.label}</b><br>${Math.round(f.distance_m)} m ${f.direction}` +
+    (f.area_m2 ? `<br>${Math.round(f.area_m2).toLocaleString()} m\u00b2` : '') +
+    (f.capacity ? `<br>${f.capacity}` : '') +
+    (f.operator ? `<br>${f.operator}` : '') +
+    (f.start_date ? `<br>tagged start ${f.start_date}` : '') +
+    `<br><span style="opacity:.75">${f.source}</span>` +
+    (f.rectangularity != null ? `<br>rectangularity ${f.rectangularity}` : '');
+}
+
+function pvPanel(j){
+  const rings = j.rings.map(r =>
+    `<tr><td>${r.radius_m >= 1000 ? (r.radius_m/1000)+' km' : r.radius_m+' m'}</td>` +
+    `<td style="text-align:right">${r.count}</td>` +
+    `<td style="text-align:right">${r.mapped}</td>` +
+    `<td style="text-align:right">${r.candidates}</td>` +
+    `<td style="text-align:right">${r.nearest_m ? Math.round(r.nearest_m)+' m' : '\u2014'}</td></tr>`).join('');
+  const rows = j.installations.map(f =>
+    `<tr><td>${f.label}${f.source.startsWith('Open') ? '' : ' <span class="per">(candidate)</span>'}</td>` +
+    `<td style="text-align:right">${Math.round(f.distance_m).toLocaleString()} m</td>` +
+    `<td style="text-align:right">${f.direction}</td>` +
+    `<td style="text-align:right">${f.area_m2 ? Math.round(f.area_m2).toLocaleString()+' m\u00b2' : '\u2014'}</td>` +
+    `<td style="text-align:right">${f.capacity || '\u2014'}</td></tr>`).join('');
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'PV radar';
+  $('siteWrap').innerHTML =
+    `<div class="siteSec"><div class="paneLabel">Radar scan</div>` +
+    `<canvas id="pvRadar"></canvas>` +
+    `<table class="aqTable" style="margin-top:8px">` +
+    `<tr><td><b>Ring</b></td><td style="text-align:right"><b>Total</b></td>` +
+    `<td style="text-align:right"><b>Mapped</b></td>` +
+    `<td style="text-align:right"><b>Candidates</b></td>` +
+    `<td style="text-align:right"><b>Nearest</b></td></tr>${rings}</table>` +
+    (rows ? `<div class="paneLabel" style="margin-top:12px">Installations</div>` +
+      `<table class="aqTable"><tr><td><b>Name</b></td><td style="text-align:right"><b>Distance</b></td>` +
+      `<td style="text-align:right"><b>Dir</b></td><td style="text-align:right"><b>Area</b></td>` +
+      `<td style="text-align:right"><b>Capacity</b></td></tr>${rows}</table>`
+      : `<p class="srcNote">Nothing found within the selected rings.</p>`) +
+    `<div class="mmVerdict warn" style="font-size:11px">${j.scope}</div>` +
+    `<ul class="mmList">${j.caveats.map(x=>`<li>${x}</li>`).join('')}</ul></div>`;
+  pvRadarDraw(j);
+}
+
+function pvRadarDraw(j){
+  const cv = document.getElementById('pvRadar');
+  if(!cv) return;
+  const W = cv.clientWidth || 400, H = 250;
+  cv.width = W*2; cv.height = H*2;
+  const g = cv.getContext('2d'); g.setTransform(2,0,0,2,0,0);
+  g.clearRect(0,0,W,H);
+  const cx = W/2, cy = H/2, R = Math.min(W,H)/2 - 18;
+  const rmax = Math.max(...j.radii_m);
+  // rings, log-spaced so a 100 m and a 10 km ring both remain readable
+  const rr = v => R * Math.log10(1 + 9*v/rmax);
+  g.strokeStyle = '#2A3A33'; g.lineWidth = 1;
+  j.radii_m.forEach(r => {
+    g.beginPath(); g.arc(cx, cy, rr(r), 0, Math.PI*2); g.stroke();
+    g.fillStyle = '#5c6b64'; g.font = '9px Arial, Helvetica, sans-serif';
+    g.fillText(r >= 1000 ? (r/1000)+' km' : r+' m', cx + 3, cy - rr(r) + 10);
+  });
+  // compass spokes
+  [['N',0],['E',90],['S',180],['W',270]].forEach(([lab,deg]) => {
+    const a = (deg-90) * Math.PI/180;
+    g.strokeStyle = '#22322B';
+    g.beginPath(); g.moveTo(cx,cy);
+    g.lineTo(cx + R*Math.cos(a), cy + R*Math.sin(a)); g.stroke();
+    g.fillStyle = lab==='N' ? '#E4572E' : '#6b7a72';
+    g.font = (lab==='N'?'bold ':'') + '10px Arial, Helvetica, sans-serif';
+    g.fillText(lab, cx + (R+8)*Math.cos(a) - 3, cy + (R+8)*Math.sin(a) + 3);
+  });
+  // installations
+  j.installations.forEach(f => {
+    const a = (f.bearing_deg - 90) * Math.PI/180;
+    const d = rr(f.distance_m);
+    const x = cx + d*Math.cos(a), y = cy + d*Math.sin(a);
+    const mapped = f.source.startsWith('Open');
+    const sz = f.area_m2 ? Math.max(3, Math.min(11, Math.sqrt(f.area_m2)/40)) : 4;
+    g.beginPath(); g.arc(x, y, sz, 0, Math.PI*2);
+    g.fillStyle = mapped ? 'rgba(228,87,46,.85)' : 'rgba(233,196,106,.75)';
+    g.fill();
+    g.strokeStyle = '#fff'; g.lineWidth = 1; g.stroke();
+  });
+  g.fillStyle = '#E9C46A';
+  g.beginPath(); g.arc(cx, cy, 4, 0, Math.PI*2); g.fill();
+  g.fillStyle = '#8A968F'; g.font = '9px Arial, Helvetica, sans-serif';
+  g.fillText('rings are log-spaced \u00b7 dot size = area \u00b7 orange = mapped, amber = candidate',
+             8, H - 6);
+}
+
+async function pvTemporal(all){
+  if(!PV.scan) return toast('Run a scan first');
+  const list = all
+    ? PV.scan.installations.filter(f => f.source.startsWith('Open')).slice(0, 8)
+    : [PV.scan.installations.find(f => String(f.id) === $('pvSelect').value)]
+        .filter(Boolean);
+  if(!list.length) return toast('Nothing selected to date');
+  const b = all ? $('pvTemporalAll') : $('pvTemporal');
+  const o = b.textContent;
+  b.disabled = true; b.textContent = 'Dating\u2026';
+  Progress.start('Installation dating',
+                 `Reading the Sentinel-2 archive for ${list.length} site(s)\u2026`, 0);
+  const done = [];
+  try{
+    for(const f of list){
+      const j = await api('/pv_temporal', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({lat:f.lat, lon:f.lon, ring:f.ring||[],
+          radius_m: f.area_m2 ? Math.max(60, Math.sqrt(f.area_m2)/2) : 120,
+          start_year: parseInt($('pvY0').value)||2013,
+          end_year: parseInt($('pvY1').value)||2025,
+          use_sentinel: $('pvSentinel').checked,
+          label: f.label})}, true);
+      done.push(j);
+    }
+    PV.temporal = done;
+    pvTemporalPanel(done);
+    $('pvReport').disabled = false;
+    const dated = done.filter(d => d.installation.detected).length;
+    $('pvInfo').innerHTML = `${dated} of ${done.length} dated`;
+  }catch(e){ $('pvInfo').textContent = e.message; toast('Dating: '+e.message, 11000); }
+  finally{ Progress.done(); b.disabled = false; b.textContent = o; }
+}
+
+function pvTemporalPanel(list){
+  const blocks = list.map(t => {
+    const ins = t.installation;
+    const rows = t.series.map(s =>
+      `<tr><td>${s.period}</td>` +
+      `<td class="mmSrc">${s.sensor_key || '\u2014'}</td>` +
+      `<td style="text-align:right">${s.ndvi ?? '\u2014'}</td>` +
+      `<td style="text-align:right">${s.brightness ?? '\u2014'}</td>` +
+      `<td class="mmSrc">${(ins.between && s.period === ins.between[1]) ? '\u2190 change' : ''}</td></tr>`).join('');
+    return `<div class="paneLabel" style="margin-top:12px">${t.label}</div>` +
+      `<div class="mmVerdict ${ins.detected && ins.signature_consistent && !ins.at_sensor_transition ? 'ok' : 'warn'}" style="font-size:11px">` +
+      (ins.detected
+        ? `<b>Built between ${ins.between[0]} and ${ins.between[1]}</b> ` +
+          `(confidence ${ins.confidence}, t = ${ins.t_statistic})<br>${ins.interpretation}`
+        : ins.interpretation) + `</div>` +
+      (ins.at_sensor_transition
+        ? `<div class="mmVerdict warn" style="font-size:11px;border-color:#8b3a1c;` +
+          `background:rgba(228,87,46,.14);color:#F0B49E">\u26a0 This break sits ` +
+          `exactly at the change from <b>${ins.sensor_before}</b> to ` +
+          `<b>${ins.sensor_after}</b>. Part of the step may be instrumental. ` +
+          `Verify against the imagery before citing this date.</div>` : '') +
+      `<p class="srcNote">Sensors: ${(t.sensors_used||[]).join(', ')}` +
+      (t.cross_sensor ? ` \u00b7 ${t.cross_sensor.note}` : '') + `</p>` +
+      `<canvas class="pvChart" data-lab="${t.label}" style="width:100%;height:130px;` +
+      `background:#0B1310;border:1px solid #2A3A33;border-radius:8px;margin-top:6px"></canvas>` +
+      `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11px;color:#7FD0BC">` +
+      `Observation series (${t.usable_periods} usable periods)</summary>` +
+      `<table class="aqTable"><tr><td><b>Period</b></td><td><b>Sensor</b></td>` +
+      `<td style="text-align:right"><b>NDVI</b></td>` +
+      `<td style="text-align:right"><b>Brightness</b></td><td></td></tr>${rows}</table></details>`;
+  }).join('');
+  $('drawer').classList.add('open');
+  if(typeof paneMode === 'function') paneMode('site');
+  $('drawerSub').textContent = 'PV installation dating';
+  $('siteWrap').innerHTML = `<div class="siteSec">` +
+    `<div class="paneLabel">When were these built?</div>` +
+    `<p class="srcNote">${list[0].method}</p>${blocks}` +
+    `<div class="paneLabel" style="margin-top:12px">Limitations</div>` +
+    `<ul class="mmList">${list[0].caveats.map(x=>`<li>${x}</li>`).join('')}</ul></div>`;
+  list.forEach(t => pvChart(t));
+}
+
+function pvChart(t){
+  const cv = [...document.querySelectorAll('.pvChart')]
+    .find(c => c.dataset.lab === t.label);
+  if(!cv) return;
+  const W = cv.clientWidth || 400, H = 130;
+  cv.width = W*2; cv.height = H*2;
+  const g = cv.getContext('2d'); g.setTransform(2,0,0,2,0,0);
+  const pts = t.series.filter(s => s.ndvi != null);
+  if(pts.length < 2) return;
+  const pad = {l:38,r:10,t:10,b:20};
+  const pw = W-pad.l-pad.r, ph = H-pad.t-pad.b;
+  g.strokeStyle='#5c6b64'; g.lineWidth=1;
+  g.beginPath(); g.moveTo(pad.l,pad.t); g.lineTo(pad.l,pad.t+ph);
+  g.lineTo(pad.l+pw,pad.t+ph); g.stroke();
+  // the change marker
+  const ins = t.installation;
+  if(ins.detected && ins.between){
+    const i = pts.findIndex(s => s.period === ins.between[1]);
+    if(i > 0){
+      const x = pad.l + i/(pts.length-1)*pw;
+      g.strokeStyle='#E4572E'; g.setLineDash([4,3]); g.lineWidth=1.5;
+      g.beginPath(); g.moveTo(x,pad.t); g.lineTo(x,pad.t+ph); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle='#E4572E'; g.font='9px Arial, Helvetica, sans-serif';
+      g.fillText('built', x+3, pad.t+9);
+    }
+  }
+  // sensor boundaries, so an instrumental step is visible at a glance
+  for(let i=1;i<pts.length;i++){
+    if(pts[i].sensor_key && pts[i-1].sensor_key &&
+       pts[i].sensor_key !== pts[i-1].sensor_key){
+      const x = pad.l + i/(pts.length-1)*pw;
+      g.strokeStyle='#5c6b64'; g.setLineDash([2,3]); g.lineWidth=1;
+      g.beginPath(); g.moveTo(x,pad.t); g.lineTo(x,pad.t+ph); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle='#8A968F'; g.font='8px Arial, Helvetica, sans-serif';
+      g.fillText(pts[i].sensor_key, x+2, pad.t+ph-3);
+    }
+  }
+  [['ndvi','#84CC16',1.0],['brightness','#00B4D8',0.35]].forEach(([k,col,scale])=>{
+    g.beginPath();
+    pts.forEach((s,i)=>{
+      const x = pad.l + i/(pts.length-1)*pw;
+      const y = pad.t + ph - Math.max(0,Math.min(1,s[k]/scale))*ph;
+      i ? g.lineTo(x,y) : g.moveTo(x,y);
+    });
+    g.strokeStyle=col; g.lineWidth=1.8; g.stroke();
+  });
+  g.fillStyle='#84CC16'; g.font='9px Arial, Helvetica, sans-serif';
+  g.fillText('NDVI', pad.l+2, pad.t+9);
+  g.fillStyle='#00B4D8'; g.fillText('brightness', pad.l+34, pad.t+9);
+  g.fillStyle='#9FB0A8';
+  g.fillText(pts[0].period, pad.l, H-6);
+  g.fillText(pts[pts.length-1].period, pad.l+pw-34, H-6);
+}
+
+async function pvReport(){
+  if(!PV.scan) return toast('Run a scan first');
+  const b = $('pvReport'); const o = b.textContent;
+  b.disabled = true; b.textContent = 'Building PDF\u2026';
+  try{
+    const tok = await authToken();
+    const r = await fetch(BACKEND_URL + '/pv_report', {method:'POST',
+      headers: Object.assign({'Content-Type':'application/json'},
+        tok ? {Authorization:'Bearer '+tok} : {}),
+      body: JSON.stringify({centre: PV.scan.centre, scan: PV.scan,
+        temporal: PV.temporal,
+        title: 'Photovoltaic installation report'})});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'pv_report.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    toast('PDF downloaded', 5000);
+  }catch(e){ toast('Report: '+e.message, 9000); }
+  b.disabled = false; b.textContent = o;
 }
 
 /* ---------- Walkability / 15-minute city -----------------------------------
@@ -6854,8 +7254,9 @@ const BASKETS = {
   sat: {sub: ['explore'], default: 'explore'},
   urban: {sub: ['site', 'adv', 'slope', 'river', 'walk'], default: 'site'},
   climate: {sub: ['weather', 'adm', 'thermal', 'sunlight', 'noise'], default: 'weather'},
+  pv: {sub: ['pv'], default: 'pv'},
 };
-const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'river', 'walk', 'weather', 'adm', 'thermal', 'sunlight', 'noise'];
+const ALL_TABS = ['explore', 'adv', 'site', 'slope', 'river', 'walk', 'pv', 'weather', 'adm', 'thermal', 'sunlight', 'noise'];
 function wipeMapAnalysis(){
   // clear ALL analysis overlays so switching tabs leaves a clean map.
   // wrapped in try/catch: this may run at initial load before the layer
@@ -6865,7 +7266,7 @@ function wipeMapAnalysis(){
      sourceMarkers, siteLayer, buildingLayer, building3dLayer,
    slopeLayer, sunPathLayer, shadowLayer, createLayer,
    weatherGridLayer, dxLayer, siteLayerGroup, solarLayer,
-   admLayer, riverLayer, walkLayer].forEach(g => {
+   admLayer, riverLayer, walkLayer, pvLayer].forEach(g => {
       try { if(g) g.clearLayers(); } catch(e){}
     });
     try { siteState.lat = null; siteState.lon = null; } catch(e){}
@@ -6892,6 +7293,7 @@ function showTab(tab){
   if(tab === 'adm') admInit();
   if(tab === 'river') rvInit();
   if(tab === 'walk') wkInit();
+  if(tab === 'pv') pvInit();
   if(tab === 'weather') weatherInit();
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight'){ sunlightInit(); solInit(); }
