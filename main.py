@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v129"
+APP_VERSION = "deepseego-v131"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -8376,6 +8376,714 @@ def walk_analyse(q: WalkQuery):
             "represented, and they matter as much as distance in practice.",
         ],
     }
+
+
+# ============================================================================
+# PHOTOVOLTAIC INSTALLATIONS
+#
+# SCOPE, stated up front: at Sentinel-2's 10 m resolution a rooftop array is
+# sub-pixel and cannot be detected. Utility-scale ground-mounted farms are
+# 150+ pixels and are detectable. So:
+#   * OpenStreetMap is the PRIMARY source - reliable where mapped, and it
+#     carries capacity, operator and commissioning tags.
+#   * Spectral screening is SECONDARY and produces CANDIDATES, not detections.
+#     Panels are dark in the visible, non-vegetated, and geometrically regular;
+#     so are water, asphalt, shadow and burnt ground. Candidates need visual
+#     confirmation and are labelled as such throughout.
+#
+# The scientifically strongest part is the temporal analysis: once a footprint
+# is known, the Sentinel-2 and Landsat archives can date its construction by
+# change detection, which is a well-posed problem with a checkable answer.
+# ============================================================================
+PV_RADII = [100, 500, 1000, 10000]
+
+
+class PVScanQuery(BaseModel):
+    lat: float
+    lon: float
+    radii_m: list = []                 # blank = the standard rings
+    spectral: bool = True              # also run the spectral screen
+    min_area_m2: float = 2000
+    year: int = 2024
+
+
+def _pv_osm(lat, lon, r):
+    """PV installations tagged in OpenStreetMap."""
+    sel = ('["generator:source"="solar"]', '["plant:source"="solar"]',
+           '["generator:method"="photovoltaic"]', '["power"="solar"]')
+    parts = []
+    for s in sel:
+        for kind in ("node", "way", "relation"):
+            parts.append(f'{kind}{s}(around:{int(r)},{lat},{lon});')
+    q = f'[out:json][timeout:60];({"".join(parts)});out center tags;'
+    js = _overpass(q)
+    out, seen = [], set()
+    for el in (js or {}).get("elements", []):
+        c = el.get("center") or {}
+        la = el.get("lat", c.get("lat"))
+        lo = el.get("lon", c.get("lon"))
+        if la is None or lo is None:
+            continue
+        key = (round(la, 5), round(lo, 5))
+        if key in seen:
+            continue
+        seen.add(key)
+        t = el.get("tags") or {}
+        # capacity may be tagged in several ways
+        cap = (t.get("generator:output:electricity")
+               or t.get("plant:output:electricity") or "")
+        out.append({
+            "source": "OpenStreetMap",
+            "osm_id": f"{el.get('type','')}/{el.get('id','')}",
+            "lat": la, "lon": lo,
+            "name": t.get("name", ""),
+            "operator": t.get("operator", ""),
+            "capacity": cap,
+            "start_date": t.get("start_date", ""),
+            "mounting": (t.get("generator:place")
+                         or t.get("location", "")),
+            "confidence": "mapped",
+        })
+    return out
+
+
+def _pv_spectral(lat, lon, r, year, min_area):
+    """Spectral screen for large, dark, non-vegetated, flat surfaces.
+
+    This is a SCREEN, not a classifier. It will also flag water, asphalt,
+    fresh tarmac and burnt ground. Everything it returns is a candidate.
+    """
+    ensure_ee()
+    ring = ee.Geometry.Point([lon, lat]).buffer(float(r))
+    col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+           .filterBounds(ring)
+           .filterDate(f"{year}-01-01", f"{year+1}-01-01")
+           .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 25)))
+    img = col.median()
+    b = lambda n: img.select(n).divide(10000.0)
+    ndvi = img.normalizedDifference(["B8", "B4"])
+    ndwi = img.normalizedDifference(["B3", "B8"])
+    # panels: dark in visible, low NIR relative to bare soil, and a SWIR
+    # response distinctly below soil. Water is removed by NDWI.
+    vis = b("B2").add(b("B3")).add(b("B4")).divide(3)
+    swir = b("B11")
+    nir = b("B8")
+    cand = (vis.lt(0.16)
+            .And(ndvi.lt(0.20))
+            .And(ndwi.lt(0.0))
+            .And(swir.lt(0.28))
+            .And(swir.gt(nir.multiply(0.6)))
+            .And(nir.lt(0.30)))
+    # keep only compact blocks of adequate size
+    cand = cand.focalMode(1).focalMax(1).selfMask()
+    vec = cand.reduceToVectors(geometry=ring, scale=20, maxPixels=1e9,
+                               geometryType="polygon",
+                               eightConnected=True).getInfo()
+    out = []
+    for f in vec.get("features", []):
+        g = f.get("geometry") or {}
+        rings = g.get("coordinates") or []
+        if not rings:
+            continue
+        rg = rings[0]
+        if len(rg) < 4:
+            continue
+        # shoelace area in local metres
+        mlat = 110540.0
+        mlon = 111320.0 * math.cos(math.radians(lat))
+        pts = [((c[0] - lon) * mlon, (c[1] - lat) * mlat) for c in rg]
+        A = abs(sum(pts[i][0] * pts[(i + 1) % len(pts)][1] -
+                    pts[(i + 1) % len(pts)][0] * pts[i][1]
+                    for i in range(len(pts)))) / 2.0
+        if A < float(min_area):
+            continue
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        # rectangularity: PV arrays are strikingly rectangular; a low value
+        # suggests a natural feature and is reported so it can be judged
+        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        bbox = (max(xs) - min(xs)) * (max(ys) - min(ys))
+        rect = A / bbox if bbox > 0 else 0
+        out.append({
+            "source": "Spectral screen (candidate)",
+            "lat": lat + cy / mlat, "lon": lon + cx / mlon,
+            "area_m2": round(A, 1),
+            "rectangularity": round(rect, 3),
+            "ring": [[round(lat + p[1] / mlat, 6),
+                      round(lon + p[0] / mlon, 6)] for p in rg],
+            "name": "", "operator": "", "capacity": "", "start_date": "",
+            "confidence": ("likely" if rect > 0.7 and A > 20000
+                           else "possible"),
+        })
+    out.sort(key=lambda x: -x["area_m2"])
+    return out[:60]
+
+
+def _bearing_deg(lat1, lon1, lat2, lon2):
+    d = math.radians(lon2 - lon1)
+    y = math.sin(d) * math.cos(math.radians(lat2))
+    x = (math.cos(math.radians(lat1)) * math.sin(math.radians(lat2)) -
+         math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(d))
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+@app.post("/pv_scan")
+@ee_errors
+def pv_scan(q: PVScanQuery):
+    """Radar scan for photovoltaic installations at increasing radii."""
+    radii = sorted(set(int(x) for x in (q.radii_m or PV_RADII) if x > 0))
+    rmax = max(radii)
+
+    found = []
+    osm_err = None
+    try:
+        found += _pv_osm(q.lat, q.lon, rmax)
+    except Exception as e:
+        osm_err = f"{type(e).__name__}: {e}"[:150]
+
+    spec_err = None
+    if q.spectral:
+        try:
+            found += _pv_spectral(q.lat, q.lon, min(rmax, 12000),
+                                  int(q.year), float(q.min_area_m2))
+        except Exception as e:
+            spec_err = f"{type(e).__name__}: {e}"[:150]
+
+    # distance, bearing and which ring each falls in
+    for f in found:
+        d = _haversine_m(q.lat, q.lon, f["lat"], f["lon"])
+        f["distance_m"] = round(d, 1)
+        f["bearing_deg"] = round(_bearing_deg(q.lat, q.lon, f["lat"], f["lon"]), 1)
+        f["direction"] = _compass16(f["bearing_deg"])
+        f["ring_m"] = next((r for r in radii if d <= r), None)
+    found = [f for f in found if f["ring_m"] is not None]
+    found.sort(key=lambda f: f["distance_m"])
+    for i, f in enumerate(found):
+        f["id"] = i
+        f["label"] = (f.get("name") or
+                      (f"Candidate {i+1}" if "Spectral" in f["source"]
+                       else f"PV site {i+1}"))
+
+    rings = []
+    for r in radii:
+        inr = [f for f in found if f["ring_m"] == r]
+        mapped = [f for f in inr if f["source"] == "OpenStreetMap"]
+        rings.append({
+            "radius_m": r, "count": len(inr),
+            "mapped": len(mapped), "candidates": len(inr) - len(mapped),
+            "total_area_m2": round(sum(f.get("area_m2") or 0 for f in inr), 1),
+            "nearest_m": (min(f["distance_m"] for f in inr) if inr else None),
+        })
+
+    return {
+        "centre": {"lat": q.lat, "lon": q.lon},
+        "radii_m": radii, "rings": rings,
+        "installations": found,
+        "total": len(found),
+        "mapped_total": sum(1 for f in found if f["source"] == "OpenStreetMap"),
+        "candidate_total": sum(1 for f in found if "Spectral" in f["source"]),
+        "errors": {"osm": osm_err, "spectral": spec_err},
+        "scope": (
+            "At Sentinel-2's 10 m resolution a rooftop array is sub-pixel and "
+            "cannot be detected. This finds ground-mounted, utility-scale "
+            "installations. Rooftop PV needs sub-metre imagery."),
+        "caveats": [
+            "OpenStreetMap entries are reliable but incomplete - many farms "
+            "are simply not mapped.",
+            "Spectral results are CANDIDATES, not detections. Water, asphalt, "
+            "fresh tarmac and burnt ground share the signature. Confirm each "
+            "one against the satellite basemap before using it.",
+            "Rectangularity is reported to help you judge: PV arrays are "
+            "strikingly rectangular, natural features rarely are.",
+            "Capacity tags in OSM are frequently missing or wrong.",
+        ],
+    }
+
+
+# ----------------------------------------------------------------------------
+# Multi-sensor archive. Landsat reaches back to 1984, which matters because
+# Sentinel-2 only starts in 2016 and many installations predate it.
+#
+# THE TRAP: different sensors have different spectral response functions, so
+# NDVI from Landsat 5 and from Sentinel-2 differ slightly for the SAME ground.
+# Concatenating them naively puts a step at every sensor transition, and a
+# breakpoint detector will report that step as a construction. This is guarded
+# two ways: empirical offset correction using overlap periods, and an explicit
+# flag when a detected break coincides with a sensor change.
+# ----------------------------------------------------------------------------
+LANDSAT_SENSORS = [
+    {"key": "L5", "col": "LANDSAT/LT05/C02/T1_L2", "from": 1984, "to": 2012,
+     "nir": "SR_B4", "red": "SR_B3", "vis": ["SR_B1", "SR_B2", "SR_B3"],
+     "label": "Landsat 5 TM"},
+    {"key": "L7", "col": "LANDSAT/LE07/C02/T1_L2", "from": 1999, "to": 2022,
+     "nir": "SR_B4", "red": "SR_B3", "vis": ["SR_B1", "SR_B2", "SR_B3"],
+     "label": "Landsat 7 ETM+",
+     "note": "SLC failure in May 2003 leaves striped gaps"},
+    {"key": "L8", "col": "LANDSAT/LC08/C02/T1_L2", "from": 2013, "to": 2030,
+     "nir": "SR_B5", "red": "SR_B4", "vis": ["SR_B2", "SR_B3", "SR_B4"],
+     "label": "Landsat 8 OLI"},
+    {"key": "L9", "col": "LANDSAT/LC09/C02/T1_L2", "from": 2021, "to": 2030,
+     "nir": "SR_B5", "red": "SR_B4", "vis": ["SR_B2", "SR_B3", "SR_B4"],
+     "label": "Landsat 9 OLI-2"},
+]
+# Collection 2 Level 2 surface reflectance scaling
+L_SCALE, L_OFFSET = 0.0000275, -0.2
+
+
+def _landsat_indices(sensor, a, b, geom):
+    """Cloud-masked NDVI and visible brightness for one sensor and window."""
+    col = (ee.ImageCollection(sensor["col"])
+           .filterBounds(geom).filterDate(a, b))
+
+    def prep(img):
+        # QA_PIXEL bit 3 = cloud, bit 4 = cloud shadow
+        qa = img.select("QA_PIXEL")
+        clear = (qa.bitwiseAnd(1 << 3).eq(0)
+                 .And(qa.bitwiseAnd(1 << 4).eq(0)))
+        sr = img.select(sensor["vis"] + [sensor["nir"], sensor["red"]]) \
+                .multiply(L_SCALE).add(L_OFFSET)
+        nd = sr.normalizedDifference([sensor["nir"], sensor["red"]]).rename("ndvi")
+        br = sr.select(sensor["vis"]).reduce(ee.Reducer.mean()).rename("bright")
+        return nd.addBands(br).updateMask(clear)
+
+    return col.map(prep).median()
+
+
+def _breakpoint_scan(vals, min_seg=3):
+    """Find the strongest persistent step change in a series.
+
+    For every candidate split, compute a Welch t-statistic between the means
+    before and after. The maximum is the breakpoint. This is a standard
+    single-change-point scan; it is robust to the seasonal wobble that defeats
+    a simple threshold, because a season returns and a construction does not.
+
+    Returns (index, t_statistic, before_mean, after_mean).
+    """
+    n = len(vals)
+    if n < 2 * min_seg:
+        return None, 0.0, None, None
+    a = np.asarray(vals, dtype=float)
+    best = (None, 0.0, None, None)
+    for k in range(min_seg, n - min_seg + 1):
+        x, y = a[:k], a[k:]
+        sx, sy = x.std(ddof=1), y.std(ddof=1)
+        se = math.sqrt(sx * sx / len(x) + sy * sy / len(y))
+        if se < 1e-9:
+            continue
+        t = abs(x.mean() - y.mean()) / se
+        if t > best[1]:
+            best = (k, float(t), float(x.mean()), float(y.mean()))
+    return best
+
+
+class PVTemporalQuery(BaseModel):
+    lat: float
+    lon: float
+    ring: list = []                    # optional footprint [[lat,lon],...]
+    radius_m: float = 120              # used when no footprint is given
+    start_year: int = 2013           # Landsat 8 onward by default
+    end_year: int = 2025
+    use_sentinel: bool = True        # Sentinel-2 from 2016 where available
+    label: str = ""
+
+
+@app.post("/pv_temporal")
+@ee_errors
+def pv_temporal(q: PVTemporalQuery):
+    """Date the construction of an installation by change detection.
+
+    Building a solar farm changes the surface persistently: vegetation is
+    cleared and dark panels replace it, so NDVI and visible brightness both
+    drop and stay down. A seasonal cycle returns; a construction does not.
+    That distinction is what makes the date recoverable.
+    """
+    ensure_ee()
+    if q.ring and len(q.ring) >= 3:
+        geom = ee.Geometry.Polygon([[[p[1], p[0]] for p in q.ring]])
+    else:
+        geom = ee.Geometry.Point([q.lon, q.lat]).buffer(float(q.radius_m))
+
+    y0 = max(1984, int(q.start_year))
+    y1 = min(2026, int(q.end_year))
+
+    # Annual periods before Sentinel-2 (few installations, and Landsat revisit
+    # is 16 days so a year is needed for a clean composite); six-monthly after.
+    periods = []
+    for y in range(y0, y1 + 1):
+        if y < 2016 or not q.use_sentinel:
+            periods.append((f"{y}-01-01", f"{y}-12-31", str(y)))
+        else:
+            periods.append((f"{y}-01-01", f"{y}-07-01", f"{y}-H1"))
+            periods.append((f"{y}-07-01", f"{y}-12-31", f"{y}-H2"))
+
+    def sensor_for(year):
+        """Best available sensor for a year, newest first."""
+        if year >= 2016 and q.use_sentinel:
+            return {"key": "S2", "label": "Sentinel-2 MSI"}
+        for s in reversed(LANDSAT_SENSORS):
+            if s["from"] <= year <= s["to"]:
+                return s
+        return None
+
+    stats, plan = {}, []
+    for i, (a, b, lab) in enumerate(periods):
+        year = int(a[:4])
+        sen = sensor_for(year)
+        if sen is None:
+            plan.append((i, lab, None))
+            continue
+        if sen["key"] == "S2":
+            col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                   .filterBounds(geom).filterDate(a, b)
+                   .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 35)))
+            img = col.median()
+            nd = img.normalizedDifference(["B8", "B4"]).rename("ndvi")
+            br = (img.select(["B2", "B3", "B4"]).divide(10000)
+                  .reduce(ee.Reducer.mean()).rename("bright"))
+            both = nd.addBands(br)
+            scale = 10
+        else:
+            both = _landsat_indices(sen, a, b, geom)
+            scale = 30
+        r = both.reduceRegion(ee.Reducer.mean(), geom, scale,
+                              bestEffort=True, maxPixels=1e9)
+        stats[f"n{i}"] = r.get("ndvi")
+        stats[f"b{i}"] = r.get("bright")
+        plan.append((i, lab, sen))
+
+    # cross-sensor overlap, so an offset can be measured rather than assumed
+    overlap = {}
+    if q.use_sentinel and y1 >= 2017 and y0 <= 2021:
+        for yy in range(max(2017, y0), min(2021, y1) + 1):
+            a, b = f"{yy}-01-01", f"{yy}-12-31"
+            l8 = _landsat_indices(LANDSAT_SENSORS[2], a, b, geom)
+            s2c = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                   .filterBounds(geom).filterDate(a, b)
+                   .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 35))).median()
+            s2n = s2c.normalizedDifference(["B8", "B4"]).rename("ndvi")
+            overlap[f"ol{yy}"] = l8.select("ndvi").reduceRegion(
+                ee.Reducer.mean(), geom, 30, bestEffort=True).get("ndvi")
+            overlap[f"os{yy}"] = s2n.reduceRegion(
+                ee.Reducer.mean(), geom, 10, bestEffort=True).get("ndvi")
+    stats.update(overlap)
+
+    info, failed = _eval_stats_resiliently(stats)
+
+    # empirical Landsat-8 -> Sentinel-2 NDVI offset from the overlap years
+    diffs = []
+    for yy in range(1984, 2027):
+        lv, sv = info.get(f"ol{yy}"), info.get(f"os{yy}")
+        if lv is not None and sv is not None:
+            diffs.append(float(sv) - float(lv))
+    ndvi_offset = round(float(np.mean(diffs)), 4) if diffs else 0.0
+
+    series = []
+    for i, lab, sen in plan:
+        nv, bv = info.get(f"n{i}"), info.get(f"b{i}")
+        # bring Landsat onto the Sentinel-2 scale using the measured offset
+        if nv is not None and sen and sen["key"] != "S2" and ndvi_offset:
+            nv = float(nv) + ndvi_offset
+        series.append({
+            "period": lab, "start": (str(lab)[:4] + "-01-01"),
+            "sensor": (sen["label"] if sen else None),
+            "sensor_key": (sen["key"] if sen else None),
+            "ndvi": (None if nv is None else round(float(nv), 4)),
+            "brightness": (None if bv is None else round(float(bv), 4)),
+        })
+
+    got = [s for s in series if s["ndvi"] is not None and s["brightness"] is not None]
+    if len(got) < 8:
+        raise HTTPException(status_code=502, detail=(
+            f"Only {len(got)} usable periods - not enough to date a change. "
+            "Cloud cover may be persistent here, or the footprint too small."))
+
+    # a PV surface is dark AND non-vegetated: combine both signals
+    combo = [-(s["ndvi"]) - s["brightness"] * 2.0 for s in got]
+    k, t, before, after = _breakpoint_scan(combo)
+
+    result = {"detected": False}
+    if k is not None and t > 3.0:
+        # the period AFTER the break is the first one showing the new surface,
+        # so construction falls between the two
+        p_before = got[k - 1]["period"]
+        p_after = got[k]["period"]
+        nd_b = float(np.mean([s["ndvi"] for s in got[:k]]))
+        nd_a = float(np.mean([s["ndvi"] for s in got[k:]]))
+        br_b = float(np.mean([s["brightness"] for s in got[:k]]))
+        br_a = float(np.mean([s["brightness"] for s in got[k:]]))
+        # a build should DARKEN and DE-VEGETATE the surface
+        consistent = (nd_a < nd_b) and (br_a < br_b)
+        sen_b = got[k - 1].get("sensor_key")
+        sen_a = got[k].get("sensor_key")
+        sensor_change = (sen_b is not None and sen_a is not None
+                         and sen_b != sen_a)
+        result = {
+            "detected": True,
+            "sensor_before": got[k - 1].get("sensor"),
+            "sensor_after": got[k].get("sensor"),
+            "at_sensor_transition": sensor_change,
+            "between": [p_before, p_after],
+            "first_seen": p_after,
+            "confidence": ("high" if t > 6 and consistent else
+                           "moderate" if t > 4 and consistent else "low"),
+            "t_statistic": round(t, 2),
+            "ndvi_before": round(nd_b, 4), "ndvi_after": round(nd_a, 4),
+            "brightness_before": round(br_b, 4),
+            "brightness_after": round(br_a, 4),
+            "signature_consistent": consistent,
+            "interpretation": (
+                f"The surface changed persistently between {p_before} and "
+                f"{p_after}. NDVI moved from {nd_b:.3f} to {nd_a:.3f} and "
+                f"brightness from {br_b:.3f} to {br_a:.3f}."
+                + (" Both fell, which is the expected signature of clearing "
+                   "land and installing dark panels."
+                   if consistent else
+                   " NOTE: the change does NOT match the expected PV "
+                   "signature (both should fall). This may be a different "
+                   "kind of change - construction, flooding or harvest.")
+                + (f" WARNING: this break falls exactly at the change from "
+                   f"{got[k-1].get('sensor')} to {got[k].get('sensor')}. "
+                   "Part or all of the step may be an instrument difference "
+                   "rather than a real change on the ground. Treat this date "
+                   "as unreliable and check the imagery directly."
+                   if sensor_change else "")),
+        }
+        if sensor_change:
+            result["confidence"] = "low"
+    else:
+        result = {
+            "detected": False,
+            "t_statistic": round(t, 2) if k is not None else 0.0,
+            "interpretation": (
+                "No single persistent step change stands out. Either the "
+                "installation predates the archive window, or it was built "
+                "gradually, or the footprint is not actually PV."),
+        }
+
+    sensors_used = sorted({s["sensor"] for s in series if s.get("sensor")})
+    return {
+        "label": q.label or "installation",
+        "centre": {"lat": q.lat, "lon": q.lon},
+        "series": series,
+        "sensors_used": sensors_used,
+        "cross_sensor": {
+            "ndvi_offset_applied": ndvi_offset,
+            "overlap_years": len(diffs),
+            "note": (
+                f"Landsat NDVI was shifted by {ndvi_offset:+.4f} to match "
+                f"Sentinel-2, measured from {len(diffs)} overlapping year(s)."
+                if diffs else
+                "No overlapping years were available, so no cross-sensor "
+                "correction could be measured. A step at a sensor boundary "
+                "may therefore be instrumental rather than real - the result "
+                "flags this if it occurs."),
+        },
+        "usable_periods": len(got),
+        "gaps": len(series) - len(got),
+        "window": f"{y0}-{y1}",
+        "installation": result,
+        "method": (
+            "Six-monthly Sentinel-2 medians of NDVI and visible brightness "
+            "over the footprint. A Welch t-statistic is scanned across every "
+            "possible split to find the strongest persistent step. Seasonal "
+            "cycles return and so do not produce a persistent step; "
+            "construction does."),
+        "caveats": [
+            "The archive reaches 1984 via Landsat 5, but at 30 m - so a "
+            "footprint smaller than about 3 ha is only a few pixels and the "
+            "signal is noisy. Sentinel-2 (10 m) is used from 2016 onward.",
+            "Landsat 7 lost its scan line corrector in May 2003, leaving "
+            "striped gaps. Composites from 2003-2013 are patchier as a result.",
+            "Landsat and Sentinel-2 measure slightly different wavebands. An "
+            "offset is measured from overlapping years and applied, but any "
+            "break landing exactly on a sensor transition is flagged as "
+            "unreliable rather than reported as a construction date.",
+            "The date is bracketed to a six-month period, not a day.",
+            "A phased build appears as a gradual change and may not produce a "
+            "clean breakpoint.",
+            "The method detects a SURFACE CHANGE. That the change is PV rather "
+            "than another dark construction is an inference from the "
+            "signature, not a certainty.",
+        ],
+    }
+
+
+class PVReportQuery(BaseModel):
+    centre: dict = {}
+    scan: dict = {}                    # the /pv_scan result
+    temporal: list = []                # one or more /pv_temporal results
+    title: str = "Photovoltaic installation report"
+
+
+@app.post("/pv_report")
+def pv_report(q: PVReportQuery):
+    """Evidence report: what was found, and when each site was built."""
+    from fpdf import FPDF
+    P = FPDF(orientation="P", unit="mm", format="A4")
+    P.set_auto_page_break(auto=True, margin=15)
+    W = 210 - 20
+
+    def head(txt, size=13):
+        P.set_font("Helvetica", "B", size)
+        P.set_text_color(11, 90, 73)
+        P.cell(0, 7, _pdf_txt(txt), ln=1)
+        P.set_text_color(30, 30, 30)
+
+    def body(txt, size=9):
+        P.set_font("Helvetica", "", size)
+        P.multi_cell(W, 4.4, _pdf_txt(txt))
+
+    # ---- cover ----
+    P.add_page()
+    P.set_font("Helvetica", "B", 18)
+    P.set_text_color(11, 90, 73)
+    P.cell(0, 10, _pdf_txt(q.title), ln=1)
+    P.set_text_color(120, 120, 120)
+    P.set_font("Helvetica", "", 9)
+    c = q.centre or (q.scan or {}).get("centre") or {}
+    P.cell(0, 5, _pdf_txt(
+        f"Centre {c.get('lat','?')}, {c.get('lon','?')}  |  generated "
+        f"{_dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}  |  DeepSeeGo"), ln=1)
+    P.ln(3)
+
+    sc = q.scan or {}
+    if sc:
+        head("Radar scan")
+        body(f"{sc.get('total', 0)} installations within "
+             f"{max(sc.get('radii_m') or [0])} m: "
+             f"{sc.get('mapped_total', 0)} mapped in OpenStreetMap, "
+             f"{sc.get('candidate_total', 0)} spectral candidates requiring "
+             "visual confirmation.")
+        P.ln(1)
+        P.set_font("Helvetica", "B", 8.5)
+        for w, t in ((22, "Ring"), (16, "Count"), (18, "Mapped"),
+                     (22, "Candidates"), (28, "Nearest"), (34, "Total area")):
+            P.cell(w, 6, _pdf_txt(t), border=1)
+        P.ln()
+        P.set_font("Helvetica", "", 8.5)
+        for r in sc.get("rings", []):
+            P.cell(22, 5.5, _pdf_txt(f"{r['radius_m']} m"), border=1)
+            P.cell(16, 5.5, str(r["count"]), border=1)
+            P.cell(18, 5.5, str(r["mapped"]), border=1)
+            P.cell(22, 5.5, str(r["candidates"]), border=1)
+            P.cell(28, 5.5, _pdf_txt(f"{r['nearest_m'] or '-'} m"), border=1)
+            P.cell(34, 5.5, _pdf_txt(f"{r['total_area_m2']:,.0f} m2"), border=1)
+            P.ln()
+        P.ln(3)
+
+        inst = sc.get("installations", [])[:25]
+        if inst:
+            head("Installations found", 11)
+            P.set_font("Helvetica", "B", 8)
+            for w, t in ((44, "Name"), (24, "Distance"), (18, "Dir"),
+                         (28, "Area"), (30, "Capacity"), (26, "Source")):
+                P.cell(w, 6, _pdf_txt(t), border=1)
+            P.ln()
+            P.set_font("Helvetica", "", 7.5)
+            for f in inst:
+                P.cell(44, 5, _pdf_txt((f.get("label") or "")[:26]), border=1)
+                P.cell(24, 5, _pdf_txt(f"{f['distance_m']:,.0f} m"), border=1)
+                P.cell(18, 5, _pdf_txt(f.get("direction", "")), border=1)
+                P.cell(28, 5, _pdf_txt(
+                    f"{f['area_m2']:,.0f} m2" if f.get("area_m2") else "-"), border=1)
+                P.cell(30, 5, _pdf_txt((f.get("capacity") or "-")[:16]), border=1)
+                P.cell(26, 5, _pdf_txt("OSM" if f.get("source", "").startswith("Open")
+                                       else "candidate"), border=1)
+                P.ln()
+            P.ln(3)
+
+    # ---- temporal evidence, one page per site ----
+    for t in (q.temporal or []):
+        P.add_page()
+        head(f"Installation date: {t.get('label', 'site')}")
+        ins = t.get("installation") or {}
+        if ins.get("detected"):
+            P.set_font("Helvetica", "B", 11)
+            P.set_text_color(180, 60, 20)
+            P.cell(0, 7, _pdf_txt(
+                f"Built between {ins['between'][0]} and {ins['between'][1]}"
+                f"   (confidence: {ins.get('confidence', '?')})"), ln=1)
+            P.set_text_color(30, 30, 30)
+            P.ln(1)
+            body(ins.get("interpretation", ""))
+            P.ln(1)
+            if ins.get("at_sensor_transition"):
+                P.set_font("Helvetica", "B", 9)
+                P.set_text_color(190, 60, 30)
+                P.multi_cell(W, 4.4, _pdf_txt(
+                    "WARNING: this break coincides with the change from "
+                    f"{ins.get('sensor_before')} to {ins.get('sensor_after')}. "
+                    "Part of the step may be an instrument difference rather "
+                    "than a change on the ground. This date should not be "
+                    "cited without checking the imagery directly."))
+                P.set_text_color(30, 30, 30)
+                P.ln(1)
+            P.set_font("Helvetica", "", 8.5)
+            for k, v in (("Change statistic (Welch t)", ins.get("t_statistic")),
+                         ("Sensor before / after",
+                          f"{ins.get('sensor_before','?')} -> {ins.get('sensor_after','?')}"),
+                         ("NDVI before / after",
+                          f"{ins.get('ndvi_before')} -> {ins.get('ndvi_after')}"),
+                         ("Brightness before / after",
+                          f"{ins.get('brightness_before')} -> {ins.get('brightness_after')}"),
+                         ("Signature consistent with PV",
+                          "yes" if ins.get("signature_consistent") else "NO")):
+                P.cell(62, 5, _pdf_txt(str(k)), border=1)
+                P.cell(60, 5, _pdf_txt(str(v)), border=1)
+                P.ln()
+        else:
+            P.set_font("Helvetica", "B", 10)
+            P.set_text_color(150, 100, 20)
+            P.cell(0, 7, _pdf_txt("No construction date could be established"), ln=1)
+            P.set_text_color(30, 30, 30)
+            body(ins.get("interpretation", ""))
+        P.ln(3)
+
+        head("Evidence: the observation series", 11)
+        body("Six-monthly Sentinel-2 medians over the footprint. A persistent "
+             "fall in BOTH NDVI and brightness is the signature of land being "
+             "cleared and dark panels installed.")
+        P.ln(1)
+        P.set_font("Helvetica", "B", 8)
+        P.cell(24, 6, _pdf_txt("Period"), border=1)
+        P.cell(22, 6, _pdf_txt("Sensor"), border=1)
+        P.cell(30, 6, _pdf_txt("NDVI"), border=1)
+        P.cell(32, 6, _pdf_txt("Brightness"), border=1)
+        P.cell(40, 6, _pdf_txt("Note"), border=1)
+        P.ln()
+        P.set_font("Helvetica", "", 8)
+        brk = (ins.get("between") or [None, None])[1]
+        prev_sen = None
+        for s in t.get("series", []):
+            note = ""
+            if s["period"] == brk:
+                note = "<-- change detected"
+            sk = s.get("sensor_key") or "-"
+            if prev_sen and sk != "-" and sk != prev_sen:
+                note = (note + "  sensor change") if note else "sensor change"
+            prev_sen = sk if sk != "-" else prev_sen
+            P.cell(24, 5, _pdf_txt(s["period"]), border=1)
+            P.cell(22, 5, _pdf_txt(sk), border=1)
+            P.cell(30, 5, _pdf_txt("-" if s["ndvi"] is None else f"{s['ndvi']:.4f}"), border=1)
+            P.cell(32, 5, _pdf_txt("-" if s["brightness"] is None else f"{s['brightness']:.4f}"), border=1)
+            P.cell(40, 5, _pdf_txt(note), border=1)
+            P.ln()
+        P.ln(2)
+        head("Method and limitations", 11)
+        body(t.get("method", ""))
+        cs = t.get("cross_sensor") or {}
+        if cs:
+            body("Sensors used: " + ", ".join(t.get("sensors_used") or []) +
+                 ". " + cs.get("note", ""), 8)
+        for cv in (t.get("caveats") or []):
+            body("- " + cv, 8)
+
+    data = P.output(dest="S")
+    if isinstance(data, str):
+        data = data.encode("latin-1", "replace")
+    return Response(content=bytes(data), media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             'attachment; filename="pv_report.pdf"'})
 
 
 @app.get("/surface_presets")
