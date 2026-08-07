@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v132"
+APP_VERSION = "deepseego-v133"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -8398,6 +8398,236 @@ def walk_analyse(q: WalkQuery):
 PV_RADII = [100, 500, 1000, 10000]
 
 
+# ============================================================================
+# ENSEMBLE PV DETECTION
+#
+# The honest diagnosis of what came before: a rule-based spectral classifier on
+# 10 m imagery is the wrong tool. Panel spectra vary with technology, dust,
+# tilt and sun angle; farm edges are mixed pixels; and a dozen surfaces share
+# the "dark and not vegetated" description. No amount of threshold tuning fixes
+# that, because the information is not in the pixels at that resolution.
+#
+# What IS robust is combining independent evidence:
+#
+#   1. REGISTRIES - OpenStreetMap and the WRI Global Power Plant Database.
+#      High precision, incomplete recall. These are facts, not inferences.
+#   2. VISION on high-resolution imagery (~0.3-0.6 m from Esri World Imagery).
+#      At that resolution a solar farm is unmistakable - regular dark rows with
+#      consistent spacing and orientation. A vision model reads this the way a
+#      human analyst would, which is exactly the judgement 10 m pixels cannot
+#      support.
+#   3. WEB EVIDENCE - a named place plus "solar park" often surfaces capacity,
+#      developer and commissioning date that no imagery can provide.
+#   4. SPECTRAL SCREEN - demoted to a PROPOSER. Its job is now to decide where
+#      to spend expensive vision calls, not to decide what is PV. Cheap wide
+#      screening proposes; precise verification decides.
+#
+# Each source votes, agreement is scored, and every claim keeps its provenance.
+# ============================================================================
+def _esri_tile_png(lat, lon, span_m, px=640):
+    """High-resolution aerial imagery for one tile, as PNG bytes.
+
+    Esri World Imagery is roughly 0.3-0.6 m over most populated land - about
+    30x finer than Sentinel-2, which is what makes a solar farm visually
+    unambiguous rather than a statistical inference.
+    """
+    # web-mercator zoom that puts span_m across px pixels
+    m_per_px = span_m / float(px)
+    z = int(round(math.log2(156543.03392 * math.cos(math.radians(lat)) / m_per_px)))
+    z = max(10, min(19, z))
+    n = 2 ** z
+    xt = int((lon + 180.0) / 360.0 * n)
+    la = math.radians(lat)
+    yt = int((1.0 - math.log(math.tan(la) + 1 / math.cos(la)) / math.pi) / 2.0 * n)
+    from PIL import Image
+    tiles = 3                                   # 3x3 mosaic around the centre
+    out = Image.new("RGB", (256 * tiles, 256 * tiles))
+    got = 0
+    for dy in range(tiles):
+        for dx in range(tiles):
+            X, Y = xt + dx - tiles // 2, yt + dy - tiles // 2
+            if X < 0 or Y < 0 or X >= n or Y >= n:
+                continue
+            url = ("https://services.arcgisonline.com/ArcGIS/rest/services/"
+                   f"World_Imagery/MapServer/tile/{z}/{Y}/{X}")
+            try:
+                rq = UrlRequest(url, headers={"User-Agent": _UA})
+                with urlopen(rq, timeout=20) as rsp:
+                    im = Image.open(io.BytesIO(rsp.read())).convert("RGB")
+                out.paste(im, (dx * 256, dy * 256))
+                got += 1
+            except Exception:
+                continue
+    if got == 0:
+        return None, None
+    buf = io.BytesIO()
+    out.save(buf, "JPEG", quality=82)
+    # ground span actually covered by the mosaic
+    span = 156543.03392 * math.cos(math.radians(lat)) / (2 ** z) * 256 * tiles
+    return buf.getvalue(), {"zoom": z, "tiles_fetched": got,
+                            "span_m": round(span), "px": 256 * tiles}
+
+
+def _vision_pv(img_bytes, lat, lon, span_m, provider="anthropic"):
+    """Ask a vision model whether the tile shows a photovoltaic installation.
+
+    The prompt is deliberately narrow and demands structured output, including
+    an explicit 'no' option and the visual reasons. A model asked an open
+    question will confabulate; asked to check named visual criteria and report
+    which it saw, it is far more reliable.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail=(
+            "Vision verification needs ANTHROPIC_API_KEY on the Cloud Run "
+            "service (see AI_AGENT_SETUP.md)."))
+    b64 = base64.b64encode(img_bytes).decode()
+    prompt = (
+        "You are inspecting high-resolution aerial imagery for SOLAR "
+        "PHOTOVOLTAIC installations.\n\n"
+        f"This tile is centred at {lat:.5f}, {lon:.5f} and spans roughly "
+        f"{int(span_m)} m across.\n\n"
+        "A photovoltaic installation looks like: regular parallel ROWS of "
+        "dark rectangular panels, uniform spacing between rows, consistent "
+        "orientation across the array (usually facing the equator), often "
+        "with service tracks between blocks and a fenced boundary.\n\n"
+        "Do NOT confuse it with: dark agricultural fields (irregular edges, "
+        "no row structure at panel scale), water bodies, asphalt or car "
+        "parks (uniform surface, no rows), greenhouses (bright/translucent, "
+        "often white), metal roofing (bright, specular), shadow, or ploughed "
+        "soil (rows but brown, and no panel texture).\n\n"
+        "Reply with ONLY a JSON object, no markdown:\n"
+        '{"pv_present": true|false, "confidence": 0.0-1.0, '
+        '"coverage_percent": 0-100, '
+        '"visual_evidence": ["specific things you actually see"], '
+        '"against": ["anything inconsistent with PV"], '
+        '"mounting": "ground|rooftop|mixed|none", '
+        '"alternative": "what it is instead, if not PV"}'
+    )
+    body = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 700,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": "image/jpeg",
+                                         "data": b64}},
+            {"type": "text", "text": prompt}]}],
+    }
+    req = UrlRequest("https://api.anthropic.com/v1/messages",
+                     data=json.dumps(body).encode(),
+                     headers={"Content-Type": "application/json",
+                              "x-api-key": key,
+                              "anthropic-version": "2023-06-01"})
+    with urlopen(req, timeout=90) as r:
+        d = json.loads(r.read().decode())
+    txt = "".join(b.get("text", "") for b in d.get("content", [])
+                  if b.get("type") == "text").strip()
+    txt = re.sub(r"^```(?:json)?|```$", "", txt, flags=re.M).strip()
+    try:
+        return json.loads(txt)
+    except Exception:
+        return {"pv_present": False, "confidence": 0.0,
+                "parse_error": txt[:200]}
+
+
+def _pv_registry_wri(lat, lon, r):
+    """WRI Global Power Plant Database - solar entries near the point.
+
+    An authoritative registry: capacity, owner and commissioning year are
+    recorded facts rather than inferences from pixels.
+    """
+    try:
+        ensure_ee()
+        ring = ee.Geometry.Point([lon, lat]).buffer(float(r))
+        fc = (ee.FeatureCollection("WRI/GPPD/power_plants")
+              .filterBounds(ring)
+              .filter(ee.Filter.eq("fuel1", "Solar")))
+        gj = fc.limit(60).getInfo()
+    except Exception:
+        return []
+    out = []
+    for f in gj.get("features", []):
+        p = f.get("properties") or {}
+        g = f.get("geometry") or {}
+        c = g.get("coordinates") or []
+        if len(c) < 2:
+            continue
+        out.append({
+            "source": "WRI Global Power Plant Database",
+            "lat": c[1], "lon": c[0],
+            "name": p.get("name", ""),
+            "operator": p.get("owner", ""),
+            "capacity": (f"{p.get('capacitymw')} MW"
+                         if p.get("capacitymw") else ""),
+            "start_date": (str(int(p["commissioning_year"]))
+                           if p.get("commissioning_year") else ""),
+            "confidence": "registry",
+            "evidence_kind": "registry record",
+        })
+    return out
+
+
+def _pv_web_evidence(place, lat, lon):
+    """Search the web for documentary evidence of PV at a named place.
+
+    Imagery cannot tell you the developer, the tariff or the commissioning
+    date. Text often can, and it is independent of everything the pixels say.
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        return None
+    prompt = (
+        f"Search for utility-scale solar photovoltaic installations at or very "
+        f"near {place} (approximately {lat:.4f}, {lon:.4f}).\n\n"
+        "Look for: named solar parks or plants, capacity in MW, the developer "
+        "or owner, the commissioning date, and any news of construction.\n\n"
+        "Only report installations you find actual evidence for. If you find "
+        "nothing, say so - do not speculate.\n\n"
+        "Reply with ONLY a JSON object, no markdown:\n"
+        '{"found": true|false, "installations": [{"name": "", '
+        '"capacity_mw": null, "developer": "", "commissioned": "", '
+        '"distance_note": "", "source_url": ""}], '
+        '"summary": "one sentence"}'
+    )
+    body = {
+        "model": "claude-sonnet-4-6", "max_tokens": 1200,
+        "messages": [{"role": "user", "content": prompt}],
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+    }
+    try:
+        req = UrlRequest("https://api.anthropic.com/v1/messages",
+                         data=json.dumps(body).encode(),
+                         headers={"Content-Type": "application/json",
+                                  "x-api-key": key,
+                                  "anthropic-version": "2023-06-01"})
+        with urlopen(req, timeout=120) as r:
+            d = json.loads(r.read().decode())
+        txt = "".join(b.get("text", "") for b in d.get("content", [])
+                      if b.get("type") == "text").strip()
+        txt = re.sub(r"^```(?:json)?|```$", "", txt, flags=re.M).strip()
+        m = re.search(r"\{[\s\S]*\}", txt)
+        return json.loads(m.group(0)) if m else {"found": False,
+                                                 "summary": txt[:300]}
+    except Exception as e:
+        return {"found": False, "error": f"{type(e).__name__}"[:60]}
+
+
+def _reverse_place(lat, lon):
+    """A place name for the search, from Google if configured else Nominatim."""
+    try:
+        k = _gmaps_key()
+        if k:
+            d = _get_json("https://maps.googleapis.com/maps/api/geocode/json?"
+                          f"latlng={lat},{lon}&key={k}")
+            if d.get("status") == "OK" and d.get("results"):
+                return d["results"][0].get("formatted_address", "")
+        d = _get_json("https://nominatim.openstreetmap.org/reverse?"
+                      f"format=jsonv2&lat={lat}&lon={lon}&zoom=14")
+        return d.get("display_name", "") if isinstance(d, dict) else ""
+    except Exception:
+        return ""
+
+
 class PVScanQuery(BaseModel):
     lat: float
     lon: float
@@ -8715,6 +8945,188 @@ def _bearing_deg(lat1, lon1, lat2, lon2):
     x = (math.cos(math.radians(lat1)) * math.sin(math.radians(lat2)) -
          math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(d))
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+class PVEnsembleQuery(BaseModel):
+    lat: float
+    lon: float
+    radius_m: float = 3000
+    use_registries: bool = True
+    use_spectral: bool = True          # proposer only
+    use_vision: bool = True            # the decider
+    use_web: bool = True
+    max_vision_tiles: int = 12         # cost ceiling
+    tile_span_m: float = 400
+    year: int = 2024
+    min_score: float = 0.30            # permissive: the proposer casts wide
+
+
+@app.post("/pv_ensemble")
+@ee_errors
+def pv_ensemble(q: PVEnsembleQuery):
+    """Combine registries, spectral proposals, vision verification and web
+    evidence. Each source votes; agreement is scored; provenance is kept."""
+    r = max(200.0, min(20000.0, float(q.radius_m)))
+    sites, notes, errors = [], [], {}
+
+    # ---- 1. registries: facts, not inferences --------------------------
+    if q.use_registries:
+        try:
+            for s in _pv_osm(q.lat, q.lon, r):
+                s["evidence_kind"] = "registry record"
+                sites.append(s)
+        except Exception as e:
+            errors["osm"] = f"{type(e).__name__}"[:60]
+        try:
+            sites += _pv_registry_wri(q.lat, q.lon, r)
+        except Exception as e:
+            errors["wri"] = f"{type(e).__name__}"[:60]
+
+    # ---- 2. spectral screen: PROPOSER only ------------------------------
+    proposals = []
+    if q.use_spectral:
+        try:
+            proposals = _pv_spectral(q.lat, q.lon, min(r, 12000), int(q.year),
+                                     1500, float(q.min_score), 3)
+            notes.append(f"Spectral screen proposed {len(proposals)} locations "
+                         "for visual checking. Its role is to decide WHERE to "
+                         "look, not what is PV.")
+        except Exception as e:
+            errors["spectral"] = f"{type(e).__name__}: {e}"[:120]
+
+    # ---- 3. vision on high-resolution imagery: the decider --------------
+    vision_results, calls = [], 0
+    if q.use_vision:
+        # verify registry sites first (they double as a self-check), then the
+        # highest-scoring spectral proposals, within the cost ceiling
+        targets = []
+        for s in sites[:6]:
+            targets.append({"lat": s["lat"], "lon": s["lon"],
+                            "why": "registry site", "ref": s})
+        for p in proposals[:max(0, int(q.max_vision_tiles) - len(targets))]:
+            targets.append({"lat": p["lat"], "lon": p["lon"],
+                            "why": f"spectral proposal (score {p['pv_score']})",
+                            "ref": p})
+        targets = targets[:int(q.max_vision_tiles)]
+
+        for t in targets:
+            try:
+                img, meta = _esri_tile_png(t["lat"], t["lon"],
+                                           float(q.tile_span_m))
+                if not img:
+                    continue
+                v = _vision_pv(img, t["lat"], t["lon"],
+                               (meta or {}).get("span_m", q.tile_span_m))
+                calls += 1
+                vision_results.append({
+                    "lat": t["lat"], "lon": t["lon"], "why": t["why"],
+                    "imagery": meta, "verdict": v,
+                })
+                ref = t.get("ref")
+                if ref is not None:
+                    ref["vision"] = v
+            except HTTPException as he:
+                errors["vision"] = str(he.detail)[:140]
+                break
+            except Exception as e:
+                errors["vision"] = f"{type(e).__name__}: {e}"[:120]
+                break
+
+    # promote confirmed proposals into sites
+    for p in proposals:
+        v = p.get("vision")
+        if v and v.get("pv_present") and (v.get("confidence") or 0) >= 0.5:
+            p["source"] = "Image analysis + vision confirmed"
+            p["evidence_kind"] = "visually confirmed"
+            p["confidence"] = ("high" if v["confidence"] >= 0.8 else "moderate")
+            sites.append(p)
+        elif v:
+            p["evidence_kind"] = "visually REJECTED"
+            p["rejected_because"] = (v.get("alternative")
+                                     or "; ".join(v.get("against") or [])
+                                     or "vision model saw no PV")
+
+    # ---- 4. web evidence -----------------------------------------------
+    web = None
+    if q.use_web:
+        place = _reverse_place(q.lat, q.lon)
+        if place:
+            web = _pv_web_evidence(place, q.lat, q.lon)
+            if web:
+                web["place_searched"] = place
+
+    # ---- agreement scoring ---------------------------------------------
+    for s in sites:
+        srcs = set()
+        if s.get("source", "").startswith("Open"):
+            srcs.add("OpenStreetMap")
+        if "WRI" in s.get("source", ""):
+            srcs.add("WRI registry")
+        if s.get("pv_score") is not None:
+            srcs.add("spectral")
+        v = s.get("vision")
+        if v and v.get("pv_present"):
+            srcs.add("vision")
+        s["agreeing_sources"] = sorted(srcs)
+        s["agreement"] = len(srcs)
+        s["distance_m"] = round(_haversine_m(q.lat, q.lon, s["lat"], s["lon"]), 1)
+        s["bearing_deg"] = round(_bearing_deg(q.lat, q.lon, s["lat"], s["lon"]), 1)
+        s["direction"] = _compass16(s["bearing_deg"])
+        s["verdict"] = (
+            "confirmed - multiple independent sources agree" if len(srcs) >= 2
+            else "single source - treat as provisional")
+    sites.sort(key=lambda s: (-s["agreement"], s["distance_m"]))
+    for i, s in enumerate(sites):
+        s["id"] = i
+        s["label"] = s.get("name") or f"Site {i+1}"
+
+    rejected = [p for p in proposals if p.get("evidence_kind") == "visually REJECTED"]
+    return {
+        "centre": {"lat": q.lat, "lon": q.lon}, "radius_m": r,
+        "sites": sites, "total": len(sites),
+        "confirmed": sum(1 for s in sites if s["agreement"] >= 2),
+        "provisional": sum(1 for s in sites if s["agreement"] < 2),
+        "rejected_by_vision": [{"lat": p["lat"], "lon": p["lon"],
+                                "spectral_score": p.get("pv_score"),
+                                "why": p.get("rejected_because", "")}
+                               for p in rejected],
+        "vision": {"calls": calls, "ceiling": q.max_vision_tiles,
+                   "results": vision_results,
+                   "note": ("High-resolution imagery (~0.3-0.6 m from Esri "
+                            "World Imagery) inspected by a vision model. At "
+                            "that resolution a solar farm shows unmistakable "
+                            "regular panel rows - the judgement 10 m pixels "
+                            "cannot support.")},
+        "web_evidence": web,
+        "notes": notes, "errors": errors,
+        "method": {
+            "layers": [
+                {"source": "OpenStreetMap", "role": "registry",
+                 "strength": "high precision", "weakness": "incomplete"},
+                {"source": "WRI Global Power Plant Database",
+                 "role": "registry", "strength": "capacity and commissioning "
+                 "year are recorded facts", "weakness": "utility scale only"},
+                {"source": "Sentinel-2 spectral screen", "role": "PROPOSER",
+                 "strength": "cheap and covers everything",
+                 "weakness": "cannot decide - 10 m is too coarse; it only "
+                             "chooses where to look"},
+                {"source": "Vision on high-resolution imagery",
+                 "role": "DECIDER", "strength": "0.3-0.6 m resolution makes "
+                 "panel rows unmistakable", "weakness": "costs an API call per "
+                 "tile, so it is aimed rather than exhaustive"},
+                {"source": "Web search", "role": "documentary",
+                 "strength": "capacity, developer and dates that no imagery "
+                 "carries", "weakness": "only finds named projects"},
+            ],
+            "why_ensemble": (
+                "No single source is sufficient. Registries are precise but "
+                "incomplete; spectral screening is complete but imprecise; "
+                "vision is precise but costs money per look; web evidence is "
+                "documentary but only covers named projects. Combining them, "
+                "and reporting which agree, is more honest than any one of "
+                "them pretending to be authoritative."),
+        },
+    }
 
 
 @app.post("/pv_scan")
