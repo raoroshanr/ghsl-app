@@ -388,6 +388,12 @@ a.dsgRoi:hover{background:#f4f7f5;color:#0B5A49}
 .slDl button:disabled{opacity:.4;cursor:default}
 #pvRadar{width:100%;height:250px;background:#0B1310;border:1px solid #2A3A33;
   border-radius:8px;display:block}
+.pvEv{display:flex;align-items:center;gap:8px;margin-top:3px}
+.pvEvName{flex:0 0 80px;font-size:10.5px;color:#C9D3CC;text-transform:capitalize}
+.pvEvBar{flex:1;height:11px;background:#12201B;border:1px solid #2A3A33;
+  border-radius:3px;overflow:hidden}
+.pvEvBar i{display:block;height:100%}
+.pvEvVal{flex:0 0 54px;text-align:right;font-size:10px;color:#9FB0A8}
 .wkCat{display:flex;align-items:center;gap:8px;margin-top:5px}
 .wkCat label{flex:1;display:flex;align-items:center;gap:6px;font-size:11.5px;
   color:#C9D3CC;font-family:Arial,Helvetica,sans-serif}
@@ -1133,10 +1139,18 @@ label.chk input{width:auto}
         <label class="slChk"><input type="checkbox" data-r="1000" checked> 1 km</label>
         <label class="slChk"><input type="checkbox" data-r="10000" checked> 10 km</label>
       </div>
-      <label class="slChk"><input type="checkbox" id="pvSpectral" checked> Also run the spectral screen (finds unmapped farms, produces candidates)</label>
+      <label class="slChk"><input type="checkbox" id="pvSpectral" checked> Run image analysis (finds unmapped farms)</label>
       <div class="dxGrid" style="margin-top:6px">
         <div><label>Min area (m&sup2;)</label><input type="text" id="pvMinArea" value="2000"></div>
         <div><label>Imagery year</label><input type="text" id="pvYear" value="2024"></div>
+      </div>
+      <label class="fld" for="pvScore">Evidence threshold &mdash; <span id="pvScoreLbl">0.45</span></label>
+      <input type="range" id="pvScore" min="0.20" max="0.85" step="0.05" value="0.45">
+      <p class="hint" style="font-size:10.5px">Lower finds more but admits more false positives. If the self-check below reports poor recall, lower this first.</p>
+      <div class="dxGrid" style="margin-top:4px">
+        <div><label>Stack years (temporal tests)</label><input type="text" id="pvNYears" value="3"></div>
+        <div><label>&nbsp;</label>
+          <label class="slChk"><input type="checkbox" id="pvSelfCheck" checked> Self-check vs OSM</label></div>
       </div>
       <button id="pvScan" class="primary" style="width:100%;margin-top:8px">Scan for PV installations</button>
 
@@ -1403,7 +1417,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v131</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v132</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1570,7 +1584,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v131";
+const DSG_VERSION = "deepseego-v132";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -4501,6 +4515,9 @@ function pvInit(){
     $('pvStatus').textContent = 'Tap the centre of the scan\u2026';
   });
   $('pvScan').addEventListener('click', pvScan);
+  $('pvScore').addEventListener('input', () => {
+    $('pvScoreLbl').textContent = (+$('pvScore').value).toFixed(2);
+  });
   $('pvTemporal').addEventListener('click', () => pvTemporal(false));
   $('pvTemporalAll').addEventListener('click', () => pvTemporal(true));
   $('pvReport').addEventListener('click', pvReport);
@@ -4535,7 +4552,10 @@ async function pvScan(){
       body: JSON.stringify({lat:PV.centre[0], lon:PV.centre[1], radii_m:radii,
         spectral: $('pvSpectral').checked,
         min_area_m2: parseFloat($('pvMinArea').value)||2000,
-        year: parseInt($('pvYear').value)||2024})}, true);
+        year: parseInt($('pvYear').value)||2024,
+        min_score: +$('pvScore').value,
+        n_years: parseInt($('pvNYears').value)||3,
+        self_check: $('pvSelfCheck').checked})}, true);
     PV.scan = j; PV.temporal = [];
     pvDrawScan(j);
     $('pvSelect').innerHTML = j.installations.length
@@ -4565,11 +4585,13 @@ function pvDrawScan(j){
       fill:false, dashArray:'5 5'}).addTo(pvLayer)
       .bindTooltip(r >= 1000 ? (r/1000)+' km' : r+' m', {permanent:false});
   });
+  const scoreCol = s => s >= 0.75 ? '#84CC16' : s >= 0.60 ? '#E9C46A' : '#E4572E';
   j.installations.forEach(f => {
     const mapped = f.source.startsWith('Open');
     if(f.ring && f.ring.length > 2){
-      L.polygon(f.ring, {color: mapped ? '#E4572E' : '#E9C46A', weight:2,
-        fillColor: mapped ? '#E4572E' : '#E9C46A', fillOpacity:.35})
+      const col = mapped ? '#E4572E' : scoreCol(f.pv_score || 0);
+      L.polygon(f.ring, {color: col, weight:2,
+        fillColor: col, fillOpacity:.35})
         .addTo(pvLayer).bindTooltip(pvTip(f), {sticky:true});
     }
     L.circleMarker([f.lat, f.lon], {radius: mapped ? 6 : 4,
@@ -4587,7 +4609,8 @@ function pvTip(f){
     (f.operator ? `<br>${f.operator}` : '') +
     (f.start_date ? `<br>tagged start ${f.start_date}` : '') +
     `<br><span style="opacity:.75">${f.source}</span>` +
-    (f.rectangularity != null ? `<br>rectangularity ${f.rectangularity}` : '');
+    (f.pv_score != null ? `<br><b>evidence score ${f.pv_score}</b> (${f.confidence})` : '') +
+    (f.evidence ? `<br><span style="opacity:.75">spectral ${f.evidence.spectral_shape} \u00b7 context ${f.evidence.context}</span>` : '');
 }
 
 function pvPanel(j){
@@ -4606,9 +4629,35 @@ function pvPanel(j){
   $('drawer').classList.add('open');
   if(typeof paneMode === 'function') paneMode('site');
   $('drawerSub').textContent = 'PV radar';
+  const val = j.validation;
+  const det = j.detector;
+  const evid = j.installations.filter(f => f.evidence).slice(0, 12).map(f => {
+    const e = f.evidence, cs = e.components;
+    const bars = Object.entries(cs).map(([k, c]) =>
+      `<div class="pvEv"><span class="pvEvName">${k.replace(/_/g,' ')}</span>` +
+      `<span class="pvEvBar"><i style="width:${Math.round(c.score*100)}%;` +
+      `background:${c.score>0.7?'#84CC16':c.score>0.4?'#E9C46A':'#E4572E'}"></i></span>` +
+      `<span class="pvEvVal">${typeof c.value === 'object' ? '' :
+        (c.value == null ? '\u2014' : c.value)}</span></div>` +
+      `<div class="per" style="margin:-2px 0 4px 88px;font-size:9.5px">${c.means}</div>`).join('');
+    return `<details style="margin-top:6px"><summary style="cursor:pointer;font-size:11.5px;color:#7FD0BC">` +
+      `${f.label} \u2014 score <b>${f.pv_score}</b> (${f.confidence})</summary>` +
+      `<div class="per" style="margin:4px 0">spectral shape ${e.spectral_shape} \u00b7 ` +
+      `context ${e.context}</div>${bars}` +
+      `<p class="srcNote" style="font-size:10px">${e.combination}</p></details>`;
+  }).join('');
+
   $('siteWrap').innerHTML =
     `<div class="siteSec"><div class="paneLabel">Radar scan</div>` +
     `<canvas id="pvRadar"></canvas>` +
+    (val ? `<div class="paneLabel" style="margin-top:10px">Detector self-check</div>` +
+      `<div class="mmVerdict ${val.recall >= 0.7 ? 'ok' : 'warn'}" style="font-size:11px">` +
+      `<b>Recall ${Math.round(val.recall*100)}%</b> \u2014 ${val.verdict}</div>` +
+      `<table class="aqTable">` + val.checks.map(ch =>
+        `<tr><td>${ch.site || 'unnamed'}</td>` +
+        `<td style="text-align:right;color:${ch.found?'#84CC16':'#E4572E'}">` +
+        `${ch.found ? 'found ('+ch.score+')' : 'MISSED'}</td></tr>`).join('') +
+      `</table><p class="srcNote">${val.note}</p>` : '') +
     `<table class="aqTable" style="margin-top:8px">` +
     `<tr><td><b>Ring</b></td><td style="text-align:right"><b>Total</b></td>` +
     `<td style="text-align:right"><b>Mapped</b></td>` +
@@ -4619,6 +4668,14 @@ function pvPanel(j){
       `<td style="text-align:right"><b>Dir</b></td><td style="text-align:right"><b>Area</b></td>` +
       `<td style="text-align:right"><b>Capacity</b></td></tr>${rows}</table>`
       : `<p class="srcNote">Nothing found within the selected rings.</p>`) +
+    (evid ? `<div class="paneLabel" style="margin-top:12px">Why each candidate scored as it did</div>` +
+      `<p class="srcNote">Open any candidate to see the individual tests. Green means the test passed clearly; red means it did not.</p>${evid}` : '') +
+    (det ? `<div class="paneLabel" style="margin-top:12px">Detection method</div>` +
+      `<p class="srcNote">${det.method}</p>` +
+      `<p class="srcNote"><b>Why multiplicative:</b> ${det.why_multiplicative}</p>` +
+      `<table class="aqTable"><tr><td>Evidence threshold</td>` +
+      `<td style="text-align:right">${det.min_score}</td></tr>` +
+      `<tr><td>Imagery stack</td><td style="text-align:right">${det.years}</td></tr></table>` : '') +
     `<div class="mmVerdict warn" style="font-size:11px">${j.scope}</div>` +
     `<ul class="mmList">${j.caveats.map(x=>`<li>${x}</li>`).join('')}</ul></div>`;
   pvRadarDraw(j);
