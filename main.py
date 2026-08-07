@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v131"
+APP_VERSION = "deepseego-v132"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -8402,9 +8402,12 @@ class PVScanQuery(BaseModel):
     lat: float
     lon: float
     radii_m: list = []                 # blank = the standard rings
-    spectral: bool = True              # also run the spectral screen
+    spectral: bool = True              # run the image-analysis detector
     min_area_m2: float = 2000
     year: int = 2024
+    min_score: float = 0.45            # evidence threshold, tunable
+    n_years: int = 3                   # stack depth for the temporal tests
+    self_check: bool = True            # score the OSM-mapped sites too
 
 
 def _pv_osm(lat, lon, r):
@@ -8447,76 +8450,263 @@ def _pv_osm(lat, lon, r):
     return out
 
 
-def _pv_spectral(lat, lon, r, year, min_area):
-    """Spectral screen for large, dark, non-vegetated, flat surfaces.
+# ----------------------------------------------------------------------------
+# PV DETECTION - evidence scoring, not threshold gates
+#
+# The previous screen ANDed hard thresholds together and leaned on
+# rectangularity, which is a weak cue. This scores several INDEPENDENT lines of
+# evidence continuously, so one marginal test degrades the score instead of
+# eliminating the candidate, and every component is reported so a result can be
+# understood and tuned.
+#
+# SPECTRAL (separates PV from asphalt, soil, shadow, water):
+#   NDBI  = (SWIR1-NIR)/(SWIR1+NIR). Silicon absorbs out to ~1100 nm, beyond
+#           which the glass and encapsulant reflect, so SWIR EXCEEDS NIR.
+#           Vegetation and shadow are strongly negative here; water more so.
+#   blue >= red. The anti-reflective silicon-nitride coating gives panels a
+#           blue cast. Soil and asphalt run the other way.
+#   NIR dip. NIR sits below the straight line joining red and SWIR1 - the
+#           signature of a narrow absorber, which natural surfaces lack.
+#   low visible brightness. A PV module is an absorber by design.
+#
+# TEMPORAL (separates PV from crops, seasonal water, burn scars):
+#   A built array is spectrally frozen: panels do not grow, senesce or flood.
+#   Measured seasonal NDVI standard deviation runs about 0.007 for PV against
+#   0.22 for cropland and 0.27 for seasonal water. Asphalt is also flat, which
+#   is why the spectral tests are needed alongside.
+#
+# GEOMETRY is a weak final cue only: area and rectangularity nudge the score,
+# they no longer decide it.
+# ----------------------------------------------------------------------------
+PV_WEIGHTS = {
+    "ndbi": 0.20,        # SWIR above NIR, but not extremely so
+    "blue_red": 0.14,    # anti-reflective coating
+    "nir_dip": 0.14,     # narrow-absorber signature
+    "dark": 0.12,        # low visible reflectance
+    "stable": 0.18,      # no seasonal cycle
+    "no_recovery": 0.14, # does not re-vegetate - separates burn scars
+    "geometry": 0.08,    # size and regularity
+}
 
-    This is a SCREEN, not a classifier. It will also flag water, asphalt,
-    fresh tarmac and burnt ground. Everything it returns is a candidate.
+
+def _band(v, lo, peak_lo, peak_hi, hi):
+    """1 inside [peak_lo, peak_hi], tapering to 0 at lo and hi.
+    Used where BOTH too little and too much argue against the class."""
+    if v <= lo or v >= hi:
+        return 0.0
+    if peak_lo <= v <= peak_hi:
+        return 1.0
+    if v < peak_lo:
+        return (v - lo) / max(1e-9, peak_lo - lo)
+    return (hi - v) / max(1e-9, hi - peak_hi)
+
+
+def _ramp(v, lo, hi):
+    """0 below lo, 1 above hi, linear between. Keeps every test continuous."""
+    if hi == lo:
+        return 1.0 if v >= hi else 0.0
+    return max(0.0, min(1.0, (v - lo) / (hi - lo)))
+
+
+def _pv_score_components(ndbi, blue_red, nir_dip, vis, ndvi, season_sd,
+                         area_m2, rect, ndvi_trend=None):
+    """Score one candidate. Returns (0-1 score, per-test detail, veto)."""
+    c = {}
+    # SWIR above NIR - but only moderately. A very high ratio means dry bright
+    # soil or a burn scar, so the test is a band rather than a ramp.
+    c["ndbi"] = {"value": round(ndbi, 4),
+                 "score": _band(ndbi, 0.0, 0.12, 0.26, 0.42),
+                 "means": ("SWIR moderately above NIR - silicon's absorption "
+                           "edge. Very high values indicate burn or dry soil "
+                           "instead.")}
+    # blue at or above red
+    c["blue_red"] = {"value": round(blue_red, 4),
+                     "score": _ramp(blue_red, -0.015, 0.015),
+                     "means": "blue >= red from the anti-reflective coating"}
+    # NIR below the red-SWIR line
+    c["nir_dip"] = {"value": round(nir_dip, 4),
+                    "score": _ramp(nir_dip, -0.005, 0.025),
+                    "means": "NIR suppressed relative to red and SWIR"}
+    # dark in the visible (inverted ramp)
+    c["dark"] = {"value": round(vis, 4),
+                 "score": 1.0 - _ramp(vis, 0.10, 0.22),
+                 "means": "low visible reflectance - an absorbing surface"}
+    # no seasonal cycle (inverted ramp)
+    c["stable"] = {"value": (None if season_sd is None else round(season_sd, 4)),
+                   "score": (0.5 if season_sd is None
+                             else 1.0 - _ramp(season_sd, 0.03, 0.14)),
+                   "means": "flat through the seasons - panels do not grow"}
+    # does the surface recover? A burn scar re-vegetates within a few years;
+    # an installed array never does. This is what separates the two.
+    if ndvi_trend is None:
+        rec = 0.5
+        rec_txt = "no trend available"
+    else:
+        # trend is NDVI units per year; recovery is a clear positive
+        rec = 1.0 - _ramp(ndvi_trend, 0.005, 0.05)
+        rec_txt = f"{ndvi_trend:+.4f} NDVI/yr"
+    c["no_recovery"] = {"value": (None if ndvi_trend is None
+                                  else round(ndvi_trend, 5)),
+                        "score": rec,
+                        "means": ("no re-vegetation trend - a burn scar or "
+                                  "cleared land would recover, an array "
+                                  f"never does ({rec_txt})")}
+
+    # geometry: a weak nudge only
+    g = 0.5 * _ramp(area_m2, 3000, 40000) + 0.5 * _ramp(rect, 0.45, 0.80)
+    c["geometry"] = {"value": {"area_m2": round(area_m2, 1),
+                               "rectangularity": round(rect, 3)},
+                     "score": g,
+                     "means": "large and regular - a weak supporting cue only"}
+    # vegetation is a hard disqualifier: a green field is not a solar farm
+    veto = None
+    if ndvi is not None and ndvi > 0.35:
+        veto = f"NDVI {ndvi:.2f} - this surface is vegetated"
+    if ndbi < -0.15:
+        veto = f"NDBI {ndbi:.2f} - strongly negative, consistent with water or shadow"
+
+    # --- spectral shape: the three tests describe one physical signature,
+    #     so they are combined multiplicatively. Failing any one is fatal.
+    shape_keys = ["ndbi", "blue_red", "nir_dip"]
+    prod = 1.0
+    for k in shape_keys:
+        prod *= max(1e-6, c[k]["score"])
+    spectral = prod ** (1.0 / len(shape_keys))
+
+    # --- context: supporting evidence, individually compensable
+    ctx_keys = ["dark", "stable", "no_recovery", "geometry"]
+    wsum = sum(PV_WEIGHTS[k] for k in ctx_keys)
+    context = sum(PV_WEIGHTS[k] * c[k]["score"] for k in ctx_keys) / wsum
+
+    # weighted geometric combination, biased toward the spectral signature
+    total = (spectral ** 0.65) * (max(1e-6, context) ** 0.35)
+
+    for k in c:
+        c[k]["weight"] = PV_WEIGHTS[k]
+        c[k]["group"] = ("spectral shape (all required)" if k in shape_keys
+                         else "supporting context")
+    detail = {
+        "components": c,
+        "spectral_shape": round(spectral, 4),
+        "context": round(context, 4),
+        "combination": ("score = spectral^0.65 x context^0.35. The three "
+                        "spectral tests are combined multiplicatively because "
+                        "they describe one signature - failing any one means "
+                        "the surface is not a silicon panel, and no amount of "
+                        "supporting evidence compensates."),
+    }
+    return (0.0 if veto else round(total, 4)), detail, veto
+
+
+def _pv_spectral(lat, lon, r, year, min_area, min_score=0.45, n_years=3):
+    """Evidence-based PV detection.
+
+    Two passes. First a permissive spectral mask finds every dark, non-vegetated
+    patch - deliberately over-inclusive, because a missed candidate can never be
+    recovered later. Then each patch is SCORED on the full evidence set,
+    including seasonal stability and recovery trend measured from a multi-year
+    stack, and ranked. Nothing is silently discarded: everything above a low
+    floor is returned with its score breakdown so the reasoning is inspectable.
     """
     ensure_ee()
     ring = ee.Geometry.Point([lon, lat]).buffer(float(r))
-    col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-           .filterBounds(ring)
-           .filterDate(f"{year}-01-01", f"{year+1}-01-01")
-           .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 25)))
-    img = col.median()
-    b = lambda n: img.select(n).divide(10000.0)
-    ndvi = img.normalizedDifference(["B8", "B4"])
-    ndwi = img.normalizedDifference(["B3", "B8"])
-    # panels: dark in visible, low NIR relative to bare soil, and a SWIR
-    # response distinctly below soil. Water is removed by NDWI.
-    vis = b("B2").add(b("B3")).add(b("B4")).divide(3)
-    swir = b("B11")
-    nir = b("B8")
-    cand = (vis.lt(0.16)
-            .And(ndvi.lt(0.20))
-            .And(ndwi.lt(0.0))
-            .And(swir.lt(0.28))
-            .And(swir.gt(nir.multiply(0.6)))
-            .And(nir.lt(0.30)))
-    # keep only compact blocks of adequate size
-    cand = cand.focalMode(1).focalMax(1).selfMask()
-    vec = cand.reduceToVectors(geometry=ring, scale=20, maxPixels=1e9,
-                               geometryType="polygon",
-                               eightConnected=True).getInfo()
+    y1 = int(year)
+    y0 = y1 - max(1, int(n_years)) + 1
+
+    def yearly(y):
+        col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+               .filterBounds(ring).filterDate(f"{y}-01-01", f"{y+1}-01-01")
+               .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30)))
+        return col.median().divide(10000.0)
+
+    cur = yearly(y1)
+    B = lambda im, n: im.select(n)
+
+    # --- spectral shape bands on the most recent year ---
+    blue, green, red = B(cur, "B2"), B(cur, "B3"), B(cur, "B4")
+    nir, sw1 = B(cur, "B8"), B(cur, "B11")
+    ndvi = nir.subtract(red).divide(nir.add(red).max(1e-6)).rename("ndvi")
+    ndbi = sw1.subtract(nir).divide(sw1.add(nir).max(1e-6)).rename("ndbi")
+    br = blue.subtract(red).rename("br")
+    dip = red.add(sw1).divide(2).subtract(nir).rename("dip")
+    vis = blue.add(green).add(red).divide(3).rename("vis")
+
+    # --- temporal metrics across the stack ---
+    ndvis, years = [], list(range(y0, y1 + 1))
+    for y in years:
+        im = yearly(y)
+        n_, r_ = B(im, "B8"), B(im, "B4")
+        ndvis.append(n_.subtract(r_).divide(n_.add(r_).max(1e-6))
+                     .rename(f"n{y}"))
+    stack = ee.ImageCollection(ndvis)
+    season_sd = stack.reduce(ee.Reducer.stdDev()).rename("sd")
+    # per-year slope: is the surface re-vegetating?
+    if len(years) >= 2:
+        first, last = ndvis[0], ndvis[-1]
+        trend = last.subtract(first).divide(max(1, years[-1] - years[0])) \
+                    .rename("trend")
+    else:
+        trend = ee.Image.constant(0).rename("trend")
+
+    # --- permissive candidate mask: dark and not vegetated ---
+    mask = (vis.lt(0.24).And(ndvi.lt(0.32)).And(ndbi.gt(-0.10))
+            ).focalMode(1).selfMask()
+
+    feats = mask.reduceToVectors(geometry=ring, scale=20, maxPixels=1e9,
+                                 geometryType="polygon",
+                                 eightConnected=True, labelProperty="lab")
+    metrics = (ndvi.addBands(ndbi).addBands(br).addBands(dip).addBands(vis)
+               .addBands(season_sd).addBands(trend))
+    sampled = metrics.reduceRegions(collection=feats,
+                                    reducer=ee.Reducer.mean(),
+                                    scale=20).getInfo()
+
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat))
     out = []
-    for f in vec.get("features", []):
+    for f in sampled.get("features", []):
+        p = f.get("properties") or {}
         g = f.get("geometry") or {}
         rings = g.get("coordinates") or []
-        if not rings:
+        if not rings or len(rings[0]) < 4:
             continue
         rg = rings[0]
-        if len(rg) < 4:
-            continue
-        # shoelace area in local metres
-        mlat = 110540.0
-        mlon = 111320.0 * math.cos(math.radians(lat))
         pts = [((c[0] - lon) * mlon, (c[1] - lat) * mlat) for c in rg]
         A = abs(sum(pts[i][0] * pts[(i + 1) % len(pts)][1] -
                     pts[(i + 1) % len(pts)][0] * pts[i][1]
                     for i in range(len(pts)))) / 2.0
         if A < float(min_area):
             continue
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
-        # rectangularity: PV arrays are strikingly rectangular; a low value
-        # suggests a natural feature and is reported so it can be judged
-        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        xs = [q[0] for q in pts]; ys = [q[1] for q in pts]
         bbox = (max(xs) - min(xs)) * (max(ys) - min(ys))
-        rect = A / bbox if bbox > 0 else 0
+        rect = A / bbox if bbox > 0 else 0.0
+        val = lambda k: (None if p.get(k) is None else float(p[k]))
+        score, detail, veto = _pv_score_components(
+            val("ndbi") or 0.0, val("br") or 0.0, val("dip") or 0.0,
+            val("vis") or 0.0, val("ndvi"), val("sd"), A, rect,
+            ndvi_trend=val("trend"))
+        if score < min_score and not veto:
+            continue
+        if veto:
+            continue
+        cx = sum(q[0] for q in pts) / len(pts)
+        cy = sum(q[1] for q in pts) / len(pts)
         out.append({
-            "source": "Spectral screen (candidate)",
+            "source": "Image analysis",
             "lat": lat + cy / mlat, "lon": lon + cx / mlon,
             "area_m2": round(A, 1),
             "rectangularity": round(rect, 3),
-            "ring": [[round(lat + p[1] / mlat, 6),
-                      round(lon + p[0] / mlon, 6)] for p in rg],
+            "pv_score": score,
+            "evidence": detail,
+            "ring": [[round(lat + q[1] / mlat, 6),
+                      round(lon + q[0] / mlon, 6)] for q in pts],
             "name": "", "operator": "", "capacity": "", "start_date": "",
-            "confidence": ("likely" if rect > 0.7 and A > 20000
-                           else "possible"),
+            "confidence": ("high" if score >= 0.75 else
+                           "moderate" if score >= 0.60 else "low"),
+            "years_analysed": f"{y0}-{y1}",
         })
-    out.sort(key=lambda x: -x["area_m2"])
-    return out[:60]
+    out.sort(key=lambda x: -x["pv_score"])
+    return out[:80]
 
 
 def _bearing_deg(lat1, lon1, lat2, lon2):
@@ -8542,12 +8732,64 @@ def pv_scan(q: PVScanQuery):
         osm_err = f"{type(e).__name__}: {e}"[:150]
 
     spec_err = None
+    detected = []
     if q.spectral:
         try:
-            found += _pv_spectral(q.lat, q.lon, min(rmax, 12000),
-                                  int(q.year), float(q.min_area_m2))
+            detected = _pv_spectral(q.lat, q.lon, min(rmax, 12000),
+                                    int(q.year), float(q.min_area_m2),
+                                    float(q.min_score), int(q.n_years))
+            found += detected
         except Exception as e:
             spec_err = f"{type(e).__name__}: {e}"[:150]
+
+    # ---- SELF-VALIDATION -------------------------------------------------
+    # Run the detector over the sites OSM already knows about. If it cannot
+    # find the farms we KNOW are there, it will not find the unknown ones -
+    # and you should see that rather than trusting a silent number.
+    validation = None
+    osm_sites = [f for f in found if f["source"] == "OpenStreetMap"]
+    if q.self_check and q.spectral and osm_sites and not spec_err:
+        hits, checks = 0, []
+        for s in osm_sites[:12]:
+            near = None
+            for d in detected:
+                dd = _haversine_m(s["lat"], s["lon"], d["lat"], d["lon"])
+                if dd < 250 and (near is None or dd < near[0]):
+                    near = (dd, d)
+            if near:
+                hits += 1
+                checks.append({"site": s.get("name") or s.get("osm_id", ""),
+                               "found": True,
+                               "distance_m": round(near[0], 1),
+                               "score": near[1]["pv_score"]})
+            else:
+                checks.append({"site": s.get("name") or s.get("osm_id", ""),
+                               "found": False, "distance_m": None,
+                               "score": None})
+        recall = hits / max(1, len(checks))
+        validation = {
+            "known_sites": len(checks), "recalled": hits,
+            "recall": round(recall, 3),
+            "checks": checks,
+            "verdict": (
+                f"The detector found {hits} of {len(checks)} sites that "
+                "OpenStreetMap already maps here. "
+                + ("That is good recall - the unmapped candidates are worth "
+                   "taking seriously."
+                   if recall >= 0.7 else
+                   "That is poor recall. The detector is missing farms we KNOW "
+                   "exist, so it is certainly missing others - treat the "
+                   "candidate list as incomplete, and try lowering the "
+                   "evidence threshold."
+                   if recall >= 0.3 else
+                   "That is very poor recall. Something is wrong for this "
+                   "location - cloud cover, an unusual panel type, or a "
+                   "threshold that does not suit the terrain. Do not rely on "
+                   "the candidate list here.")),
+            "note": ("Recall only. Precision cannot be measured without "
+                     "ground truth for the unmapped candidates - that is what "
+                     "your visual check is for."),
+        }
 
     # distance, bearing and which ring each falls in
     for f in found:
@@ -8561,16 +8803,18 @@ def pv_scan(q: PVScanQuery):
     for i, f in enumerate(found):
         f["id"] = i
         f["label"] = (f.get("name") or
-                      (f"Candidate {i+1}" if "Spectral" in f["source"]
+                      (f"Candidate {i+1}" if f["source"] == "Image analysis"
                        else f"PV site {i+1}"))
 
     rings = []
     for r in radii:
         inr = [f for f in found if f["ring_m"] == r]
         mapped = [f for f in inr if f["source"] == "OpenStreetMap"]
+        hi = [f for f in inr if (f.get("pv_score") or 0) >= 0.75]
         rings.append({
             "radius_m": r, "count": len(inr),
             "mapped": len(mapped), "candidates": len(inr) - len(mapped),
+            "high_confidence": len(hi),
             "total_area_m2": round(sum(f.get("area_m2") or 0 for f in inr), 1),
             "nearest_m": (min(f["distance_m"] for f in inr) if inr else None),
         })
@@ -8583,6 +8827,24 @@ def pv_scan(q: PVScanQuery):
         "mapped_total": sum(1 for f in found if f["source"] == "OpenStreetMap"),
         "candidate_total": sum(1 for f in found if "Spectral" in f["source"]),
         "errors": {"osm": osm_err, "spectral": spec_err},
+        "validation": validation,
+        "detector": {
+            "method": ("Evidence scoring over a multi-year Sentinel-2 stack. "
+                       "Three spectral-shape tests (SWIR above NIR, blue at or "
+                       "above red, NIR dip) are combined multiplicatively "
+                       "because they describe one physical signature; four "
+                       "contextual tests (darkness, seasonal stability, "
+                       "absence of re-vegetation, geometry) are combined as a "
+                       "weighted mean. Overall score = spectral^0.65 x "
+                       "context^0.35."),
+            "min_score": q.min_score,
+            "years": f"{int(q.year)-int(q.n_years)+1}-{int(q.year)}",
+            "why_multiplicative": (
+                "A weighted sum lets a quarry that completely fails the "
+                "blue-red test still score highly by being large and flat. "
+                "Multiplying the shape tests prevents that: if the absorption "
+                "edge is absent, the surface is not a silicon panel."),
+        },
         "scope": (
             "At Sentinel-2's 10 m resolution a rooftop array is sub-pixel and "
             "cannot be detected. This finds ground-mounted, utility-scale "
@@ -8590,11 +8852,12 @@ def pv_scan(q: PVScanQuery):
         "caveats": [
             "OpenStreetMap entries are reliable but incomplete - many farms "
             "are simply not mapped.",
-            "Spectral results are CANDIDATES, not detections. Water, asphalt, "
-            "fresh tarmac and burnt ground share the signature. Confirm each "
-            "one against the satellite basemap before using it.",
-            "Rectangularity is reported to help you judge: PV arrays are "
-            "strikingly rectangular, natural features rarely are.",
+            "Image-analysis results are scored CANDIDATES. Every one carries "
+            "its evidence breakdown - open it to see which tests it passed "
+            "and which it scraped through.",
+            "The self-validation panel reports how many OSM-mapped farms the "
+            "detector recovered. Read that first: if recall is poor, the "
+            "candidate list is not trustworthy at this location.",
             "Capacity tags in OSM are frequently missing or wrong.",
         ],
     }
