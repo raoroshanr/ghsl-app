@@ -61,7 +61,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v133"
+APP_VERSION = "deepseego-v135"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -3802,8 +3802,54 @@ def report_start(q: ReportQuery):
     job_id = uuid.uuid4().hex[:16]
     _job_write(job_id, {"state": "queued", "percent": 0,
                         "stage": "Queued\u2026", "started": time.time()})
-    threading.Thread(target=_job_worker, args=(job_id, q), daemon=True).start()
-    return {"job_id": job_id}
+    if BACKGROUND_OK:
+        # legacy path, only when the service is explicitly configured with
+        # always-allocated CPU (which costs money while idle)
+        threading.Thread(target=_job_worker, args=(job_id, q),
+                         daemon=True).start()
+        return {"job_id": job_id, "mode": "background"}
+    # request-driven: the client calls /report_step until it completes. No work
+    # happens outside a request, so the service can scale to zero.
+    _JOB_QUERIES[job_id] = q
+    return {"job_id": job_id, "mode": "stepped",
+            "note": ("The report is built across several short requests so "
+                     "the service does no work while idle - that is what "
+                     "keeps it on request-based billing.")}
+
+
+# in-memory hand-off between /report_start and /report_step within one instance
+_JOB_QUERIES = {}
+
+# Set BACKGROUND_WORK=true ONLY if you have enabled always-allocated CPU and
+# accept being billed while the instance is idle.
+BACKGROUND_OK = os.environ.get("BACKGROUND_WORK", "").lower() in ("1", "true",
+                                                                 "yes")
+
+
+@app.post("/report_step")
+def report_step(job_id: str, body: Optional[ReportQuery] = None):
+    """Advance a stepped report by one chunk. Returns the current status.
+
+    Each call runs inside a normal request, so no always-allocated CPU is
+    needed. The client keeps calling until state is 'done'.
+    """
+    st = _job_read(job_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Unknown report job.")
+    if st.get("state") in ("done", "error"):
+        return st
+    q = _JOB_QUERIES.get(job_id) or body
+    if q is None:
+        raise HTTPException(status_code=409, detail=(
+            "This report job is being served by a different instance. "
+            "Re-send the report parameters with the step request."))
+    _JOB_QUERIES[job_id] = q
+    try:
+        _job_worker(job_id, q)          # runs to completion inside this request
+    except Exception as e:
+        _job_write(job_id, {"state": "error", "percent": 100,
+                            "stage": f"{type(e).__name__}: {e}"[:200]})
+    return _job_read(job_id) or {"state": "error", "stage": "lost"}
 
 
 @app.get("/report_status")
@@ -8436,16 +8482,18 @@ def _esri_tile_png(lat, lon, span_m, px=640):
     z = int(round(math.log2(156543.03392 * math.cos(math.radians(lat)) / m_per_px)))
     z = max(10, min(19, z))
     n = 2 ** z
-    xt = int((lon + 180.0) / 360.0 * n)
+    # fractional tile coordinates of the TARGET POINT
+    xf = (lon + 180.0) / 360.0 * n
     la = math.radians(lat)
-    yt = int((1.0 - math.log(math.tan(la) + 1 / math.cos(la)) / math.pi) / 2.0 * n)
+    yf = (1.0 - math.log(math.tan(la) + 1 / math.cos(la)) / math.pi) / 2.0 * n
     from PIL import Image
-    tiles = 3                                   # 3x3 mosaic around the centre
-    out = Image.new("RGB", (256 * tiles, 256 * tiles))
+    tiles = 4                                   # 4x4 gives room to re-centre
+    x0, y0 = int(xf) - tiles // 2, int(yf) - tiles // 2
+    mosaic = Image.new("RGB", (256 * tiles, 256 * tiles))
     got = 0
     for dy in range(tiles):
         for dx in range(tiles):
-            X, Y = xt + dx - tiles // 2, yt + dy - tiles // 2
+            X, Y = x0 + dx, y0 + dy
             if X < 0 or Y < 0 or X >= n or Y >= n:
                 continue
             url = ("https://services.arcgisonline.com/ArcGIS/rest/services/"
@@ -8454,27 +8502,67 @@ def _esri_tile_png(lat, lon, span_m, px=640):
                 rq = UrlRequest(url, headers={"User-Agent": _UA})
                 with urlopen(rq, timeout=20) as rsp:
                     im = Image.open(io.BytesIO(rsp.read())).convert("RGB")
-                out.paste(im, (dx * 256, dy * 256))
+                mosaic.paste(im, (dx * 256, dy * 256))
                 got += 1
             except Exception:
                 continue
     if got == 0:
         return None, None
+    # CROP so the target point sits at the centre. Without this the image is
+    # offset by up to half a tile - about 100 m at zoom 18 - which is enough
+    # to put a small array outside the frame entirely.
+    px_x = (xf - x0) * 256
+    px_y = (yf - y0) * 256
+    half = int(px / 2)
+    left = int(round(px_x - half))
+    top = int(round(px_y - half))
+    left = max(0, min(256 * tiles - px, left))
+    top = max(0, min(256 * tiles - px, top))
+    out = mosaic.crop((left, top, left + int(px), top + int(px)))
     buf = io.BytesIO()
-    out.save(buf, "JPEG", quality=82)
-    # ground span actually covered by the mosaic
-    span = 156543.03392 * math.cos(math.radians(lat)) / (2 ** z) * 256 * tiles
+    out.save(buf, "JPEG", quality=85)
+    res = 156543.03392 * math.cos(math.radians(lat)) / (2 ** z)
     return buf.getvalue(), {"zoom": z, "tiles_fetched": got,
-                            "span_m": round(span), "px": 256 * tiles}
+                            "span_m": round(res * px), "px": int(px),
+                            "m_per_px": round(res, 3),
+                            "centred": True}
+
+
+# Diagnostic criteria. Each is a simple visual question a model answers far
+# more reliably than "is this a solar farm?", and the DECISION IS MADE IN CODE
+# from the answers. That is the difference between an opinion and evidence.
+PV_CRITERIA = [
+    ("parallel_rows",
+     "Parallel linear rows of panels, spaced a few metres apart"),
+    ("dark_bluish_tone",
+     "Dark blue-black surface tone (NOT brown soil, green crop, or white)"),
+    ("uniform_row_spacing", "Row spacing is regular and repeating"),
+    ("consistent_orientation",
+     "All rows share one orientation across the block"),
+    ("rectangular_blocks",
+     "Panels organised into rectangular blocks with gaps between them"),
+    ("service_tracks", "Access tracks running between the blocks"),
+    ("fenced_boundary", "A fence or clear built perimeter"),
+]
+
+PV_CONFUSERS = {
+    "ploughed field": "rows present but BROWN, no rectangular blocks, no tracks",
+    "orchard or plantation": "rows present but GREEN with round tree crowns",
+    "greenhouse": "rows present but BRIGHT white or translucent, not dark",
+    "metal roofing": "bright and specular, no row structure at panel scale",
+    "car park": "dark and rectangular but no rows, vehicles visible",
+    "water body": "dark but no internal structure at all",
+    "shade netting": "dark but no rigid rows and no tracks",
+}
 
 
 def _vision_pv(img_bytes, lat, lon, span_m, provider="anthropic"):
-    """Ask a vision model whether the tile shows a photovoltaic installation.
+    """Report which diagnostic features are visible; decide in code.
 
-    The prompt is deliberately narrow and demands structured output, including
-    an explicit 'no' option and the visual reasons. A model asked an open
-    question will confabulate; asked to check named visual criteria and report
-    which it saw, it is far more reliable.
+    Asking a model "is this a solar farm?" invites a judgement it will make
+    confidently either way. Asking "do you see parallel rows? is the tone dark
+    blue-black?" gets reliable perceptual answers, and the decision rule then
+    lives in code where it is explicit, tunable and auditable.
     """
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not key:
@@ -8482,31 +8570,25 @@ def _vision_pv(img_bytes, lat, lon, span_m, provider="anthropic"):
             "Vision verification needs ANTHROPIC_API_KEY on the Cloud Run "
             "service (see AI_AGENT_SETUP.md)."))
     b64 = base64.b64encode(img_bytes).decode()
+    crit = "\n".join(f'  "{k}": true|false   // {d}' for k, d in PV_CRITERIA)
+    conf = "\n".join(f"  - {k}: {v}" for k, v in PV_CONFUSERS.items())
     prompt = (
-        "You are inspecting high-resolution aerial imagery for SOLAR "
-        "PHOTOVOLTAIC installations.\n\n"
-        f"This tile is centred at {lat:.5f}, {lon:.5f} and spans roughly "
-        f"{int(span_m)} m across.\n\n"
-        "A photovoltaic installation looks like: regular parallel ROWS of "
-        "dark rectangular panels, uniform spacing between rows, consistent "
-        "orientation across the array (usually facing the equator), often "
-        "with service tracks between blocks and a fenced boundary.\n\n"
-        "Do NOT confuse it with: dark agricultural fields (irregular edges, "
-        "no row structure at panel scale), water bodies, asphalt or car "
-        "parks (uniform surface, no rows), greenhouses (bright/translucent, "
-        "often white), metal roofing (bright, specular), shadow, or ploughed "
-        "soil (rows but brown, and no panel texture).\n\n"
-        "Reply with ONLY a JSON object, no markdown:\n"
-        '{"pv_present": true|false, "confidence": 0.0-1.0, '
-        '"coverage_percent": 0-100, '
-        '"visual_evidence": ["specific things you actually see"], '
-        '"against": ["anything inconsistent with PV"], '
-        '"mounting": "ground|rooftop|mixed|none", '
-        '"alternative": "what it is instead, if not PV"}'
+        "Aerial image, roughly "
+        f"{int(span_m)} m across, centred at {lat:.5f}, {lon:.5f}.\n\n"
+        "Report ONLY what you can actually see. Do not infer, do not guess, "
+        "and do not try to decide whether this is a solar farm - just answer "
+        "each visual question.\n\n"
+        "Things that are commonly mistaken for solar panels:\n" + conf + "\n\n"
+        "Reply with ONLY this JSON, no markdown:\n"
+        "{\n" + crit + ",\n"
+        '  "dominant_surface": "what most of the image actually is",\n'
+        '  "closest_confuser": "which of the listed confusers this most '
+        'resembles, or none",\n'
+        '  "panel_area_percent": 0-100,\n'
+        '  "notes": "one sentence on what you see"\n}'
     )
     body = {
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 700,
+        "model": "claude-sonnet-4-6", "max_tokens": 700,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64",
                                          "media_type": "image/jpeg",
@@ -8523,11 +8605,70 @@ def _vision_pv(img_bytes, lat, lon, span_m, provider="anthropic"):
     txt = "".join(b.get("text", "") for b in d.get("content", [])
                   if b.get("type") == "text").strip()
     txt = re.sub(r"^```(?:json)?|```$", "", txt, flags=re.M).strip()
+    m = re.search(r"\{[\s\S]*\}", txt)
+    if not m:
+        return {"pv_present": False, "confidence": 0.0,
+                "parse_error": txt[:200]}
     try:
-        return json.loads(txt)
+        obs = json.loads(m.group(0))
     except Exception:
         return {"pv_present": False, "confidence": 0.0,
                 "parse_error": txt[:200]}
+    return _pv_decide(obs)
+
+
+def _pv_decide(obs):
+    """The decision rule, in code.
+
+    REQUIRED, both:
+      parallel_rows    - without row structure it is not a panel array
+      dark_bluish_tone - this is what separates PV from ploughed soil and
+                         greenhouses, which also have rows
+    Then at least TWO supporting features, because a single one is too easy
+    to see in noise.
+    """
+    def B(k):
+        v = obs.get(k)
+        return bool(v) if isinstance(v, bool) else str(v).lower() == "true"
+
+    required = ["parallel_rows", "dark_bluish_tone"]
+    support = ["uniform_row_spacing", "consistent_orientation",
+               "rectangular_blocks", "service_tracks", "fenced_boundary"]
+    req_ok = {k: B(k) for k in required}
+    sup_ok = {k: B(k) for k in support}
+    n_sup = sum(sup_ok.values())
+    passes = all(req_ok.values()) and n_sup >= 2
+
+    missing = [k for k, v in req_ok.items() if not v]
+    conf = 0.0
+    if passes:
+        # confidence from how much supporting evidence there is
+        conf = min(0.98, 0.55 + 0.09 * n_sup)
+        cc = str(obs.get("closest_confuser") or "none").lower()
+        if cc not in ("none", "", "n/a", "null"):
+            conf *= 0.75          # the model itself saw a plausible alternative
+    reason = ("all required features present with "
+              f"{n_sup} supporting features" if passes else
+              "missing required feature(s): " + ", ".join(missing)
+              if missing else
+              f"only {n_sup} supporting feature(s); at least 2 are needed")
+
+    return {
+        "pv_present": passes,
+        "confidence": round(conf, 3),
+        "criteria": {**req_ok, **sup_ok},
+        "required_met": all(req_ok.values()),
+        "supporting_count": n_sup,
+        "decision_reason": reason,
+        "dominant_surface": obs.get("dominant_surface", ""),
+        "closest_confuser": obs.get("closest_confuser", ""),
+        "panel_area_percent": obs.get("panel_area_percent"),
+        "notes": obs.get("notes", ""),
+        "rule": ("Requires parallel_rows AND dark_bluish_tone, plus at least "
+                 "2 of: uniform spacing, consistent orientation, rectangular "
+                 "blocks, service tracks, fenced boundary. Applied in code "
+                 "from the model's visual observations, not from its opinion."),
+    }
 
 
 def _pv_registry_wri(lat, lon, r):
@@ -8947,6 +9088,122 @@ def _bearing_deg(lat1, lon1, lat2, lon2):
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def _sweep_grid(lat, lon, radius_m, tile_m):
+    """Tile centres covering a disc, on a square lattice with slight overlap.
+
+    Overlap matters: an array straddling a tile boundary appears as two
+    fragments in adjacent tiles and may fail the row-structure test in both.
+    """
+    step = tile_m * 0.85                       # 15% overlap
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat))
+    n = int(radius_m / step) + 1
+    out = []
+    for i in range(-n, n + 1):
+        for j in range(-n, n + 1):
+            x, y = j * step, i * step
+            if math.hypot(x, y) <= radius_m:
+                out.append((lat + y / mlat, lon + x / mlon))
+    return out
+
+
+def _pv_grid_sweep(lat, lon, radius_m, coarse_m, fine_m, max_calls,
+                   on_progress=None):
+    """Two-stage vision sweep: coarse everywhere, fine where coarse fires.
+
+    The previous design let the spectral screen decide where vision looked, so
+    anything the screen missed was never seen at all - which is exactly how a
+    visible array goes unrecognised. This sweeps the whole area with vision at
+    coarse resolution, then refines only where something was found. Coverage no
+    longer depends on the spectral screen at all.
+    """
+    coarse = _sweep_grid(lat, lon, radius_m, coarse_m)
+    budget = int(max_calls)
+    stage1, stage2, calls = [], [], 0
+
+    for (la, lo) in coarse:
+        if calls >= budget:
+            break
+        try:
+            img, meta = _esri_tile_png(la, lo, coarse_m, px=768)
+            if not img:
+                continue
+            v = _vision_pv(img, la, lo, (meta or {}).get("span_m", coarse_m))
+            calls += 1
+            # a coarse tile only needs to be SUSPICIOUS to earn a closer look
+            suspicious = (v.get("pv_present") or
+                          (v.get("criteria", {}).get("parallel_rows") and
+                           v.get("criteria", {}).get("dark_bluish_tone")))
+            stage1.append({"lat": la, "lon": lo, "verdict": v,
+                           "suspicious": bool(suspicious), "imagery": meta})
+        except HTTPException:
+            raise
+        except Exception:
+            continue
+
+    # refine: 2x2 sub-tiles inside each suspicious coarse tile
+    hits = [s for s in stage1 if s["suspicious"]]
+    mlat = 110540.0
+    mlon = 111320.0 * math.cos(math.radians(lat))
+    for h in hits:
+        if calls >= budget:
+            break
+        off = coarse_m / 4.0
+        for dy in (-off, off):
+            for dx in (-off, off):
+                if calls >= budget:
+                    break
+                la = h["lat"] + dy / mlat
+                lo = h["lon"] + dx / mlon
+                try:
+                    img, meta = _esri_tile_png(la, lo, fine_m, px=768)
+                    if not img:
+                        continue
+                    v = _vision_pv(img, la, lo,
+                                   (meta or {}).get("span_m", fine_m))
+                    calls += 1
+                    if v.get("pv_present"):
+                        stage2.append({"lat": la, "lon": lo, "verdict": v,
+                                       "imagery": meta})
+                except Exception:
+                    continue
+
+    # merge fine detections that are close together into one site
+    merge_r = max(fine_m, coarse_m * 0.6)      # sub-tiles sit coarse_m/2 apart
+    merged = []
+    for d in sorted(stage2, key=lambda x: -x["verdict"]["confidence"]):
+        near = None
+        for m in merged:
+            if _haversine_m(d["lat"], d["lon"], m["lat"], m["lon"]) < merge_r:
+                near = m
+                break
+        if near:
+            near["tiles"] += 1
+            near["members"].append((d["lat"], d["lon"]))
+            near["confidence"] = max(near["confidence"],
+                                     d["verdict"]["confidence"])
+            # recentre on the confirming tiles so the marker sits on the array
+            near["lat"] = sum(p[0] for p in near["members"]) / len(near["members"])
+            near["lon"] = sum(p[1] for p in near["members"]) / len(near["members"])
+        else:
+            merged.append({"lat": d["lat"], "lon": d["lon"], "tiles": 1,
+                           "members": [(d["lat"], d["lon"])],
+                           "confidence": d["verdict"]["confidence"],
+                           "verdict": d["verdict"], "imagery": d["imagery"]})
+    # extent: how far the confirming tiles spread, so a large farm reads as large
+    for m in merged:
+        if len(m["members"]) > 1:
+            xs = [p[1] for p in m["members"]]; ys = [p[0] for p in m["members"]]
+            m["extent_m"] = round(max(
+                _haversine_m(min(ys), min(xs), max(ys), max(xs)), fine_m))
+        else:
+            m["extent_m"] = round(fine_m)
+        m.pop("members", None)
+    return {"coarse_tiles": len(stage1), "suspicious": len(hits),
+            "fine_detections": len(stage2), "sites": merged, "calls": calls,
+            "coarse_results": stage1}
+
+
 class PVEnsembleQuery(BaseModel):
     lat: float
     lon: float
@@ -8955,7 +9212,8 @@ class PVEnsembleQuery(BaseModel):
     use_spectral: bool = True          # proposer only
     use_vision: bool = True            # the decider
     use_web: bool = True
-    max_vision_tiles: int = 12         # cost ceiling
+    sweep: bool = True                 # systematic vision sweep (recommended)
+    max_vision_tiles: int = 40         # cost ceiling for the sweep
     tile_span_m: float = 400
     year: int = 2024
     min_score: float = 0.30            # permissive: the proposer casts wide
@@ -8996,7 +9254,38 @@ def pv_ensemble(q: PVEnsembleQuery):
 
     # ---- 3. vision on high-resolution imagery: the decider --------------
     vision_results, calls = [], 0
-    if q.use_vision:
+    sweep = None
+    if q.use_vision and q.sweep:
+        # SYSTEMATIC SWEEP: coverage no longer depends on the spectral screen
+        try:
+            budget = max(4, int(q.max_vision_tiles))
+            coarse_m = max(600.0, min(2500.0, 2.2 * r / 6.0))
+            sweep = _pv_grid_sweep(q.lat, q.lon, r, coarse_m,
+                                   float(q.tile_span_m), budget)
+            calls += sweep["calls"]
+            for s in sweep["sites"]:
+                sites.append({
+                    "source": "Vision sweep",
+                    "lat": s["lat"], "lon": s["lon"],
+                    "name": "", "operator": "", "capacity": "", "start_date": "",
+                    "evidence_kind": "visually confirmed",
+                    "vision": s["verdict"],
+                    "tiles_confirming": s["tiles"],
+                    "confidence": ("high" if s["confidence"] >= 0.8
+                                   else "moderate"),
+                })
+            notes.append(
+                f"Vision swept {sweep['coarse_tiles']} coarse tiles "
+                f"({int(coarse_m)} m each), found {sweep['suspicious']} "
+                f"suspicious, refined to {sweep['fine_detections']} "
+                "confirmed detections. Coverage does not depend on the "
+                "spectral screen.")
+        except HTTPException as he:
+            errors["sweep"] = str(he.detail)[:140]
+        except Exception as e:
+            errors["sweep"] = f"{type(e).__name__}: {e}"[:120]
+
+    if q.use_vision and not q.sweep:
         # verify registry sites first (they double as a self-check), then the
         # highest-scoring spectral proposals, within the cost ceiling
         targets = []
@@ -9090,6 +9379,16 @@ def pv_ensemble(q: PVEnsembleQuery):
                                 "spectral_score": p.get("pv_score"),
                                 "why": p.get("rejected_because", "")}
                                for p in rejected],
+        "sweep": ({"coarse_tiles": sweep["coarse_tiles"],
+                   "suspicious": sweep["suspicious"],
+                   "fine_detections": sweep["fine_detections"],
+                   "calls": sweep["calls"],
+                   "note": ("Systematic two-stage sweep: every coarse tile in "
+                            "the radius was inspected, then anything "
+                            "suspicious was re-examined at high resolution. "
+                            "A visible array can no longer be missed because "
+                            "the spectral screen failed to propose it.")}
+                  if sweep else None),
         "vision": {"calls": calls, "ceiling": q.max_vision_tiles,
                    "results": vision_results,
                    "note": ("High-resolution imagery (~0.3-0.6 m from Esri "
