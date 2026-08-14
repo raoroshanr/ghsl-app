@@ -1159,9 +1159,10 @@ label.chk input{width:auto}
       <label class="slChk"><input type="checkbox" id="pvUseReg" checked> Registries &mdash; OpenStreetMap + WRI power plants</label>
       <label class="slChk"><input type="checkbox" id="pvUseSpec" checked> Spectral screen &mdash; proposes where to look</label>
       <label class="slChk"><input type="checkbox" id="pvUseVis" checked> Vision verification &mdash; decides (needs ANTHROPIC_API_KEY)</label>
+      <label class="slChk"><input type="checkbox" id="pvSweep" checked> <b>Systematic sweep</b> &mdash; inspect every tile in the radius, not only where the spectral screen points</label>
       <label class="slChk"><input type="checkbox" id="pvUseWeb" checked> Web evidence &mdash; capacity, developer, dates</label>
       <div class="dxGrid" style="margin-top:6px">
-        <div><label>Max vision calls</label><input type="text" id="pvMaxVis" value="12"></div>
+        <div><label>Max vision calls</label><input type="text" id="pvMaxVis" value="40"></div>
         <div><label>Tile span (m)</label><input type="text" id="pvTileSpan" value="400"></div>
       </div>
       <button id="pvEnsemble" class="primary" style="width:100%;margin-top:8px">Run ensemble detection</button>
@@ -1429,7 +1430,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v133</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v137</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1596,7 +1597,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v133";
+const DSG_VERSION = "deepseego-v137";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -1796,6 +1797,34 @@ if(document.readyState === 'loading')
 else initAuth();
 let siteCharts = [];  // hoisted: used by climate point tabs before Site Brief block
 console.log("DeepSeeGo frontend", DSG_VERSION);
+
+// A cached index.html against a newer backend causes confusing, hard-to-report
+// bugs. Check once at startup and offer a hard reload.
+(async function checkVersion(){
+  try{
+    const r = await fetch(BACKEND_URL + '/health', {cache: 'no-store'});
+    if(!r.ok) return;
+    const h = await r.json();
+    if(h.version && h.version !== DSG_VERSION){
+      console.warn('version mismatch: page', DSG_VERSION, 'backend', h.version);
+      const bar = document.createElement('div');
+      bar.style.cssText =
+        'position:fixed;left:0;right:0;bottom:0;z-index:9999;padding:9px 14px;' +
+        'background:#E4572E;color:#fff;font:600 12px Arial,Helvetica,sans-serif;' +
+        'display:flex;align-items:center;justify-content:center;gap:12px';
+      bar.innerHTML =
+        '<span>This page is cached at <b>' + DSG_VERSION + '</b> but the server ' +
+        'is running <b>' + h.version + '</b>.</span>' +
+        '<button id="dsgReload" style="padding:4px 12px;border:0;border-radius:5px;' +
+        'background:#fff;color:#E4572E;font-weight:700;cursor:pointer">Reload now</button>';
+      document.body.appendChild(bar);
+      document.getElementById('dsgReload').addEventListener('click', () => {
+        // cache-busting query defeats a stubborn CDN copy
+        location.href = location.pathname + '?v=' + Date.now();
+      });
+    }
+  }catch(e){ /* health check is advisory only */ }
+})();
 
 const $ = id => document.getElementById(id);
 const fmtIN = new Intl.NumberFormat('en-IN', {maximumFractionDigits: 0});
@@ -2240,6 +2269,27 @@ async function loadDatasets(){
 // Safe to call at parse time: api() awaits AUTH_READY internally, so this
 // simply queues until the backend has confirmed the signed-in session.
 loadDatasets();
+
+// The dataset list is served without touching Earth Engine, so a cold start
+// cannot be rate-limited into a failed page load. A moment later we ask the
+// backend to run its deferred probes and correct any year ranges. If that
+// call is rate-limited, nothing breaks - the page is already usable.
+setTimeout(async () => {
+  try{
+    const j = await api('/probe_refresh');
+    if(!j || !j.ok || !j.datasets) return;
+    let changed = 0;
+    Object.keys(DS || {}).forEach(key => {
+      const d = DS[key], u = j.datasets[key];
+      if(d && u && JSON.stringify(u.years) !== JSON.stringify(d.years)){
+        d.years = u.years; d.analysis_years = u.analysis_years; changed++;
+      }
+    });
+    if(changed && typeof populateYears === 'function'){
+      try{ populateYears(); }catch(e){}
+    }
+  }catch(e){ /* the page works without it */ }
+}, 3000);
 
 /* ---------- place search (Nominatim): drops a pin at building zoom ------ */
 let searchPin = null;
@@ -4567,6 +4617,7 @@ async function pvEnsemble(){
         use_spectral: $('pvUseSpec').checked,
         use_vision: $('pvUseVis').checked,
         use_web: $('pvUseWeb').checked,
+        sweep: $('pvSweep').checked,
         max_vision_tiles: parseInt($('pvMaxVis').value)||12,
         tile_span_m: parseFloat($('pvTileSpan').value)||400,
         year: parseInt($('pvYear').value)||2024})}, true);
@@ -4616,33 +4667,46 @@ function pvEnsTip(s){
   return `<b>${s.label}</b><br>${Math.round(s.distance_m)} m ${s.direction}` +
     `<br>agreement: <b>${s.agreement}</b> (${s.agreeing_sources.join(', ')})` +
     (s.capacity ? `<br>${s.capacity}` : '') +
+    (s.tiles_confirming ? `<br>${s.tiles_confirming} tile(s) confirming` : '') +
     (v ? `<br><span style="opacity:.8">vision: ${v.pv_present?'PV present':'no PV'} ` +
          `(${Math.round((v.confidence||0)*100)}%)</span>` +
-         (v.visual_evidence && v.visual_evidence.length
-           ? `<br><span style="opacity:.7">${v.visual_evidence.slice(0,2).join('; ')}</span>` : '')
+         (v.decision_reason ? `<br><span style="opacity:.7">${v.decision_reason}</span>` : '') +
+         (v.dominant_surface ? `<br><span style="opacity:.7">${v.dominant_surface}</span>` : '')
        : '');
 }
 
 function pvEnsemblePanel(j){
+  const sw = j.sweep;
   const rows = j.sites.map(s =>
     `<tr><td>${s.label}<div class="per">${s.agreeing_sources.join(' + ')}</div></td>` +
     `<td style="text-align:right">${Math.round(s.distance_m).toLocaleString()} m</td>` +
     `<td style="text-align:right">${s.direction}</td>` +
     `<td style="text-align:right;color:${s.agreement>=2?'#84CC16':'#E9C46A'}">` +
     `<b>${s.agreement}</b></td></tr>`).join('');
+  const critRow = v => {
+    const c = v.criteria || {};
+    const req = ['parallel_rows','dark_bluish_tone'];
+    return Object.entries(c).map(([k,val]) =>
+      `<span style="display:inline-block;margin:1px 4px 1px 0;font-size:10px;` +
+      `padding:1px 5px;border-radius:3px;` +
+      `background:${val?'rgba(132,204,22,.18)':'rgba(228,87,46,.14)'};` +
+      `color:${val?'#C7E59A':'#F0B49E'};` +
+      `${req.includes(k)?'font-weight:700;border:1px solid '+(val?'#3d5a1f':'#6b2f1c'):''}">` +
+      `${val?'\u2713':'\u2717'} ${k.replace(/_/g,' ')}</span>`).join('');
+  };
   const vis = (j.vision.results||[]).map(v =>
     `<details style="margin-top:5px"><summary style="cursor:pointer;font-size:11.5px;` +
     `color:${v.verdict.pv_present?'#84CC16':'#E4572E'}">` +
     `${v.verdict.pv_present ? '\u2713 PV present' : '\u2717 not PV'} ` +
     `(${Math.round((v.verdict.confidence||0)*100)}%) \u2014 ${v.why}</summary>` +
-    `<div class="per" style="margin-top:4px">` +
-    (v.verdict.visual_evidence && v.verdict.visual_evidence.length
-      ? `<b>Saw:</b> ${v.verdict.visual_evidence.join('; ')}<br>` : '') +
-    (v.verdict.against && v.verdict.against.length
-      ? `<b>Against:</b> ${v.verdict.against.join('; ')}<br>` : '') +
-    (v.verdict.alternative ? `<b>Instead:</b> ${v.verdict.alternative}<br>` : '') +
-    (v.verdict.mounting ? `mounting: ${v.verdict.mounting} \u00b7 ` : '') +
-    (v.imagery ? `imagery ${v.imagery.span_m} m across at zoom ${v.imagery.zoom}` : '') +
+    `<div style="margin-top:4px">${critRow(v.verdict)}</div>` +
+    `<div class="per" style="margin-top:3px">` +
+    `<b>Decision:</b> ${v.verdict.decision_reason || ''}<br>` +
+    (v.verdict.dominant_surface ? `<b>Surface:</b> ${v.verdict.dominant_surface}<br>` : '') +
+    (v.verdict.closest_confuser && v.verdict.closest_confuser !== 'none'
+      ? `<b>Resembles:</b> ${v.verdict.closest_confuser}<br>` : '') +
+    (v.verdict.notes ? `${v.verdict.notes}<br>` : '') +
+    (v.imagery ? `imagery ${v.imagery.span_m} m across, ${v.imagery.m_per_px||'?'} m/pixel` : '') +
     `</div></details>`).join('');
   const w = j.web_evidence;
   const layers = j.method.layers.map(l =>
@@ -4654,6 +4718,10 @@ function pvEnsemblePanel(j){
   $('drawerSub').textContent = 'PV ensemble detection';
   $('siteWrap').innerHTML =
     `<div class="siteSec"><div class="paneLabel">Result</div>` +
+    (sw ? `<div class="mmVerdict ok" style="font-size:11px">` +
+      `<b>Systematic sweep:</b> ${sw.coarse_tiles} coarse tiles inspected \u2192 ` +
+      `${sw.suspicious} suspicious \u2192 ${sw.fine_detections} confirmed at high ` +
+      `resolution, in ${sw.calls} vision calls.<br>${sw.note}</div>` : '') +
     `<div class="mmVerdict ${j.confirmed ? 'ok' : 'warn'}" style="font-size:11.5px">` +
     `<b>${j.confirmed}</b> confirmed by two or more independent sources \u00b7 ` +
     `<b>${j.provisional}</b> provisional \u00b7 ` +
@@ -4682,6 +4750,11 @@ function pvEnsemblePanel(j){
             `<td style="text-align:right">${x.commissioned||'\u2014'}</td></tr>` +
             (x.developer ? `<tr><td colspan="3" class="mmSrc">${x.developer}</td></tr>` : '')
           ).join('') + `</table>` : '') : '') +
+    `<div class="paneLabel" style="margin-top:12px">Decision rule</div>` +
+    `<p class="srcNote">Requires <b>parallel rows</b> AND <b>dark blue-black tone</b>, ` +
+    `plus at least 2 supporting features. Applied in code from the model\u2019s ` +
+    `visual observations, not from its opinion \u2014 which is what stops a ` +
+    `ploughed field (rows, but brown) or a greenhouse (rows, but bright) passing.</p>` +
     `<div class="paneLabel" style="margin-top:12px">How the sources combine</div>` +
     `<table class="aqTable mmTable">${layers}</table>` +
     `<p class="srcNote">${j.method.why_ensemble}</p>` +
