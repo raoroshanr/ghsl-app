@@ -25,6 +25,7 @@ import io
 import re
 import json
 import time
+import random
 import uuid
 import math
 import numpy as np
@@ -61,7 +62,7 @@ except Exception:                                  # pragma: no cover
     FPDF = object
     _PDF_OK = False
 
-APP_VERSION = "deepseego-v135"
+APP_VERSION = "deepseego-v137"
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -93,17 +94,74 @@ def ensure_ee():
         _ee_ready = True
 
 
-def ee_errors(fn):
-    """Turn unexpected Earth Engine exceptions into readable HTTP errors,
-    so the frontend toast shows the real cause instead of a bare 500."""
+# ----------------------------------------------------------------------------
+# "Rate exceeded" comes from Earth Engine, not from Cloud Run. EE limits
+# CONCURRENT requests per project, and a page load fires several at once - on a
+# cold start they all arrive together and the last ones are rejected.
+#
+# Retrying alone does not fix it, because the retries are also concurrent. The
+# cure is to cap how many EE calls are in flight at any moment, so they queue
+# instead of colliding.
+# ----------------------------------------------------------------------------
+EE_MAX_CONCURRENT = int(os.environ.get("EE_MAX_CONCURRENT", "4"))
+_EE_GATE = threading.Semaphore(EE_MAX_CONCURRENT)
+
+
+def ee_gate(fn):
+    """Limit how many Earth Engine calls run at once."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        acquired = _EE_GATE.acquire(timeout=55)
+        if not acquired:
+            raise HTTPException(status_code=503, detail=(
+                "The server is busy with other Earth Engine requests. "
+                "Please try again in a few seconds."))
         try:
             return fn(*args, **kwargs)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Earth Engine: {e}")
+        finally:
+            _EE_GATE.release()
+    return wrapper
+
+
+def ee_errors(fn):
+    """Readable HTTP errors from Earth Engine, with a retry on transient
+    rate limits before giving up."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        tries = 5
+        for i in range(tries):
+            try:
+                with_gate = _EE_GATE.acquire(timeout=55)
+                if not with_gate:
+                    raise HTTPException(status_code=503, detail=(
+                        "Server busy with other Earth Engine requests - "
+                        "please retry in a few seconds."))
+                try:
+                    return fn(*args, **kwargs)
+                finally:
+                    _EE_GATE.release()
+            except HTTPException:
+                raise
+            except Exception as e:
+                msg = str(e)
+                low = msg.lower()
+                transient = ("rate exceeded" in low or "too many" in low
+                             or "429" in low or "quota exceeded" in low
+                             or "unavailable" in low or "deadline" in low
+                             or "backend error" in low or "internal error" in low)
+                if transient and i < tries - 1:
+                    # longer, jittered backoff: 0.8, 1.6, 3.2, 6.4 s
+                    time.sleep(0.8 * (2 ** i) + random.random() * 0.6)
+                    continue
+                if transient:
+                    raise HTTPException(status_code=429, detail=(
+                        "Earth Engine is rate-limiting this project right now. "
+                        "This usually clears in a few seconds - try again. "
+                        "It happens most often on the first request after the "
+                        "service has been idle, when several queries start at "
+                        "once. If it persists, you are running more concurrent "
+                        "analyses than the free Community tier allows."))
+                raise HTTPException(status_code=502, detail=f"Earth Engine: {msg}")
     return wrapper
 
 
@@ -567,26 +625,98 @@ GSW15_ASSET = "projects/global-surface-water/assets/GSW1_5/YearlyHistory"
 _gsw15 = {"checked": False, "ok": False}
 
 
-def _gsw15_available() -> bool:
-    """The JRC v1.5 extension (2022-2024) lives outside the official catalog;
-    some service accounts cannot read it. Probe once and remember."""
-    if not _gsw15["checked"]:
+def _ee_retry(fn, tries=4, base=0.6):
+    """Run an Earth Engine call, backing off on rate limits.
+
+    'Rate exceeded' is transient - a short wait and retry almost always
+    succeeds. Failing the whole request on the first one is the wrong
+    behaviour, especially right after a cold start.
+    """
+    last = None
+    for i in range(tries):
         try:
-            ensure_ee()
-            ee.ImageCollection(GSW15_ASSET).limit(1).size().getInfo()
-            _gsw15["ok"] = True
-        except Exception:
-            _gsw15["ok"] = False
+            return fn()
+        except Exception as e:
+            last = e
+            msg = str(e).lower()
+            transient = ("rate exceeded" in msg or "quota" in msg
+                         or "too many" in msg or "429" in msg
+                         or "unavailable" in msg or "deadline" in msg)
+            if not transient or i == tries - 1:
+                raise
+            time.sleep(base * (2 ** i) + random.random() * 0.3)
+    raise last
+
+
+def _probe_cache_read(key):
+    """Probe results persist in Cloud Storage so a cold start does not repeat
+    them. Without this, scale-to-zero means re-probing on every visit."""
+    try:
+        blob = _bucket().blob(f"probes/{key}.json")
+        if not blob.exists():
+            return None
+        d = json.loads(blob.download_as_text())
+        # a probe answer is stable for weeks; re-check monthly
+        if time.time() - float(d.get("at", 0)) > 30 * 86400:
+            return None
+        return d.get("value")
+    except Exception:
+        return None
+
+
+def _probe_cache_write(key, value):
+    try:
+        _bucket().blob(f"probes/{key}.json").upload_from_string(
+            json.dumps({"value": value, "at": time.time()}),
+            content_type="application/json")
+    except Exception:
+        pass
+
+
+def _gsw15_available(block: bool = False) -> bool:
+    """Is the JRC v1.5 water extension readable by this service account?
+
+    NEVER blocks on Earth Engine unless explicitly asked to. The page-load path
+    calls this with block=False, so a cold start returns the cached answer (or
+    a safe default) instead of making a live call that can be rate-limited.
+    """
+    if _gsw15["checked"]:
+        return _gsw15["ok"]
+
+    cached = _probe_cache_read("gsw15")
+    if cached is not None:
+        _gsw15["ok"] = bool(cached)
         _gsw15["checked"] = True
+        return _gsw15["ok"]
+
+    if not block:
+        # Safe default: assume unavailable, which only trims water years to
+        # 2021. Better a slightly conservative list than a failed page load.
+        return False
+
+    try:
+        ensure_ee()
+        _ee_retry(lambda: ee.ImageCollection(GSW15_ASSET)
+                  .limit(1).size().getInfo())
+        _gsw15["ok"] = True
+    except Exception:
+        _gsw15["ok"] = False
+    _gsw15["checked"] = True
+    _probe_cache_write("gsw15", _gsw15["ok"])
     return _gsw15["ok"]
 
 
-def _effective_years(key: str, d: dict):
+def _effective_years(key: str, d: dict, block: bool = False):
     """(map_years, analysis_years) after trimming water to 2021 when the
-    v1.5 extension asset is not accessible."""
+    v1.5 extension asset is not accessible.
+
+    block=False on the page-load path: use the cached probe or a safe default
+    rather than making a live Earth Engine call. block=True when a water layer
+    is actually being used, where one probe is acceptable.
+    """
     years = d["years"]
     ay = d.get("analysis_years", years)
-    if key == "water" and not _gsw15_available():
+    if key == "water" and not _gsw15_available(block=block):
         years = [y for y in years if y <= 2021]
         ay = sorted({y for y in ay if y <= 2021} | {2021})
     return years, ay
@@ -866,6 +996,27 @@ def _class_map(d: dict):
         return {str(v): {"label": cc["label"], "color": cc["color"]}
                 for v, cc in zip(r["values"], c)}
     return None
+
+
+@app.get("/probe_refresh")
+def probe_refresh():
+    """Run the deferred asset probes and return the corrected year lists.
+
+    The frontend calls this ONCE, a moment after load, so the page itself
+    never waits on Earth Engine. If it is rate-limited the page is unaffected.
+    """
+    try:
+        ok = _gsw15_available(block=True)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160]}
+    out = {}
+    for k, d in DATASETS.items():
+        try:
+            years, ay = _effective_years(k, d, block=False)
+            out[k] = {"years": years, "analysis_years": ay}
+        except Exception:
+            continue
+    return {"ok": True, "gsw15_available": ok, "datasets": out}
 
 
 @app.get("/datasets")
@@ -13889,7 +14040,30 @@ def thumbnails(q: RegionQuery):
 # ----------------------------------------------------------------------------
 if _STATIC_DIR is not None:
     # Root serves the SPA; JSON health stays available at /health and /api.
-    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="spa")
+    class _NoCacheHTML(StaticFiles):
+        """Serve the SPA shell with no-cache so a deploy is picked up at once.
+
+        Without this the CDN and the browser both hold on to index.html and a
+        new backend version can sit behind an old frontend indefinitely.
+        """
+
+        async def get_response(self, path, scope):
+            resp = await super().get_response(path, scope)
+            ctype = (resp.headers.get("content-type") or "").lower()
+            name = (path or "").lower()
+            if "text/html" in ctype or name.endswith((".html", "/")) \
+                    or name in ("", "."):
+                resp.headers["Cache-Control"] = (
+                    "no-cache, no-store, must-revalidate, max-age=0")
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                resp.headers["X-App-Version"] = APP_VERSION
+            else:
+                # static assets are safe to cache for a day
+                resp.headers.setdefault("Cache-Control", "public, max-age=86400")
+            return resp
+
+    app.mount("/", _NoCacheHTML(directory=_STATIC_DIR, html=True), name="spa")
 else:
     # No bundled frontend found: keep JSON health at root so version checks work
     # and /health reports serving_mode = API-only to explain the situation.
