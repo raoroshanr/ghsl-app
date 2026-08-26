@@ -959,10 +959,11 @@ label.chk input{width:auto}
       <div class="dxGrid" style="margin-top:6px">
         <div><label>Contour interval (m)</label>
           <input type="text" id="slInterval" value="5"></div>
-        <div><label>Radius (m)</label>
-          <input type="text" id="slRadius" value="800"></div>
+        <div><label>Radius override (m)</label>
+          <input type="text" id="slRadius" placeholder="from region"></div>
       </div>
 
+      <div id="slAreaNote" class="hint" style="font-size:10.5px;margin-top:4px"></div>
       <button id="slLoad" class="primary" style="width:100%;margin-top:8px" disabled>Extract site layers</button>
       <div id="slInfo" class="hint" style="min-height:18px"></div>
 
@@ -1422,7 +1423,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v138</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v139</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1589,7 +1590,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v138";
+const DSG_VERSION = "deepseego-v139";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -3891,7 +3892,8 @@ async function slInit(){
 }
 
 async function slLoad(){
-  if(siteState.lat == null) return toast('Pick a site point first');
+  const area = siteArea();
+  if(!area) return toast('Select a Region of Interest, or pick a point');
   const want = [];
   if($('slWater').checked) want.push('water');
   if($('slBuildings').checked) want.push('buildings');
@@ -3905,8 +3907,9 @@ async function slLoad(){
   try{
     const j = await api('/site_layers', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
-        radius_m: parseFloat($('slRadius').value) || 800,
+      body: JSON.stringify({lat: area.lat, lon: area.lon,
+        // the ROI sets the extent; the field is an override
+        radius_m: parseFloat($('slRadius').value) || area.radius_m,
         layers: want,
         water_source: $('slWaterSrc').value,
         buildings_source: $('slBuildingsSrc').value,
@@ -8706,6 +8709,8 @@ function siteInit(){ /* region tools live in Explore; nothing to preload */ }
 if($('site3dBtn')) $('site3dBtn').addEventListener('click', open3DView);
 if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async () => {
   if(siteState.lat == null) return toast('Pick a site first');
+  const area2 = siteArea();
+  if(!area2) return toast('Select a Region of Interest, or pick a point');
   const btn = $('siteBuildingsBtn');
   btn.disabled = true; btn.textContent = 'Mapping buildings\u2026';
   Progress.start('Mapping building types',
@@ -8714,7 +8719,7 @@ if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async 
   $('drawer').classList.add('open');
   if(typeof paneMode === 'function') paneMode('site');
   $('siteWrap').hidden = false;
-  await loadBuildings(siteState.lat, siteState.lon, SITE_POINT_RADIUS_M);
+  await loadBuildings(area2.lat, area2.lon, area2.radius_m);
   Progress.done();
   btn.disabled = false; btn.textContent = 'Map building types';
 });
@@ -8737,7 +8742,8 @@ function shadeColor(rgb, f){    // f<1 darker, f>1 lighter
   return '#' + ((1<<24)|(r<<16)|(g<<8)|b).toString(16).slice(1);
 }
 async function open3DView(){
-  if(siteState.lat == null) return toast('Pick a site first');
+  const area = siteArea();
+  if(!area) return toast('Select a Region of Interest, or pick a point');
   const btn = $('site3dBtn'); const orig = btn.textContent;
   // toggle off if already showing
   if(_building3dOn){ building3dLayer.clearLayers(); _building3dOn = false;
@@ -8748,8 +8754,9 @@ async function open3DView(){
   try{
     const j = await api('/building_heights', {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
-        radius_m: Math.min(700, SITE_POINT_RADIUS_M)})});
+      body: JSON.stringify({lat: area.lat, lon: area.lon,
+        // extrusion is heavy, so this one stays capped tighter than the rest
+        radius_m: Math.min(900, area.radius_m)})});
     if(!j.buildings || !j.buildings.length){ toast('No buildings with height data here'); btn.disabled=false; btn.textContent=orig; return; }
     draw3DOnMap(j);
     _building3dOn = true;
@@ -8966,6 +8973,42 @@ let siteRoiState = null, siteRoiRectFirst = null;
 // The Region of Interest now defines the analysis area. This constant is only
 // the context circle used when a single POINT is picked instead of a region.
 const SITE_POINT_RADIUS_M = 500;
+function siteArea(){
+  // Resolve the working area to {lat, lon, radius_m, source}, from whichever
+  // of the three selection methods is active.
+  if(siteState.lat != null){
+    return {lat: siteState.lat, lon: siteState.lon,
+            radius_m: SITE_POINT_RADIUS_M, source: 'picked point'};
+  }
+  let b = null, src = null;
+  try{
+    if(typeof regionSpec !== 'undefined' && regionSpec &&
+       typeof regionLayers !== 'undefined' && regionLayers.getLayers().length){
+      b = regionLayers.getBounds();
+      src = 'Region of Interest' +
+            ((typeof regionDesc !== 'undefined' && regionDesc)
+              ? ' \u00b7 ' + regionDesc : '');
+    }
+  }catch(e){ b = null; }
+  if(!b && siteRoiState){
+    try{ b = siteRoiLayer.getBounds(); src = 'region drawn in this tab'; }
+    catch(e){ b = null; }
+  }
+  if(!b || !b.isValid || !b.isValid()) return null;
+  const c = b.getCenter();
+  // radius that covers the bounds, from centre to corner
+  const R = 6371000, tr = Math.PI/180;
+  const dLat = (b.getNorth() - c.lat) * tr * R;
+  const dLon = (b.getEast() - c.lng) * tr * R * Math.cos(c.lat * tr);
+  let rad = Math.hypot(dLat, dLon);
+  // these endpoints work at neighbourhood scale; a very large region is
+  // sampled around its centre rather than refused
+  const capped = rad > 5000;
+  rad = Math.max(150, Math.min(5000, rad));
+  return {lat: c.lat, lon: c.lng, radius_m: Math.round(rad),
+          source: src, capped: capped};
+}
+
 function enableSiteRun(){
   const hasGlobal = (typeof regionSpec !== 'undefined' && !!regionSpec);
   const ready = (siteState.lat != null || siteRoiState != null || hasGlobal);
@@ -8987,12 +9030,25 @@ function enableSiteRun(){
         'shapefile \u2014 or pick a single point below.';
     }
   }
-  const bb = $('siteBuildingsBtn');
-  if(bb) bb.disabled = (siteState.lat == null);
-  const tb = $('site3dBtn');
-  if(tb) tb.disabled = (siteState.lat == null);
-  const sl = $('slLoad');
-  if(sl) sl.disabled = (siteState.lat == null);
+  // buildings, 3D view and site layers only need a centre and a radius,
+  // which siteArea() can derive from a region as well as from a point
+  const area = siteArea();
+  ['siteBuildingsBtn', 'site3dBtn', 'slLoad'].forEach(id => {
+    const el = $(id);
+    if(el) el.disabled = !area;
+  });
+  const note = $('slAreaNote');
+  if(note){
+    note.innerHTML = area
+      ? `Working area: <b>${Math.round(area.radius_m)} m</b> around ` +
+        `${area.lat.toFixed(5)}, ${area.lon.toFixed(5)}` +
+        (area.source ? ` <span class="per">(${area.source})</span>` : '') +
+        (area.capped
+          ? '<br><span class="per" style="color:#E9C46A">The region is larger ' +
+            'than these tools handle, so a 5 km area around its centre is ' +
+            'used. Draw a smaller region for full coverage.</span>' : '')
+      : '<span class="per">Select a Region of Interest or pick a point.</span>';
+  }
 }
 const _hasRoiUI = !!$('siteRoiRect');
 function clearSiteRegions(kind){
