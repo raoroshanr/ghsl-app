@@ -938,15 +938,7 @@ label.chk input{width:auto}
     <div id="tab-site" hidden>
     <section>
       <h2>Site Brief</h2>
-      <p class="hint">Pick a site and context radius. The brief leads with land-cover use in the region, then climate, humidity, rainfall, wind, solar and mean radiant temperature. (Air quality now lives in the Climate basket.)</p>
-      <label class="fld" for="siteRadius">Context radius</label>
-      <select id="siteRadius">
-        <option value="10">10 m</option>
-        <option value="50">50 m</option>
-        <option value="100">100 m</option>
-        <option value="250">250 m</option>
-        <option value="500" selected>500 m</option>
-      </select>
+      <p class="hint">The brief analyses whatever the <b>Region of Interest</b> currently holds &mdash; a drawn polygon, circles, an administrative boundary, or an uploaded shapefile. Pick a point instead if you want a small area around one location.</p>
       <div id="siteStatus" class="hint" style="min-height:24px">No site selected yet.</div>
       <button id="siteRun" class="primary" disabled>Generate site brief</button>
       <button id="siteBuildingsBtn" style="width:100%;margin-top:6px" disabled>Map building types</button>
@@ -1430,7 +1422,7 @@ label.chk input{width:auto}
   </div>
 </div>
 
-<footer><span style="opacity:.55">deepseego-v137</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
+<footer><span style="opacity:.55">deepseego-v138</span> &nbsp;<b>DeepSeeGo</b> · <b>Vinamravigyan Technologies Private Limited</b> · Data: JRC GHSL &amp; GSW, ESA WorldCover, Copernicus CGLS, CSP gHM &amp; ERGo, Google Open Buildings, NASA SRTM — via Google Earth Engine · Boundaries: FAO GAUL</footer>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -1597,7 +1589,7 @@ function heavyUrl(path){
   return (location.hostname.endsWith('.run.app') ? BACKEND_URL
                                                  : HEAVY_BACKEND_URL) + path;
 }
-const DSG_VERSION = "deepseego-v137";
+const DSG_VERSION = "deepseego-v138";
 
 /* =====================================================================
    AUTHENTICATION  (Firebase Google Sign-In)
@@ -2534,6 +2526,8 @@ function setRegion(spec, desc, fit){
   regionSpec = spec; regionDesc = desc;
   $('regionStatus').textContent = desc;
   if(typeof roiSync === 'function') roiSync();
+  // Site Brief may be waiting on this region
+  if(typeof enableSiteRun === 'function'){ try{ enableSiteRun(); }catch(e){} }
   $('runAnalysis').disabled = !spec;
   if(fit && regionLayers.getLayers().length){
     map.fitBounds(regionLayers.getBounds().pad(0.15));
@@ -3382,7 +3376,7 @@ map.on('click', ev => {
     drawSite();
     enableSiteRun();
     $('siteStatus').textContent = lat.toFixed(5) + ', ' + lng.toFixed(5) +
-      ' \u00b7 ' + $('siteRadius').value + ' m context';
+      ' \u00b7 ' + SITE_POINT_RADIUS_M + ' m context';
     return;
   }
   if(mapClickMode === 'advRect1'){
@@ -7581,7 +7575,8 @@ function showTab(tab){
   if(tab === 'thermal') thermalInit();
   if(tab === 'sunlight'){ sunlightInit(); solInit(); }
   if(tab === 'noise') noiseInit();
-  if(tab === 'site'){ siteInit(); slInit(); }
+  if(tab === 'site'){ siteInit(); slInit();
+    if(typeof enableSiteRun === 'function'){ try{ enableSiteRun(); }catch(e){} } }
   if(tab === 'weather') wgInit();
   if(tab === 'slope') slopeInit();
 }
@@ -8719,7 +8714,7 @@ if($('siteBuildingsBtn')) $('siteBuildingsBtn').addEventListener('click', async 
   $('drawer').classList.add('open');
   if(typeof paneMode === 'function') paneMode('site');
   $('siteWrap').hidden = false;
-  await loadBuildings(siteState.lat, siteState.lon, +$('siteRadius').value);
+  await loadBuildings(siteState.lat, siteState.lon, SITE_POINT_RADIUS_M);
   Progress.done();
   btn.disabled = false; btn.textContent = 'Map building types';
 });
@@ -8754,7 +8749,7 @@ async function open3DView(){
     const j = await api('/building_heights', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({lat: siteState.lat, lon: siteState.lon,
-        radius_m: Math.min(700, +$('siteRadius').value || 400)})});
+        radius_m: Math.min(700, SITE_POINT_RADIUS_M)})});
     if(!j.buildings || !j.buildings.length){ toast('No buildings with height data here'); btn.disabled=false; btn.textContent=orig; return; }
     draw3DOnMap(j);
     _building3dOn = true;
@@ -8864,7 +8859,7 @@ function drawSite(){
   if(siteState.lat == null) return;
   // scan-radius ring
   L.circle([siteState.lat, siteState.lon],
-    {radius: +$('siteRadius').value, color: '#E4572E', weight: 2,
+    {radius: SITE_POINT_RADIUS_M, color: '#E4572E', weight: 2,
      dashArray: '5 5', fillColor: '#E4572E', fillOpacity: 0.05}).addTo(siteLayer);
   // big crosshair with lat/lon label (consistent with the other tabs)
   addCrosshair(siteLayer, siteState.lat, siteState.lon, '#E4572E');
@@ -8873,12 +8868,6 @@ function drawSite(){
 if($('sitePick')) $('sitePick').addEventListener('click', () => {
   mapClickMode = 'sitePick';
   $('siteStatus').textContent = 'Tap the building or plot on the map\u2026';
-});
-$('siteRadius').addEventListener('change', () => {
-  drawSite();
-  if(siteState.lat != null)
-    $('siteStatus').textContent = siteState.lat.toFixed(5) + ', ' +
-      siteState.lon.toFixed(5) + ' \u00b7 ' + $('siteRadius').value + ' m context';
 });
 
 function paneMode(mode){
@@ -8974,9 +8963,30 @@ function noiseRow(name, dist, band, note){
 
 const siteRoiLayer = L.featureGroup().addTo(map);
 let siteRoiState = null, siteRoiRectFirst = null;
+// The Region of Interest now defines the analysis area. This constant is only
+// the context circle used when a single POINT is picked instead of a region.
+const SITE_POINT_RADIUS_M = 500;
 function enableSiteRun(){
-  const noPoint = (siteState.lat == null && siteRoiState == null);
-  $('siteRun').disabled = noPoint;
+  const hasGlobal = (typeof regionSpec !== 'undefined' && !!regionSpec);
+  const ready = (siteState.lat != null || siteRoiState != null || hasGlobal);
+  $('siteRun').disabled = !ready;
+  // say WHICH area will be analysed, so the source is never ambiguous
+  const st = $('siteStatus');
+  if(st && siteState.lat == null){
+    if(hasGlobal){
+      st.innerHTML = 'Using the <b>Region of Interest</b>' +
+        (typeof regionDesc !== 'undefined' && regionDesc
+          ? ' \u00b7 ' + regionDesc : '') +
+        '<br><span class="per">The whole region is analysed. Pick a point ' +
+        'instead for a 500 m context circle.</span>';
+    } else if(siteRoiState){
+      st.textContent = 'Using the region drawn in this tab.';
+    } else {
+      st.innerHTML = 'No area selected. Use the <b>Region of Interest</b> ' +
+        'button on the map \u2014 draw, choose a boundary, or upload a ' +
+        'shapefile \u2014 or pick a single point below.';
+    }
+  }
   const bb = $('siteBuildingsBtn');
   if(bb) bb.disabled = (siteState.lat == null);
   const tb = $('site3dBtn');
@@ -9011,12 +9021,31 @@ if(_hasRoiUI) $('siteRoiClear').addEventListener('click', () => {
 });
 
 $('siteRun').addEventListener('click', async () => {
-  if(siteState.lat == null && siteRoiState == null) return;
-  // ROI-only: derive a representative lat/lon for the climate cell
+  // Analysis area, in order of preference:
+  //   1. the global Region of Interest (drawn, admin, circles, SHAPEFILE)
+  //   2. a region drawn inside the Site Brief tab
+  //   3. a single picked point, with a fixed context circle
+  const activeRegion = (typeof regionSpec !== 'undefined' && regionSpec)
+    ? regionSpec : siteRoiState;
+  if(siteState.lat == null && !activeRegion) return;
+
+  // a representative lat/lon is still needed for the climate cell
   let plat = siteState.lat, plon = siteState.lon;
-  if(plat == null && siteRoiState){
-    const b = siteRoiLayer.getBounds();
-    plat = b.getCenter().lat; plon = b.getCenter().lng;
+  if(plat == null && activeRegion){
+    let b = null;
+    try{
+      if(typeof regionLayers !== 'undefined' && regionLayers.getLayers().length)
+        b = regionLayers.getBounds();
+    }catch(e){ b = null; }
+    if(!b){
+      try{ b = siteRoiLayer.getBounds(); }catch(e){ b = null; }
+    }
+    if(b && b.isValid && b.isValid()){
+      plat = b.getCenter().lat; plon = b.getCenter().lng;
+    } else {
+      toast('Could not determine the centre of the region \u2014 pick a point instead');
+      return;
+    }
   }
   const btn = $('siteRun');
   btn.disabled = true; btn.textContent = 'Generating\u2026';
@@ -9029,8 +9058,8 @@ $('siteRun').addEventListener('click', async () => {
   Progress.start('Site brief', 'Reading satellite and climate data\u2026', 2);
   const opts = {method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({lat: plat, lon: plon,
-                                      radius_m: +$('siteRadius').value,
-                                      region: siteRoiState,
+                                      radius_m: SITE_POINT_RADIUS_M,
+                                      region: activeRegion,
                                       skip_osm: true})};   // phase 2 fetches this
   try{
     const j = await api('/site_brief', opts, true);   // direct: no 60s proxy cap
